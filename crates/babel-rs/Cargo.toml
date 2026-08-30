@@ -1,0 +1,28 @@
+[package]
+name = "babel-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Linux Babel daemon with a versioned route-export boundary"
+
+[[bin]]
+name = "babel-rs"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+babel-proto.workspace = true
+babel-router.workspace = true
+clap.workspace = true
+futures.workspace = true
+ipnet.workspace = true
+netlink-packet-route.workspace = true
+rtnetlink.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
