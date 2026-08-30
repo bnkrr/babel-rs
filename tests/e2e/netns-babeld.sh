@@ -23,8 +23,14 @@ cleanup() {
     ip -n "${ns_c}" -6 route show table all >&2 2>/dev/null || true
     ip -n "${ns_c}" route show table all >&2 2>/dev/null || true
   fi
-  test -z "${pid_rs}" || kill "${pid_rs}" 2>/dev/null || true
-  test -z "${pid_c}" || kill "${pid_c}" 2>/dev/null || true
+  if test -n "${pid_rs}"; then
+    kill "${pid_rs}" 2>/dev/null || true
+    wait "${pid_rs}" 2>/dev/null || true
+  fi
+  if test -n "${pid_c}"; then
+    kill "${pid_c}" 2>/dev/null || true
+    wait "${pid_c}" 2>/dev/null || true
+  fi
   ip netns del "${ns_rs}" 2>/dev/null || true
   ip netns del "${ns_c}" 2>/dev/null || true
   rm -rf -- "${runtime}"
