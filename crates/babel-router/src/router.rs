@@ -379,14 +379,18 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 // Babel updates outlive an abruptly disappearing speaker until
                 // their advertised interval expires.  Retract our origins while
                 // the interface sockets are still open so neighbours can remove
-                // them immediately during an orderly shutdown/restart.
+                // them immediately during an orderly shutdown/restart.  Repeat
+                // the datagrams because UDP provides no delivery acknowledgement
+                // and the process cannot rely on a later periodic update.
+                let mut retractions = Vec::new();
                 for key in &origin_keys {
-                    apply_actions(
-                        &sockets,
-                        &exporter,
-                        &sequence_store,
-                        engine.handle(Event::Withdraw { key: *key, now_ms: now() }),
-                    ).await?;
+                    let actions = engine.handle(Event::Withdraw { key: *key, now_ms: now() });
+                    retractions.extend(actions.iter().filter(|action| matches!(action, Action::Send { .. })).cloned());
+                    apply_actions(&sockets, &exporter, &sequence_store, actions).await?;
+                }
+                for _ in 0..2 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    apply_actions(&sockets, &exporter, &sequence_store, retractions.clone()).await?;
                 }
                 let empty = RouteSnapshot { generation: status.route_generation.wrapping_add(1), routes: vec![] };
                 if let Err(error) = exporter.shutdown(empty.clone()).await { warn!(%error, "final route export cleanup failed"); }
