@@ -1,0 +1,35 @@
+name: e2e
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-netns:
+    name: Linux netns and interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install routing daemons
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes babeld bird2 iproute2
+      - name: Build daemon
+        run: cargo build --locked --release --package babel-rs
+      - name: Test babeld interoperability
+        run: sudo tests/e2e/netns-babeld.sh "$PWD/target/release/babel-rs"
+      - name: Test BIRD interoperability
+        run: sudo tests/e2e/netns-bird.sh "$PWD/target/release/babel-rs"
+      - name: Test three-node convergence
+        run: sudo tests/e2e/netns-three-node.sh "$PWD/target/release/babel-rs"
+      - name: Test lifecycle and FIB reconciliation
+        run: sudo tests/e2e/netns-lifecycle.sh "$PWD/target/release/babel-rs"
