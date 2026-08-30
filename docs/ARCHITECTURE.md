@@ -28,8 +28,8 @@ BabelRouterBuilder -> BabelRouter -> RouterHandle
                             +-> SequenceStore
 ```
 
-`babel-rs` adds strict TOML, signals, versioned state, an interface supervisor,
-and a Linux netlink exporter. Interface patterns are desired state. Netlink
+`babel-rs` adds strict TOML, signals, versioned state, a versioned Unix control
+socket, an interface supervisor, and a Linux netlink exporter. Interface patterns are desired state. Netlink
 events plus periodic snapshots reconcile them against name, ifindex,
 administrative state and IPv6 link-local addresses. Removing or replacing an
 interface sends `InterfaceDown` to the engine before a new socket is attached.
@@ -78,3 +78,9 @@ local origins while interface sockets remain open, then exports an empty
 snapshot and removes owned policy rules through the exporter's distinct
 shutdown hook. Abrupt process death is recovered by neighbour expiry and by the
 initial empty reconciliation on the next local start.
+
+Long-running protocol, interface, exporter, and control tasks are a single
+failure domain: an unexpected return or panic exits nonzero rather than trying
+to reconstruct a possibly inconsistent subset in process. Transient external
+I/O failures stay inside their task and retry. Sequence-state persistence is a
+protocol invariant and failure is fatal.

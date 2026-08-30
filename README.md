@@ -54,8 +54,15 @@ propagation, link failure and recovery.
 ## Daemon
 
 ```sh
-sudo babel-rs --config /etc/babel-rs.toml
+sudo babel-rs run --config /etc/babel-rs.toml
+babel-rs status --socket /run/babel-rs/babel-rs.ctl
 ```
+
+Use `babel-rs check --config /etc/babel-rs.toml` for a side-effect-free
+configuration check. `babel-rs --config ...` remains accepted for v0.1
+compatibility, while `run` enables the default control socket. See
+[CONTROL.md](docs/CONTROL.md) for the bounded NDJSON API and all query,
+transactional reload, and graceful shutdown commands.
 
 Start from [examples/babel-rs.toml](examples/babel-rs.toml). Interface entries
 are desired-state patterns: an entry without metacharacters is exact, while
@@ -77,6 +84,10 @@ configuration unchanged. Router-ID and `state_file` identify persisted
 protocol state and cannot change during reload. SIGINT and SIGTERM retract
 local origins, then reconcile an empty snapshot. The process needs permission
 to bind sockets to interfaces and modify routes.
+
+A hardened standalone systemd unit is provided at
+[`packaging/systemd/babel-rs.service`](packaging/systemd/babel-rs.service). Do
+not enable that unit when an external supervisor owns the same daemon instance.
 
 ## Embedding
 
