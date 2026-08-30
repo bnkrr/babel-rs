@@ -1,0 +1,26 @@
+[Unit]
+Description=Babel routing daemon (babel-rs)
+Documentation=https://github.com/bnkrr/babel-rs
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/babel-rs run --config /etc/babel-rs.toml --control-socket /run/babel-rs/babel-rs.ctl
+ExecReload=/usr/bin/babel-rs reload --socket /run/babel-rs/babel-rs.ctl
+ExecStop=/usr/bin/babel-rs shutdown --socket /run/babel-rs/babel-rs.ctl
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=babel-rs
+RuntimeDirectoryMode=0700
+StateDirectory=babel-rs
+StateDirectoryMode=0700
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

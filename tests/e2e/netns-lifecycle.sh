@@ -10,6 +10,7 @@ suffix=$$
 ns_rs="vbl-rs-${suffix}"
 ns_peer="vbl-p-${suffix}"
 runtime=$(mktemp -d /tmp/babel-rs-lifecycle.XXXXXXXX)
+control_socket="${runtime}/babel-rs.ctl"
 pid_rs=
 pid_peer=
 cleanup() {
@@ -90,10 +91,13 @@ redistribute local deny
 EOF
 
 # The desired glob is valid even when it initially matches no interface.
-ip netns exec "${ns_rs}" env RUST_LOG=debug "${daemon}" --config "${runtime}/rs.toml" >"${runtime}/rs.log" 2>&1 &
+ip netns exec "${ns_rs}" env RUST_LOG=debug "${daemon}" run --config "${runtime}/rs.toml" --control-socket "${control_socket}" >"${runtime}/rs.log" 2>&1 &
 pid_rs=$!
-sleep 3
-kill -0 "${pid_rs}"
+attempt=0
+until ip netns exec "${ns_rs}" "${daemon}" status --socket "${control_socket}" >"${runtime}/status.json" 2>/dev/null; do
+  attempt=$((attempt + 1)); test "${attempt}" -lt 30 || { echo "control socket did not become ready" >&2; exit 1; }; sleep 1
+done
+grep -q '"ready": true' "${runtime}/status.json"
 
 create_link
 ip -n "${ns_peer}" -6 route replace blackhole "${prefix_initial}" proto 99
@@ -103,7 +107,8 @@ wait_route "${ns_rs}" 23201 "${prefix_initial}" yes 35
 # A complete valid candidate adds an origin without restarting the daemon.
 write_config "${runtime}/rs.toml.new" "${prefix_reload}" 23202
 mv "${runtime}/rs.toml.new" "${runtime}/rs.toml"
-kill -HUP "${pid_rs}"
+ip netns exec "${ns_rs}" "${daemon}" reload --socket "${control_socket}" >"${runtime}/reload.json"
+grep -q 'active_config_sha256' "${runtime}/reload.json"
 wait_route "${ns_peer}" 201 "${prefix_reload}" yes 20
 wait_route "${ns_rs}" 23202 "${prefix_initial}" yes 8
 wait_route "${ns_rs}" 23201 "${prefix_initial}" no 8
@@ -117,6 +122,7 @@ sleep 2
 kill -0 "${pid_rs}"
 wait_route "${ns_peer}" 201 "${prefix_reload}" yes 5
 grep -q 'configuration reload rejected' "${runtime}/rs.log"
+ip netns exec "${ns_rs}" "${daemon}" status --socket "${control_socket}" | grep -q 'last_reload_error'
 cp "${runtime}/rs.toml.valid" "${runtime}/rs.toml.new"
 mv "${runtime}/rs.toml.new" "${runtime}/rs.toml"
 
@@ -133,8 +139,17 @@ ip -n "${ns_peer}" -6 route replace blackhole "${prefix_rebound}" proto 99
 start_peer
 wait_route "${ns_rs}" 23202 "${prefix_rebound}" yes 35
 
+ip netns exec "${ns_rs}" "${daemon}" interfaces --socket "${control_socket}" | grep -q 'babel0'
+ip netns exec "${ns_rs}" "${daemon}" neighbors --socket "${control_socket}" | grep -q 'fe80::2'
+ip netns exec "${ns_rs}" "${daemon}" routes --socket "${control_socket}" --interface babel0 | grep -q "${prefix_initial%/64}"
+
 # The periodic full-snapshot reconciler repairs out-of-band FIB deletion.
 ip -n "${ns_rs}" -6 route del table 23202 "${prefix_initial}"
 wait_route "${ns_rs}" 23202 "${prefix_initial}" yes 8
 
-echo "babel-rs interface matcher/rebind/reload/FIB reconciliation E2E: PASS"
+# The command acknowledges before the shared graceful shutdown path begins.
+ip netns exec "${ns_rs}" "${daemon}" shutdown --socket "${control_socket}" | grep -q 'accepted'
+wait "${pid_rs}"
+pid_rs=
+
+echo "babel-rs control/interface/rebind/reload/FIB reconciliation E2E: PASS"

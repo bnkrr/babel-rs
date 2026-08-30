@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use babel_proto::SelectedRoute;
@@ -36,6 +36,14 @@ struct ExportState {
     snapshot: RouteSnapshot,
     retain_rules: bool,
     retired: Vec<Export>,
+    last_success: Option<Instant>,
+    last_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExportHealth {
+    pub last_success_age: Option<Duration>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -84,6 +92,8 @@ impl LinuxExporter {
                 snapshot: RouteSnapshot::default(),
                 retain_rules: true,
                 retired: Vec::new(),
+                last_success: None,
+                last_error: None,
             })),
             apply_lock: Arc::new(Mutex::new(())),
         })
@@ -109,7 +119,28 @@ impl LinuxExporter {
         self.reconcile_locked().await
     }
 
+    pub async fn health(&self) -> ExportHealth {
+        let state = self.state.read().await;
+        ExportHealth {
+            last_success_age: state.last_success.map(|value| value.elapsed()),
+            last_error: state.last_error.clone(),
+        }
+    }
+
     async fn reconcile_locked(&self) -> Result<(), LinuxError> {
+        let result = self.reconcile_attempt().await;
+        let mut state = self.state.write().await;
+        match &result {
+            Ok(()) => {
+                state.last_success = Some(Instant::now());
+                state.last_error = None;
+            }
+            Err(error) => state.last_error = Some(error.to_string()),
+        }
+        result
+    }
+
+    async fn reconcile_attempt(&self) -> Result<(), LinuxError> {
         let state = self.state.read().await.clone();
         self.apply_locked(&state.export, state.snapshot, state.retain_rules)
             .await?;

@@ -91,7 +91,11 @@ pub enum ConfigError {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let value: Self = toml::from_str(&fs::read_to_string(path)?)?;
+        Self::parse(&fs::read_to_string(path)?)
+    }
+
+    pub fn parse(contents: &str) -> Result<Self, ConfigError> {
+        let value: Self = toml::from_str(contents)?;
         value.validate()?;
         Ok(value)
     }

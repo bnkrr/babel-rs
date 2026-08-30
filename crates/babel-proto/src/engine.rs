@@ -7,6 +7,17 @@ use crate::wire::{Packet, Tlv, Update};
 
 pub const BABEL_MULTICAST_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 6));
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NeighborStatus {
+    pub interface: String,
+    pub address: IpAddr,
+    pub hello_received: u16,
+    pub hello_expected: u16,
+    pub remote_rxcost: u16,
+    pub cost: u16,
+    pub last_hello_age_ms: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct EngineConfig<M> {
     pub router_id: RouterId,
@@ -214,6 +225,30 @@ impl<M: LinkMetric> Engine<M> {
         self.neighbours.len()
     }
 
+    pub fn neighbour_status(&self, now_ms: u64) -> Vec<NeighborStatus> {
+        let mut result: Vec<_> = self
+            .neighbours
+            .iter()
+            .map(|(key, neighbour)| NeighborStatus {
+                interface: key.interface.clone(),
+                address: key.address,
+                hello_received: neighbour.hello_received,
+                hello_expected: neighbour.hello_expected,
+                remote_rxcost: neighbour.remote_rxcost,
+                cost: self.config.metric.cost(LinkSample {
+                    hello_received: neighbour.hello_received,
+                    hello_expected: neighbour.hello_expected,
+                    remote_rxcost: neighbour.remote_rxcost,
+                }),
+                last_hello_age_ms: now_ms.saturating_sub(neighbour.last_hello_ms),
+            })
+            .collect();
+        result.sort_by(|left, right| {
+            (&left.interface, left.address).cmp(&(&right.interface, right.address))
+        });
+        result
+    }
+
     fn receive(
         &mut self,
         interface: String,
@@ -358,7 +393,53 @@ impl<M: LinkMetric> Engine<M> {
         }
         let candidate_key = (key, router_id, neighbour_key.clone());
         if update.metric == INFINITY {
+            let newer_than_feasible = self
+                .feasible
+                .get(&(key, router_id))
+                .is_none_or(|distance| seqno_gt(update.seqno, distance.seqno));
+            if newer_than_feasible {
+                self.feasible.insert(
+                    (key, router_id),
+                    Distance {
+                        seqno: update.seqno,
+                        metric: INFINITY,
+                    },
+                );
+                self.candidates
+                    .retain(|(candidate_key, candidate_router, _), route| {
+                        *candidate_key != key
+                            || *candidate_router != router_id
+                            || !seqno_gt(update.seqno, route.seqno)
+                    });
+            }
             self.candidates.remove(&candidate_key);
+            self.pending_seqno.remove(&(key, router_id));
+            if newer_than_feasible {
+                return self
+                    .interfaces
+                    .keys()
+                    .filter(|interface| *interface != &neighbour_key.interface)
+                    .map(|interface| Action::Send {
+                        interface: interface.clone(),
+                        destination: BABEL_MULTICAST_V6,
+                        packet: Packet {
+                            tlvs: vec![
+                                Tlv::RouterId(router_id),
+                                Tlv::Update(Update {
+                                    key: Some(key),
+                                    router_id: Some(router_id),
+                                    next_hop: None,
+                                    interval_cs: self.config.update_interval_cs,
+                                    seqno: update.seqno,
+                                    metric: INFINITY,
+                                    v4_via_v6: key.destination.addr().is_ipv4(),
+                                    sub_tlvs: vec![],
+                                }),
+                            ],
+                        },
+                    })
+                    .collect();
+            }
             return Vec::new();
         }
         let Some(next_hop) = update.next_hop else {
@@ -930,6 +1011,77 @@ mod tests {
             action,
             Action::Send { interface, packet, .. }
                 if interface == "wg1" && packet.tlvs.iter().any(|tlv| matches!(tlv, Tlv::Update(update) if update.metric == INFINITY))
+        )));
+    }
+
+    #[test]
+    fn newer_retraction_removes_stale_alternate_candidates() {
+        let mut engine = Engine::new(EngineConfig::<FixedMetric>::recommended(id(1)));
+        for (interface, source, metric) in [("wg0", "fe80::2", 0), ("wg1", "fe80::3", 10)] {
+            engine.handle(Event::InterfaceUp {
+                interface: interface.into(),
+                now_ms: 0,
+            });
+            let source = source.parse().unwrap();
+            engine.handle(Event::PacketReceived {
+                interface: interface.into(),
+                source,
+                now_ms: 1,
+                packet: Packet {
+                    tlvs: vec![
+                        Tlv::Hello {
+                            unicast: false,
+                            seqno: 1,
+                            interval_cs: 400,
+                            sub_tlvs: vec![],
+                        },
+                        Tlv::Ihu {
+                            address: None,
+                            rxcost: 96,
+                            interval_cs: 1200,
+                            sub_tlvs: vec![],
+                        },
+                        Tlv::Update(Update {
+                            key: Some(key()),
+                            router_id: Some(id(2)),
+                            next_hop: Some(source),
+                            interval_cs: 1600,
+                            seqno: 7,
+                            metric,
+                            v4_via_v6: false,
+                            sub_tlvs: vec![],
+                        }),
+                    ],
+                },
+            });
+        }
+        assert_eq!(engine.selected_routes().len(), 1);
+        let actions = engine.handle(Event::PacketReceived {
+            interface: "wg0".into(),
+            source: "fe80::2".parse().unwrap(),
+            now_ms: 2,
+            packet: Packet {
+                tlvs: vec![Tlv::Update(Update {
+                    key: Some(key()),
+                    router_id: Some(id(2)),
+                    next_hop: Some("fe80::2".parse().unwrap()),
+                    interval_cs: 1600,
+                    seqno: 8,
+                    metric: INFINITY,
+                    v4_via_v6: false,
+                    sub_tlvs: vec![],
+                })],
+            },
+        });
+        assert!(engine.selected_routes().is_empty());
+        assert!(actions.iter().any(
+            |action| matches!(action, Action::RoutesChanged { routes, .. } if routes.is_empty())
+        ));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Send { interface, packet, .. }
+                if interface == "wg1"
+                    && packet.tlvs.iter().any(|tlv| matches!(tlv, Tlv::Update(update) if update.metric == INFINITY && update.seqno == 8))
         )));
     }
 

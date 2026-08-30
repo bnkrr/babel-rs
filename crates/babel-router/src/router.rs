@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use babel_proto::{
-    Action, DecodeContext, Engine, EngineConfig, Event, FixedMetric, LinkMetric, RouteKey,
-    RouterId, decode_packet, encode_packet,
+    Action, DecodeContext, Engine, EngineConfig, Event, FixedMetric, LinkMetric, NeighborStatus,
+    RouteKey, RouterId, decode_packet, encode_packet,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -32,12 +32,23 @@ pub enum RouterError {
     Stopped,
     #[error("router task failed: {0}")]
     Task(String),
+    #[error("persist Babel sequence number: {0}")]
+    SequenceStore(String),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RouterInterfaceStatus {
+    pub name: String,
+    pub index: u32,
+    pub local_addresses: Vec<Ipv6Addr>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RouterStatus {
     pub interfaces: Vec<String>,
+    pub interface_details: Vec<RouterInterfaceStatus>,
     pub neighbours: usize,
+    pub neighbour_details: Vec<NeighborStatus>,
     pub route_generation: u64,
     pub selected_routes: usize,
 }
@@ -339,7 +350,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 now_ms: now(),
             }),
         )
-        .await;
+        .await?;
     }
     let mut origin_keys = std::collections::HashSet::new();
     for (key, metric) in origins {
@@ -354,11 +365,12 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 now_ms: now(),
             }),
         )
-        .await;
+        .await?;
     }
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     let mut status = RouterStatus {
         interfaces,
+        interface_details: interface_status(&sockets),
         ..RouterStatus::default()
     };
     loop {
@@ -374,7 +386,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                         &exporter,
                         &sequence_store,
                         engine.handle(Event::Withdraw { key: *key, now_ms: now() }),
-                    ).await;
+                    ).await?;
                 }
                 let empty = RouteSnapshot { generation: status.route_generation.wrapping_add(1), routes: vec![] };
                 if let Err(error) = exporter.shutdown(empty.clone()).await { warn!(%error, "final route export cleanup failed"); }
@@ -382,8 +394,9 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 return Ok(());
             },
             _ = ticker.tick() => {
-                apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Tick { now_ms: now() })).await;
+                apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Tick { now_ms: now() })).await?;
                 status.neighbours = engine.neighbour_count();
+                status.neighbour_details = engine.neighbour_status(now());
             },
             Some(item) = received.recv() => match item {
                 Received::Packet { interface, index, source, bytes } => {
@@ -395,8 +408,9 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     }
                     match decode_packet(&bytes, DecodeContext { source }) {
                         Ok(packet) => {
-                            apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms: now() })).await;
+                            apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms: now() })).await?;
                             status.neighbours = engine.neighbour_count();
+                            status.neighbour_details = engine.neighbour_status(now());
                         },
                         Err(error) => debug!(%error, "ignored invalid Babel packet"),
                     }
@@ -409,20 +423,22 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                         if let Some(stop) = interface_stops.remove(&interface) {
                             let _ = stop.send(true);
                         }
-                        apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await;
+                        apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await?;
                         status.interfaces = sorted_interface_names(&sockets);
+                        status.interface_details = interface_status(&sockets);
                         status.neighbours = engine.neighbour_count();
+                        status.neighbour_details = engine.neighbour_status(now());
                     }
                 }
             },
             Some(command) = commands.recv() => match command {
                 Command::Originate(key, metric) => {
                     origin_keys.insert(key);
-                    apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Originate { key, metric, now_ms: now() })).await
+                    apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Originate { key, metric, now_ms: now() })).await?
                 },
                 Command::Withdraw(key) => {
                     origin_keys.remove(&key);
-                    apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() })).await
+                    apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() })).await?
                 },
                 Command::AddInterface(interface, reply) => {
                     let result = if sockets.contains_key(&interface) {
@@ -435,8 +451,9 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                                 spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx);
                                 sockets.insert(interface.clone(), socket);
                                 interface_stops.insert(interface.clone(), stop);
-                                apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceUp { interface, now_ms: now() })).await;
+                                apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceUp { interface, now_ms: now() })).await?;
                                 status.interfaces = sorted_interface_names(&sockets);
+                                status.interface_details = interface_status(&sockets);
                                 Ok(())
                             }
                             Err(source) => Err(RouterError::OpenInterface { interface, source }),
@@ -449,15 +466,20 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                         if let Some(stop) = interface_stops.remove(&interface) {
                             let _ = stop.send(true);
                         }
-                        apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await;
+                        apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await?;
                         status.interfaces = sorted_interface_names(&sockets);
+                        status.interface_details = interface_status(&sockets);
                         Ok(())
                     } else {
                         Err(RouterError::InterfaceNotFound(interface))
                     };
                     let _ = reply.send(result);
                 }
-                Command::Status(reply) => { let _ = reply.send(status.clone()); }
+                Command::Status(reply) => {
+                    status.neighbours = engine.neighbour_count();
+                    status.neighbour_details = engine.neighbour_status(now());
+                    let _ = reply.send(status.clone());
+                }
             }
         }
     }
@@ -469,12 +491,25 @@ fn sorted_interface_names(sockets: &HashMap<String, Arc<InterfaceSocket>>) -> Ve
     names
 }
 
+fn interface_status(sockets: &HashMap<String, Arc<InterfaceSocket>>) -> Vec<RouterInterfaceStatus> {
+    let mut result: Vec<_> = sockets
+        .values()
+        .map(|socket| RouterInterfaceStatus {
+            name: socket.name.clone(),
+            index: socket.index,
+            local_addresses: socket.local_addresses.clone(),
+        })
+        .collect();
+    result.sort_by(|left, right| left.name.cmp(&right.name));
+    result
+}
+
 async fn apply_actions(
     sockets: &HashMap<String, Arc<InterfaceSocket>>,
     exporter: &Arc<dyn RouteExporter>,
     sequence_store: &Arc<dyn SequenceStore>,
     actions: Vec<Action>,
-) {
+) -> Result<(), RouterError> {
     let mut ignored = RouterStatus::default();
     let (updates, _) = watch::channel(RouteSnapshot::default());
     apply_actions_with_status(
@@ -485,7 +520,7 @@ async fn apply_actions(
         &mut ignored,
         actions,
     )
-    .await;
+    .await
 }
 
 async fn apply_actions_with_status(
@@ -495,7 +530,7 @@ async fn apply_actions_with_status(
     route_updates: &watch::Sender<RouteSnapshot>,
     status: &mut RouterStatus,
     actions: Vec<Action>,
-) {
+) -> Result<(), RouterError> {
     for action in actions {
         match action {
             Action::Send {
@@ -530,10 +565,11 @@ async fn apply_actions_with_status(
                 }
             }
             Action::SequenceNumberChanged(value) => {
-                if let Err(error) = sequence_store.persist(value) {
-                    warn!(%error, value, "sequence-number persistence failed");
-                }
+                sequence_store
+                    .persist(value)
+                    .map_err(|error| RouterError::SequenceStore(error.to_string()))?;
             }
         }
     }
+    Ok(())
 }
