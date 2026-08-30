@@ -26,10 +26,10 @@ jobs:
       - name: Build daemon
         run: cargo build --locked --release --package babel-rs
       - name: Test babeld interoperability
-        run: sudo tests/e2e/netns-babeld.sh "$PWD/target/release/babel-rs"
+        run: sudo sh tests/e2e/netns-babeld.sh "$PWD/target/release/babel-rs"
       - name: Test BIRD interoperability
-        run: sudo tests/e2e/netns-bird.sh "$PWD/target/release/babel-rs"
+        run: sudo sh tests/e2e/netns-bird.sh "$PWD/target/release/babel-rs"
       - name: Test three-node convergence
-        run: sudo tests/e2e/netns-three-node.sh "$PWD/target/release/babel-rs"
+        run: sudo sh tests/e2e/netns-three-node.sh "$PWD/target/release/babel-rs"
       - name: Test lifecycle and FIB reconciliation
-        run: sudo tests/e2e/netns-lifecycle.sh "$PWD/target/release/babel-rs"
+        run: sudo sh tests/e2e/netns-lifecycle.sh "$PWD/target/release/babel-rs"

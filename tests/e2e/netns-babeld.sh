@@ -76,6 +76,7 @@ EOF
 
 cat >"${runtime}/babeld.conf" <<EOF
 ipv6-subtrees true
+kernel-check-interval 1
 redistribute proto 99 allow
 redistribute local deny
 EOF
