@@ -76,7 +76,6 @@ EOF
 
 cat >"${runtime}/babeld.conf" <<EOF
 ipv6-subtrees true
-kernel-check-interval 1
 redistribute proto 99 allow
 redistribute local deny
 EOF
@@ -108,6 +107,7 @@ done
 # A redistributed route must retract, and a later announcement must be acquired
 # again with the same source/route state machinery.
 ip -n "${ns_c}" -6 route del blackhole 2001:db8:200::/64 proto 99
+kill -USR2 "${pid_c}"
 attempt=0
 while ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null | grep -q .; do
   attempt=$((attempt + 1))
@@ -115,6 +115,7 @@ while ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 2
   sleep 1
 done
 ip -n "${ns_c}" -6 route add blackhole 2001:db8:200::/64 proto 99
+kill -USR2 "${pid_c}"
 attempt=0
 while ! ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null | grep -q .; do
   attempt=$((attempt + 1))
