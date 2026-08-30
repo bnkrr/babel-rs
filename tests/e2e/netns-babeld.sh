@@ -82,8 +82,13 @@ EOF
 
 ip netns exec "${ns_rs}" env RUST_LOG=debug "${daemon}" --config "${runtime}/rs.toml" >"${runtime}/rs.log" 2>&1 &
 pid_rs=$!
-ip netns exec "${ns_c}" babeld -d 1 -L "${runtime}/babeld.log" -I "${runtime}/babeld.pid" -S "${runtime}/babeld.state" -t 201 -c "${runtime}/babeld.conf" babel0 &
-pid_c=$!
+start_babeld() {
+  ip netns exec "${ns_c}" babeld -d 1 -L "${runtime}/babeld.log" \
+    -I "${runtime}/babeld.pid" -S "${runtime}/babeld.state" \
+    -t 201 -c "${runtime}/babeld.conf" babel0 &
+  pid_c=$!
+}
+start_babeld
 
 attempt=0
 while :; do
@@ -104,18 +109,25 @@ while :; do
   sleep 1
 done
 
-# A redistributed route must retract, and a later announcement must be acquired
-# again with the same source/route state machinery.
+# Restarting the peer forces all supported babeld versions to rescan the
+# kernel RIB.  A removed redistributed route must retract, and a later
+# announcement must be acquired again with the same source/route machinery.
 ip -n "${ns_c}" -6 route del blackhole 2001:db8:200::/64 proto 99
-kill -USR2 "${pid_c}"
+kill -TERM "${pid_c}"
+wait "${pid_c}" || true
+pid_c=
+start_babeld
 attempt=0
 while ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null | grep -q .; do
   attempt=$((attempt + 1))
   test "${attempt}" -lt 45 || { echo "babeld retraction did not converge" >&2; exit 1; }
   sleep 1
 done
+kill -TERM "${pid_c}"
+wait "${pid_c}" || true
+pid_c=
 ip -n "${ns_c}" -6 route add blackhole 2001:db8:200::/64 proto 99
-kill -USR2 "${pid_c}"
+start_babeld
 attempt=0
 while ! ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null | grep -q .; do
   attempt=$((attempt + 1))
