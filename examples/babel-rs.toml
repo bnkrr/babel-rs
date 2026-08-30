@@ -1,0 +1,41 @@
+# Optional. If absent, generated once and persisted in state_file.
+router_id = "01:02:03:04:05:06:07:08"
+
+# Optional. Parent directories are created; updates use fsync + atomic rename.
+state_file = "/var/lib/babel-rs/state.toml"
+
+# Required, non-empty desired-state patterns. Exact names, `*`, and `?` are
+# supported. Zero current matches is valid; matching interfaces are attached
+# when they are up and have an IPv6 link-local address.
+interfaces = ["vl-*", "backbone0"]
+
+# Optional, repeatable. source omitted means the family-wide default source.
+[[origins]]
+destination = "2001:db8:100::/64"
+
+[[origins]]
+destination = "198.51.100.0/24"
+source = "10.0.0.0/8"
+metric = 0
+
+# Required Linux export policy.
+[export]
+protocol = 203
+
+# Optional, default false. true installs routes by output device without a
+# gateway; intended for point-to-point interfaces with exactly one peer.
+device_only = false
+
+# Optional, default true. When false, another manager owns source policy rules.
+manage_rules = true
+
+# Ordinary routes are exported to this table.
+[[export.views]]
+table = 20000
+
+# A source-specific view gets matching SADR routes plus ordinary fallbacks.
+# rule_priority defaults to table when omitted.
+[[export.views]]
+table = 20001
+source = "10.0.0.0/8"
+rule_priority = 20001
