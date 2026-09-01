@@ -1,93 +1,102 @@
 # babel-rs
 
+## Purpose
+
 `babel-rs` is an independent Rust implementation of the standard Babel
-routing protocol. It exchanges routes directly with `babeld` and BIRD; neither
-is a runtime dependency.
+dynamic routing protocol. It speaks Babel on selected network interfaces,
+maintains neighbour and route state, selects feasible paths, and exposes the
+selected routing information either to an embedding application or to Linux
+routing tables.
 
-The workspace has three deliberately narrow crates:
+It interoperates on the wire with `babeld` and BIRD; neither is a runtime
+dependency.
 
-- `babel-proto`: sans-I/O packet codec and deterministic protocol engine;
-- `babel-router`: embeddable Tokio UDP runtime and route-export API;
-- `babel-rs`: Linux daemon with current-state to desired-state netlink
-  reconciliation.
+The project can be used at three layers:
 
-The protocol crates contain no Linux netlink or daemon configuration types. An
-application can embed `babel-router`, subscribe to selected-route snapshots, or
-implement `RouteExporter`; only daemon users opt into the Linux backend.
+- `babel-proto` is a sans-I/O packet codec and deterministic protocol engine;
+- `babel-router` is an embeddable Tokio UDP runtime with a route-export API;
+- `babel-rs` is a Linux daemon that reconciles selected routes and policy rules
+  through netlink.
 
-## Protocol profile
+The protocol and runtime crates contain no Linux netlink or daemon
+configuration types. Applications may embed `babel-router`, subscribe to
+selected-route snapshots, or implement `RouteExporter`; only standalone daemon
+users opt into the Linux backend.
+
+## Current scope
 
 The v0.1 profile implements RFC 8966 base TLVs, neighbour maintenance,
-feasibility, route selection, route/sequence requests, retractions and
-multi-hop propagation. It also implements RFC 9079 source-specific routes and
-RFC 9229 IPv4 routes with IPv6 next hops. RFC 9616 Timestamp sub-TLVs are
-encoded and decoded; the default metric remains a replaceable fixed-cost
-policy. RFC 8967/8968 authentication is not implemented.
+feasibility, route selection, route and sequence-number requests, retractions,
+and multi-hop propagation. It also implements RFC 9079 source-specific routes
+and RFC 9229 IPv4 routes with IPv6 next hops.
 
-See [CONFORMANCE.md](docs/CONFORMANCE.md) for exact claims and
-[INTEROPERABILITY.md](docs/INTEROPERABILITY.md) for tested peers.
+RFC 9616 Timestamp sub-TLVs are encoded and decoded, but the daemon currently
+uses a replaceable fixed-cost metric rather than an RTT metric. RFC 8967/8968
+authentication is not implemented. Deployments should therefore run Babel on
+a protected link when authentication is required.
 
-## Build and test
+The standalone daemon is Linux-specific. It exports only the selected routes
+owned by its configured protocol and does not automatically redistribute the
+kernel routing table; local origins come from configuration or the embedding
+API.
+
+See [CONFORMANCE.md](docs/CONFORMANCE.md) for exact protocol claims and
+[INTEROPERABILITY.md](docs/INTEROPERABILITY.md) for tested peers and
+topologies.
+
+## Quick start
+
+Build the daemon and validate the example configuration:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
 cargo build --release -p babel-rs
+target/release/babel-rs check --config examples/babel-rs.toml
 ```
 
-The root-only black-box suite copies only the local binary and scripts to the
-configured Debian VM:
+Run it with the privileges required to bind sockets to interfaces and modify
+routes:
 
 ```sh
-BABEL_RS_E2E_HOST=router-test-vm tests/e2e/run-on-linux-vm.sh
+sudo target/release/babel-rs run --config examples/babel-rs.toml
+sudo target/release/babel-rs status --socket /run/babel-rs/babel-rs.ctl
+sudo target/release/babel-rs neighbors --socket /run/babel-rs/babel-rs.ctl
+sudo target/release/babel-rs routes --socket /run/babel-rs/babel-rs.ctl
 ```
 
-`BABEL_RS_E2E_HOST` must name an SSH-accessible Linux VM with root privileges.
-Set `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN`, or
-`BABEL_RS_E2E_REMOTE_ROOT` when their defaults do not fit the local setup.
+Start from [examples/babel-rs.toml](examples/babel-rs.toml). Each participating
+interface must be administratively up and have an IPv6 link-local address.
+`babel-rs` sends standard Babel packets over UDP/6696 to `ff02::1:6`; peers do
+not need matching Linux interface names.
 
-It tests `babeld`, BIRD, IPv4-over-IPv6, IPv6, source-specific routes,
-withdraw/reannounce, persisted restart state, stale-route cleanup, three-node
-propagation, link failure and recovery.
+An interface entry without metacharacters is an exact name. `*` and `?` match
+multiple names, and starting with no current matches is valid. The daemon
+continuously attaches new matches, withdraws routes when interfaces disappear,
+and rebinds a same-name interface created with a new ifindex.
 
-## Daemon
+## Daemon behaviour
 
-```sh
-sudo babel-rs run --config /etc/babel-rs.toml
-babel-rs status --socket /run/babel-rs/babel-rs.ctl
-```
-
-Use `babel-rs check --config /etc/babel-rs.toml` for a side-effect-free
-configuration check. `babel-rs --config ...` remains accepted for v0.1
-compatibility, while `run` enables the default control socket. See
-[CONTROL.md](docs/CONTROL.md) for the bounded NDJSON API and all query,
-transactional reload, and graceful shutdown commands.
-
-Start from [examples/babel-rs.toml](examples/babel-rs.toml). Interface entries
-are desired-state patterns: an entry without metacharacters is exact, while
-`*` and `?` match multiple Linux interface names. The daemon may start before
-any pattern matches. It continuously watches links and IPv6 addresses, attaches
-administratively-up matches that have a link-local address, withdraws routes
-when they disappear, and rebinds a same-name interface with a new ifindex.
-
-The daemon owns only routes and rules matching its configured protocol. Every
-route update and a two-second safety pass reconcile the complete selected-route
-snapshot, so out-of-band deletion and stale owned state are repaired while
-foreign protocols are untouched. Export views project ordinary and
-source-specific routes into complete Linux tables. Standalone mode can manage
-one source rule per view; an external manager can set `manage_rules = false`.
+Every route update and a two-second safety pass reconcile the complete
+selected-route snapshot. Out-of-band deletion and stale owned state are
+repaired while routes and rules owned by other protocols remain untouched.
+Export views project ordinary and source-specific routes into complete Linux
+tables. Standalone mode can manage one source rule per view; an external
+manager can set `manage_rules = false`.
 
 `SIGHUP` parses and validates a complete candidate before committing interface
 patterns, origins, and export policy. An invalid candidate leaves the active
 configuration unchanged. Router-ID and `state_file` identify persisted
 protocol state and cannot change during reload. SIGINT and SIGTERM retract
-local origins, then reconcile an empty snapshot. The process needs permission
-to bind sockets to interfaces and modify routes.
+local origins and then reconcile an empty snapshot.
+
+`babel-rs --config ...` remains accepted for v0.1 compatibility, while the
+explicit `run` command enables the default control socket. Use
+`babel-rs check --config ...` for a side-effect-free configuration check. See
+[CONTROL.md](docs/CONTROL.md) for the bounded NDJSON API and all status,
+inspection, transactional reload, and graceful shutdown commands.
 
 A hardened standalone systemd unit is provided at
 [`packaging/systemd/babel-rs.service`](packaging/systemd/babel-rs.service). Do
-not enable that unit when an external supervisor owns the same daemon instance.
+not enable it when another supervisor owns the daemon instance.
 
 ## Embedding
 
@@ -100,9 +109,35 @@ cargo run -p babel-router --example embedded
 
 `BabelRouter::builder()` accepts typed Router-ID, interfaces, originated
 routes, a `LinkMetric`, `SequenceStore`, and `RouteExporter`. `RouterHandle`
-supports originate/withdraw, dynamic interface changes, status, route
-subscription and graceful shutdown. The exporter receives a generation-tagged
-full desired-state snapshot rather than an unrecoverable stream of deltas.
+supports originate and withdraw operations, dynamic interface changes, status,
+route subscription, and graceful shutdown. The exporter receives a
+generation-tagged full desired-state snapshot rather than an unrecoverable
+stream of deltas.
+
+See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the protocol, runtime, and
+exporter boundaries.
+
+## Development and testing
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+```
+
+The root-only black-box suite builds locally, copies only the binary and test
+scripts to an SSH-accessible Linux VM, and creates disposable network
+namespaces:
+
+```sh
+BABEL_RS_E2E_HOST=router-test-vm tests/e2e/run-on-linux-vm.sh
+```
+
+Set `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN`, or
+`BABEL_RS_E2E_REMOTE_ROOT` when their defaults do not fit the local setup. The
+suite covers `babeld`, BIRD, IPv4-over-IPv6, IPv6, source-specific routes,
+withdraw and reannounce, persisted restart state, stale-route cleanup,
+three-node propagation, link failure, and recovery.
 
 ## License
 
