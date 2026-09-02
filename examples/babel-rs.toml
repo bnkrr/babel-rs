@@ -9,6 +9,23 @@ state_file = "/var/lib/babel-rs/state.toml"
 # when they are up and have an IPv6 link-local address.
 interfaces = ["vl-*", "backbone0"]
 
+# Optional. RFC 8966 wired 2-out-of-3 with nominal cost 96 is the default.
+[metric]
+type = "wired"
+nominal_cost = 96
+received = 2
+window = 3
+
+# RFC 9616 RTT can instead wrap a wired or ETX base metric:
+# [metric]
+# type = "rtt"
+# alpha = 0.836
+# min_rtt_ms = 10
+# max_rtt_ms = 120
+# max_penalty = 150
+# [metric.base]
+# type = "wired"
+
 # Optional, repeatable. source omitted means the family-wide default source.
 [[origins]]
 destination = "2001:db8:100::/64"

@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::Arc;
 
-use crate::metric::{LinkMetric, LinkSample};
+use crate::metric::{
+    AdditiveMetric, HelloHistories, HelloHistoryUpdate, MetricAlgebra, MetricProfile,
+    NeighborMetric, WiredMetric,
+};
 use crate::model::{Distance, INFINITY, RouteKey, RouterId, SelectedRoute, seqno_gt};
-use crate::wire::{Packet, Tlv, Update};
+use crate::wire::{Packet, SubTlv, Tlv, Update};
 
 pub const BABEL_MULTICAST_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 6));
 
@@ -11,27 +15,36 @@ pub const BABEL_MULTICAST_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0,
 pub struct NeighborStatus {
     pub interface: String,
     pub address: IpAddr,
+    pub algorithm: String,
     pub hello_received: u16,
     pub hello_expected: u16,
-    pub remote_rxcost: u16,
-    pub cost: u16,
+    pub multicast_hello_history: u16,
+    pub unicast_hello_history: u16,
+    pub receive_cost: u16,
+    pub transmit_cost: u16,
+    pub link_cost: u16,
+    pub last_rtt_us: Option<u32>,
+    pub smoothed_rtt_us: Option<u32>,
+    pub rtt_penalty: u16,
     pub last_hello_age_ms: u64,
 }
 
-#[derive(Clone, Debug)]
-pub struct EngineConfig<M> {
+#[derive(Clone)]
+pub struct EngineConfig {
     pub router_id: RouterId,
-    pub metric: M,
+    pub metric: Arc<dyn MetricProfile>,
+    pub metric_algebra: Arc<dyn MetricAlgebra>,
     pub sequence_number: u16,
     pub hello_interval_cs: u16,
     pub update_interval_cs: u16,
 }
 
-impl<M: Default> EngineConfig<M> {
+impl EngineConfig {
     pub fn recommended(router_id: RouterId) -> Self {
         Self {
             router_id,
-            metric: M::default(),
+            metric: Arc::new(WiredMetric::default()),
+            metric_algebra: Arc::new(AdditiveMetric),
             sequence_number: 0,
             hello_interval_cs: 400,
             update_interval_cs: 1600,
@@ -43,6 +56,7 @@ impl<M: Default> EngineConfig<M> {
 pub enum Event {
     InterfaceUp {
         interface: String,
+        local_addresses: Vec<IpAddr>,
         now_ms: u64,
     },
     InterfaceDown {
@@ -85,6 +99,7 @@ pub enum Action {
 
 #[derive(Clone, Debug)]
 struct InterfaceState {
+    local_addresses: Vec<IpAddr>,
     hello_seqno: u16,
     next_hello_ms: u64,
     next_update_ms: u64,
@@ -96,14 +111,24 @@ struct NeighborKey {
     address: IpAddr,
 }
 
-#[derive(Clone, Debug)]
 struct Neighbor {
     last_hello_ms: u64,
-    hello_interval_cs: u16,
-    last_seqno: u16,
-    hello_received: u16,
-    hello_expected: u16,
-    remote_rxcost: u16,
+    histories: HelloHistories,
+    multicast_timer: Option<HelloTimer>,
+    unicast_timer: Option<HelloTimer>,
+    last_ihu_ms: Option<u64>,
+    ihu_interval_cs: u16,
+    next_ihu_ms: u64,
+    origin_timestamp: Option<u32>,
+    receive_timestamp: Option<u32>,
+    unicast_hello_seqno: u16,
+    metric: Box<dyn NeighborMetric>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HelloTimer {
+    interval_cs: u16,
+    next_expiry_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +136,10 @@ struct Candidate {
     key: RouteKey,
     router_id: RouterId,
     seqno: u16,
+    advertised_metric: u16,
     metric: u16,
+    smoothed_metric: f64,
+    last_metric_update_ms: u64,
     next_hop: IpAddr,
     interface: String,
     expires_ms: u64,
@@ -123,8 +151,8 @@ struct Originated {
     seqno: u16,
 }
 
-pub struct Engine<M> {
-    config: EngineConfig<M>,
+pub struct Engine {
+    config: EngineConfig,
     interfaces: BTreeMap<String, InterfaceState>,
     neighbours: HashMap<NeighborKey, Neighbor>,
     candidates: HashMap<(RouteKey, RouterId, NeighborKey), Candidate>,
@@ -136,8 +164,8 @@ pub struct Engine<M> {
     sequence_number: u16,
 }
 
-impl<M: LinkMetric> Engine<M> {
-    pub fn new(config: EngineConfig<M>) -> Self {
+impl Engine {
+    pub fn new(config: EngineConfig) -> Self {
         Self {
             sequence_number: config.sequence_number,
             config,
@@ -154,25 +182,27 @@ impl<M: LinkMetric> Engine<M> {
 
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::InterfaceUp { interface, now_ms } => {
+            Event::InterfaceUp {
+                interface,
+                local_addresses,
+                now_ms,
+            } => {
                 self.interfaces
                     .entry(interface.clone())
                     .or_insert(InterfaceState {
+                        local_addresses,
                         hello_seqno: 0,
                         next_hello_ms: now_ms,
                         next_update_ms: now_ms,
                     });
                 self.tick(now_ms)
             }
-            Event::InterfaceDown {
-                interface,
-                now_ms: _,
-            } => {
+            Event::InterfaceDown { interface, now_ms } => {
                 self.interfaces.remove(&interface);
                 self.neighbours.retain(|key, _| key.interface != interface);
                 self.candidates
                     .retain(|_, value| value.interface != interface);
-                self.reselect()
+                self.reselect(now_ms)
             }
             Event::PacketReceived {
                 interface,
@@ -199,13 +229,13 @@ impl<M: LinkMetric> Engine<M> {
                         seqno: self.sequence_number,
                     },
                 );
-                actions.extend(self.reselect());
+                actions.extend(self.reselect(now_ms));
                 actions.extend(self.send_updates(now_ms, Some(key), None));
                 actions
             }
             Event::Withdraw { key, now_ms } => {
                 let existed = self.originated.remove(&key).is_some();
-                let mut actions = self.reselect();
+                let mut actions = self.reselect(now_ms);
                 if existed {
                     self.bump_sequence_number();
                     actions.insert(0, Action::SequenceNumberChanged(self.sequence_number));
@@ -225,22 +255,38 @@ impl<M: LinkMetric> Engine<M> {
         self.neighbours.len()
     }
 
+    pub fn metric_name(&self) -> String {
+        self.config.metric.name()
+    }
+
     pub fn neighbour_status(&self, now_ms: u64) -> Vec<NeighborStatus> {
         let mut result: Vec<_> = self
             .neighbours
             .iter()
-            .map(|(key, neighbour)| NeighborStatus {
-                interface: key.interface.clone(),
-                address: key.address,
-                hello_received: neighbour.hello_received,
-                hello_expected: neighbour.hello_expected,
-                remote_rxcost: neighbour.remote_rxcost,
-                cost: self.config.metric.cost(LinkSample {
-                    hello_received: neighbour.hello_received,
-                    hello_expected: neighbour.hello_expected,
-                    remote_rxcost: neighbour.remote_rxcost,
-                }),
-                last_hello_age_ms: now_ms.saturating_sub(neighbour.last_hello_ms),
+            .map(|(key, neighbour)| {
+                let metric = neighbour.metric.status();
+                NeighborStatus {
+                    interface: key.interface.clone(),
+                    address: key.address,
+                    algorithm: metric.algorithm,
+                    hello_received: u16::from(
+                        neighbour.histories.multicast.received(16)
+                            + neighbour.histories.unicast.received(16),
+                    ),
+                    hello_expected: u16::from(
+                        neighbour.histories.multicast.observed()
+                            + neighbour.histories.unicast.observed(),
+                    ),
+                    multicast_hello_history: neighbour.histories.multicast.bits(),
+                    unicast_hello_history: neighbour.histories.unicast.bits(),
+                    receive_cost: metric.receive_cost,
+                    transmit_cost: metric.transmit_cost,
+                    link_cost: metric.link_cost,
+                    last_rtt_us: metric.last_rtt_us,
+                    smoothed_rtt_us: metric.smoothed_rtt_us,
+                    rtt_penalty: metric.rtt_penalty,
+                    last_hello_age_ms: now_ms.saturating_sub(neighbour.last_hello_ms),
+                }
             })
             .collect();
         result.sort_by(|left, right| {
@@ -256,14 +302,136 @@ impl<M: LinkMetric> Engine<M> {
         packet: Packet,
         now_ms: u64,
     ) -> Vec<Action> {
-        if !self.interfaces.contains_key(&interface) {
+        let Some(interface_state) = self.interfaces.get(&interface) else {
             return Vec::new();
-        }
+        };
+        let local_addresses = interface_state.local_addresses.clone();
         let neighbour_key = NeighborKey {
             interface: interface.clone(),
             address: source,
         };
         let mut actions = Vec::new();
+        let receive_timestamp = timestamp_us(now_ms);
+        let hello_timestamp = packet.tlvs.iter().find_map(|tlv| match tlv {
+            Tlv::Hello { sub_tlvs, .. } => timestamp_hello(sub_tlvs),
+            _ => None,
+        });
+        let echoed_timestamps = packet.tlvs.iter().find_map(|tlv| match tlv {
+            Tlv::Ihu {
+                address, sub_tlvs, ..
+            } if ihu_applies(*address, &local_addresses) => timestamp_ihu(sub_tlvs),
+            _ => None,
+        });
+        let rtt_sample = hello_timestamp.zip(echoed_timestamps).and_then(
+            |(peer_sent, (origin, peer_received))| {
+                valid_rtt_sample(receive_timestamp, origin, peer_sent, peer_received)
+            },
+        );
+
+        let mut send_ihu = false;
+        for tlv in &packet.tlvs {
+            if let Tlv::Hello {
+                unicast,
+                seqno,
+                interval_cs,
+                sub_tlvs,
+            } = tlv
+            {
+                let neighbour = self
+                    .neighbours
+                    .entry(neighbour_key.clone())
+                    .or_insert_with(|| Neighbor {
+                        last_hello_ms: now_ms,
+                        histories: HelloHistories::default(),
+                        multicast_timer: None,
+                        unicast_timer: None,
+                        last_ihu_ms: None,
+                        ihu_interval_cs: self.config.hello_interval_cs.saturating_mul(3),
+                        next_ihu_ms: now_ms,
+                        origin_timestamp: None,
+                        receive_timestamp: None,
+                        unicast_hello_seqno: 0,
+                        metric: self.config.metric.new_neighbor(&interface),
+                    });
+                let previous_receive_cost = neighbour.metric.receive_cost();
+                let update = if *unicast {
+                    &mut neighbour.histories.unicast
+                } else {
+                    &mut neighbour.histories.multicast
+                }
+                .record(*seqno);
+                if update == HelloHistoryUpdate::Restarted {
+                    let mut histories = HelloHistories::default();
+                    if *unicast {
+                        histories.unicast.record(*seqno);
+                    } else {
+                        histories.multicast.record(*seqno);
+                    }
+                    neighbour.histories = histories;
+                    neighbour.multicast_timer = None;
+                    neighbour.unicast_timer = None;
+                    neighbour.last_ihu_ms = None;
+                    neighbour.next_ihu_ms = now_ms;
+                    neighbour.origin_timestamp = None;
+                    neighbour.receive_timestamp = None;
+                    neighbour.unicast_hello_seqno = 0;
+                    neighbour.metric = self.config.metric.new_neighbor(&interface);
+                }
+                neighbour.metric.on_hello(neighbour.histories);
+                neighbour.last_hello_ms = now_ms;
+                if *interval_cs != 0 {
+                    let timer = HelloTimer {
+                        interval_cs: *interval_cs,
+                        next_expiry_ms: now_ms
+                            .saturating_add(u64::from(*interval_cs).saturating_mul(15)),
+                    };
+                    if *unicast {
+                        neighbour.unicast_timer = Some(timer);
+                    } else {
+                        neighbour.multicast_timer = Some(timer);
+                    }
+                }
+                if let Some(timestamp) = timestamp_hello(sub_tlvs) {
+                    neighbour.origin_timestamp = Some(timestamp);
+                    neighbour.receive_timestamp = Some(receive_timestamp);
+                }
+                if neighbour.metric.receive_cost() != previous_receive_cost
+                    || now_ms >= neighbour.next_ihu_ms
+                {
+                    neighbour.next_ihu_ms = now_ms.saturating_add(
+                        u64::from(self.config.hello_interval_cs.saturating_mul(3)) * 10,
+                    );
+                    send_ihu = true;
+                }
+            }
+        }
+        if let Some(sample) = rtt_sample
+            && self.config.metric.timestamps_enabled()
+            && let Some(neighbour) = self.neighbours.get_mut(&neighbour_key)
+        {
+            neighbour.metric.on_rtt_sample(sample);
+        }
+        for tlv in &packet.tlvs {
+            if let Tlv::Ihu {
+                address,
+                rxcost,
+                interval_cs,
+                ..
+            } = tlv
+                && *interval_cs != 0
+                && ihu_applies(*address, &local_addresses)
+                && let Some(neighbour) = self.neighbours.get_mut(&neighbour_key)
+            {
+                neighbour.metric.on_ihu(*rxcost);
+                neighbour.last_ihu_ms = Some(now_ms);
+                neighbour.ihu_interval_cs = *interval_cs;
+            }
+        }
+        self.recompute_candidate_metrics(now_ms, Some(&neighbour_key));
+        if send_ihu && let Some(action) = self.ihu_action(&neighbour_key, now_ms) {
+            actions.push(action);
+        }
+
         for tlv in packet.tlvs {
             match tlv {
                 Tlv::AckRequest { nonce, .. } => actions.push(Action::Send {
@@ -273,47 +441,7 @@ impl<M: LinkMetric> Engine<M> {
                         tlvs: vec![Tlv::Ack { nonce }],
                     },
                 }),
-                Tlv::Hello {
-                    seqno, interval_cs, ..
-                } if interval_cs != 0 => {
-                    let neighbour =
-                        self.neighbours
-                            .entry(neighbour_key.clone())
-                            .or_insert(Neighbor {
-                                last_hello_ms: now_ms,
-                                hello_interval_cs: interval_cs,
-                                last_seqno: seqno.wrapping_sub(1),
-                                hello_received: 0,
-                                hello_expected: 0,
-                                remote_rxcost: INFINITY,
-                            });
-                    let delta = seqno.wrapping_sub(neighbour.last_seqno);
-                    if delta != 0 && delta < 0x8000 {
-                        neighbour.hello_expected =
-                            neighbour.hello_expected.saturating_add(delta.min(16));
-                        neighbour.hello_received = neighbour.hello_received.saturating_add(1);
-                        neighbour.last_seqno = seqno;
-                    }
-                    neighbour.last_hello_ms = now_ms;
-                    neighbour.hello_interval_cs = interval_cs;
-                    actions.push(Action::Send {
-                        interface: interface.clone(),
-                        destination: source,
-                        packet: Packet {
-                            tlvs: vec![Tlv::Ihu {
-                                address: None,
-                                rxcost: 96,
-                                interval_cs: self.config.hello_interval_cs.saturating_mul(3),
-                                sub_tlvs: vec![],
-                            }],
-                        },
-                    });
-                }
-                Tlv::Ihu { rxcost, .. } => {
-                    if let Some(neighbour) = self.neighbours.get_mut(&neighbour_key) {
-                        neighbour.remote_rxcost = rxcost;
-                    }
-                }
+                Tlv::Hello { .. } | Tlv::Ihu { .. } => {}
                 Tlv::Update(update) => {
                     actions.extend(self.receive_update(&neighbour_key, update, now_ms))
                 }
@@ -365,8 +493,43 @@ impl<M: LinkMetric> Engine<M> {
                 _ => {}
             }
         }
-        actions.extend(self.reselect());
+        actions.extend(self.reselect(now_ms));
         actions
+    }
+
+    fn ihu_action(&mut self, key: &NeighborKey, now_ms: u64) -> Option<Action> {
+        let neighbour = self.neighbours.get_mut(key)?;
+        let receive_cost = valid_cost(neighbour.metric.receive_cost());
+        let echoed = neighbour.origin_timestamp.zip(neighbour.receive_timestamp);
+        let interval_cs = self.config.hello_interval_cs.saturating_mul(3);
+        let mut tlvs = Vec::new();
+        if self.config.metric.timestamps_enabled() {
+            neighbour.unicast_hello_seqno = neighbour.unicast_hello_seqno.wrapping_add(1);
+            tlvs.push(Tlv::Hello {
+                unicast: true,
+                seqno: neighbour.unicast_hello_seqno,
+                interval_cs: 0,
+                sub_tlvs: vec![SubTlv::TimestampHello(timestamp_us(now_ms))],
+            });
+        }
+        let sub_tlvs = if self.config.metric.timestamps_enabled() {
+            echoed.map_or_else(Vec::new, |(origin, received)| {
+                vec![SubTlv::TimestampIhu { origin, received }]
+            })
+        } else {
+            Vec::new()
+        };
+        tlvs.push(Tlv::Ihu {
+            address: None,
+            rxcost: receive_cost,
+            interval_cs,
+            sub_tlvs,
+        });
+        Some(Action::Send {
+            interface: key.interface.clone(),
+            destination: key.address,
+            packet: Packet { tlvs },
+        })
     }
 
     fn receive_update(
@@ -448,12 +611,9 @@ impl<M: LinkMetric> Engine<M> {
         let Some(neighbour) = self.neighbours.get(neighbour_key) else {
             return Vec::new();
         };
-        let cost = self.config.metric.cost(LinkSample {
-            hello_received: neighbour.hello_received,
-            hello_expected: neighbour.hello_expected,
-            remote_rxcost: neighbour.remote_rxcost,
-        });
-        if cost == INFINITY {
+        let cost = neighbour.metric.link_cost();
+        let metric = self.config.metric_algebra.extend(update.metric, cost);
+        if metric != INFINITY && metric <= update.metric {
             return Vec::new();
         }
         let distance = Distance {
@@ -503,13 +663,20 @@ impl<M: LinkMetric> Engine<M> {
             })
             .or_insert(distance);
         self.pending_seqno.remove(&(key, router_id));
+        let previous_smoothing = self
+            .candidates
+            .get(&candidate_key)
+            .map(|candidate| (candidate.smoothed_metric, candidate.last_metric_update_ms));
         self.candidates.insert(
             candidate_key,
             Candidate {
                 key,
                 router_id,
                 seqno: update.seqno,
-                metric: update.metric.saturating_add(cost),
+                advertised_metric: update.metric,
+                metric,
+                smoothed_metric: previous_smoothing.map_or(f64::from(metric), |value| value.0),
+                last_metric_update_ms: previous_smoothing.map_or(now_ms, |value| value.1),
                 next_hop,
                 interface: neighbour_key.interface.clone(),
                 expires_ms: now_ms.saturating_add(u64::from(update.interval_cs) * 35),
@@ -519,13 +686,28 @@ impl<M: LinkMetric> Engine<M> {
     }
 
     fn tick(&mut self, now_ms: u64) -> Vec<Action> {
+        for neighbour in self.neighbours.values_mut() {
+            let previous_receive_cost = neighbour.metric.receive_cost();
+            advance_hello_timer(
+                &mut neighbour.multicast_timer,
+                &mut neighbour.histories.multicast,
+                now_ms,
+            );
+            advance_hello_timer(
+                &mut neighbour.unicast_timer,
+                &mut neighbour.histories.unicast,
+                now_ms,
+            );
+            neighbour.metric.on_hello(neighbour.histories);
+            if neighbour.metric.receive_cost() != previous_receive_cost {
+                neighbour.next_ihu_ms = now_ms;
+            }
+        }
         let expired: Vec<_> = self
             .neighbours
             .iter()
-            .filter(|(_, n)| {
-                now_ms
-                    > n.last_hello_ms
-                        .saturating_add(u64::from(n.hello_interval_cs) * 35)
+            .filter(|(_, neighbour)| {
+                neighbour.histories.multicast.is_empty() && neighbour.histories.unicast.is_empty()
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -534,10 +716,37 @@ impl<M: LinkMetric> Engine<M> {
             self.candidates
                 .retain(|(_, _, neighbour), _| neighbour != &key);
         }
+        for neighbour in self.neighbours.values_mut() {
+            if neighbour.last_ihu_ms.is_some_and(|last| {
+                now_ms > last.saturating_add(u64::from(neighbour.ihu_interval_cs) * 35)
+            }) {
+                neighbour.last_ihu_ms = None;
+                neighbour.metric.on_ihu(INFINITY);
+            }
+        }
         self.candidates
             .retain(|_, route| route.expires_ms >= now_ms);
         self.pending_seqno.retain(|_, expires| *expires >= now_ms);
-        let mut actions = self.reselect();
+        self.recompute_candidate_metrics(now_ms, None);
+        let mut actions = self.reselect(now_ms);
+        let ihu_due: Vec<_> = self
+            .neighbours
+            .iter_mut()
+            .filter_map(|(key, neighbour)| {
+                if now_ms < neighbour.next_ihu_ms {
+                    return None;
+                }
+                neighbour.next_ihu_ms = now_ms.saturating_add(
+                    u64::from(self.config.hello_interval_cs.saturating_mul(3)) * 10,
+                );
+                Some(key.clone())
+            })
+            .collect();
+        for key in ihu_due {
+            if let Some(action) = self.ihu_action(&key, now_ms) {
+                actions.push(action);
+            }
+        }
         let interfaces: Vec<String> = self.interfaces.keys().cloned().collect();
         for interface in interfaces {
             let mut send_hello = false;
@@ -560,6 +769,11 @@ impl<M: LinkMetric> Engine<M> {
                 seqno = state.hello_seqno;
             }
             if send_hello {
+                let sub_tlvs = if self.config.metric.timestamps_enabled() {
+                    vec![SubTlv::TimestampHello(timestamp_us(now_ms))]
+                } else {
+                    Vec::new()
+                };
                 actions.push(Action::Send {
                     interface: interface.clone(),
                     destination: BABEL_MULTICAST_V6,
@@ -568,7 +782,7 @@ impl<M: LinkMetric> Engine<M> {
                             unicast: false,
                             seqno,
                             interval_cs: self.config.hello_interval_cs,
-                            sub_tlvs: vec![],
+                            sub_tlvs,
                         }],
                     },
                 });
@@ -655,29 +869,82 @@ impl<M: LinkMetric> Engine<M> {
             .collect()
     }
 
-    fn reselect(&mut self) -> Vec<Action> {
+    fn recompute_candidate_metrics(&mut self, now_ms: u64, only: Option<&NeighborKey>) {
+        let costs: HashMap<_, _> = self
+            .neighbours
+            .iter()
+            .filter(|(key, _)| only.is_none_or(|wanted| wanted == *key))
+            .map(|(key, neighbour)| (key.clone(), neighbour.metric.link_cost()))
+            .collect();
+        let time_constant_ms = u64::from(self.config.hello_interval_cs)
+            .saturating_mul(10)
+            .saturating_mul(3)
+            .max(1);
+        for ((_, _, neighbour_key), candidate) in &mut self.candidates {
+            let Some(link_cost) = costs.get(neighbour_key) else {
+                continue;
+            };
+            let metric = self
+                .config
+                .metric_algebra
+                .extend(candidate.advertised_metric, *link_cost);
+            if metric == INFINITY || metric <= candidate.advertised_metric {
+                candidate.metric = INFINITY;
+                candidate.last_metric_update_ms = now_ms;
+                continue;
+            }
+            let elapsed = now_ms.saturating_sub(candidate.last_metric_update_ms);
+            if elapsed > 0 {
+                let alpha = (-(elapsed as f64) / time_constant_ms as f64).exp();
+                candidate.smoothed_metric =
+                    alpha * candidate.smoothed_metric + (1.0 - alpha) * f64::from(metric);
+            }
+            candidate.metric = metric;
+            candidate.last_metric_update_ms = now_ms;
+        }
+    }
+
+    fn reselect(&mut self, _now_ms: u64) -> Vec<Action> {
         let before = self.selected.clone();
         let mut next = BTreeMap::new();
-        for route in self
+        let mut keys: Vec<_> = self
             .candidates
             .values()
             .filter(|route| route.metric < INFINITY)
-        {
-            let selected = SelectedRoute {
-                key: route.key,
-                router_id: route.router_id,
-                seqno: route.seqno,
-                metric: route.metric,
-                next_hop: route.next_hop,
-                interface: route.interface.clone(),
-            };
-            next.entry(route.key)
-                .and_modify(|current: &mut SelectedRoute| {
-                    if (selected.metric, selected.router_id) < (current.metric, current.router_id) {
-                        *current = selected.clone();
-                    }
+            .map(|route| route.key)
+            .collect();
+        keys.sort();
+        keys.dedup();
+        for key in keys {
+            let routes: Vec<_> = self
+                .candidates
+                .values()
+                .filter(|route| route.key == key && route.metric < INFINITY)
+                .collect();
+            let current = before.get(&key).and_then(|selected| {
+                routes.iter().copied().find(|route| {
+                    route.router_id == selected.router_id
+                        && route.next_hop == selected.next_hop
+                        && route.interface == selected.interface
                 })
-                .or_insert(selected);
+            });
+            let chosen = if let Some(current) = current {
+                routes
+                    .iter()
+                    .copied()
+                    .filter(|route| {
+                        route.metric < current.metric
+                            && route.smoothed_metric < current.smoothed_metric
+                    })
+                    .min_by(candidate_order)
+                    .unwrap_or(current)
+            } else {
+                routes
+                    .into_iter()
+                    .min_by(candidate_order)
+                    .expect("non-empty")
+            };
+            next.insert(key, selected_from_candidate(chosen));
         }
         self.selected = next;
         if self.selected != before {
@@ -780,10 +1047,82 @@ impl<M: LinkMetric> Engine<M> {
     }
 }
 
+fn timestamp_us(now_ms: u64) -> u32 {
+    now_ms.wrapping_mul(1_000) as u32
+}
+
+fn valid_cost(cost: u16) -> u16 {
+    if cost == 0 { INFINITY } else { cost }
+}
+
+fn ihu_applies(address: Option<IpAddr>, local_addresses: &[IpAddr]) -> bool {
+    address.is_none_or(|value| local_addresses.is_empty() || local_addresses.contains(&value))
+}
+
+fn advance_hello_timer(
+    timer: &mut Option<HelloTimer>,
+    history: &mut crate::metric::HelloHistory,
+    now_ms: u64,
+) {
+    let Some(value) = timer.as_mut() else {
+        return;
+    };
+    if now_ms < value.next_expiry_ms {
+        return;
+    }
+    let interval_ms = u64::from(value.interval_cs).saturating_mul(10).max(1);
+    let missed = 1 + now_ms.saturating_sub(value.next_expiry_ms) / interval_ms;
+    history.missed_many(missed);
+    value.next_expiry_ms = value
+        .next_expiry_ms
+        .saturating_add(missed.saturating_mul(interval_ms));
+}
+
+fn timestamp_hello(sub_tlvs: &[SubTlv]) -> Option<u32> {
+    sub_tlvs.iter().find_map(|value| match value {
+        SubTlv::TimestampHello(timestamp) => Some(*timestamp),
+        _ => None,
+    })
+}
+
+fn timestamp_ihu(sub_tlvs: &[SubTlv]) -> Option<(u32, u32)> {
+    sub_tlvs.iter().find_map(|value| match value {
+        SubTlv::TimestampIhu { origin, received } => Some((*origin, *received)),
+        _ => None,
+    })
+}
+
+fn valid_rtt_sample(now: u32, origin: u32, peer_sent: u32, peer_received: u32) -> Option<u32> {
+    const MAX_SAMPLE_AGE_US: u32 = 180_000_000;
+    let elapsed = now.wrapping_sub(origin);
+    let peer_delay = peer_sent.wrapping_sub(peer_received);
+    (elapsed <= MAX_SAMPLE_AGE_US && peer_delay <= MAX_SAMPLE_AGE_US && elapsed >= peer_delay)
+        .then_some(elapsed - peer_delay)
+}
+
+fn candidate_order(left: &&Candidate, right: &&Candidate) -> std::cmp::Ordering {
+    (left.metric, left.router_id, &left.interface, left.next_hop).cmp(&(
+        right.metric,
+        right.router_id,
+        &right.interface,
+        right.next_hop,
+    ))
+}
+
+fn selected_from_candidate(route: &Candidate) -> SelectedRoute {
+    SelectedRoute {
+        key: route.key,
+        router_id: route.router_id,
+        seqno: route.seqno,
+        metric: route.metric,
+        next_hop: route.next_hop,
+        interface: route.interface.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metric::FixedMetric;
     use ipnet::IpNet;
     use std::str::FromStr;
 
@@ -793,12 +1132,18 @@ mod tests {
     fn key() -> RouteKey {
         RouteKey::new(IpNet::from_str("2001:db8::/64").unwrap(), None).unwrap()
     }
+    fn config(router_id: RouterId) -> EngineConfig {
+        let mut config = EngineConfig::recommended(router_id);
+        config.metric = Arc::new(WiredMetric::new(96, 1, 1).unwrap());
+        config
+    }
 
     #[test]
     fn route_requires_neighbour_and_exports_generation() {
-        let mut engine = Engine::new(EngineConfig::<FixedMetric>::recommended(id(1)));
+        let mut engine = Engine::new(config(id(1)));
         engine.handle(Event::InterfaceUp {
             interface: "wg0".into(),
+            local_addresses: vec![],
             now_ms: 0,
         });
         engine.handle(Event::PacketReceived {
@@ -846,13 +1191,15 @@ mod tests {
     fn unfeasible_alternate_is_not_acquired() {
         let mut engine = Engine::new(EngineConfig {
             router_id: id(1),
-            metric: FixedMetric::default(),
+            metric: Arc::new(WiredMetric::new(96, 1, 1).unwrap()),
+            metric_algebra: Arc::new(AdditiveMetric),
             sequence_number: 0,
             hello_interval_cs: 400,
             update_interval_cs: 1600,
         });
         engine.handle(Event::InterfaceUp {
             interface: "wg0".into(),
+            local_addresses: vec![],
             now_ms: 0,
         });
         let source = "fe80::2".parse().unwrap();
@@ -893,6 +1240,7 @@ mod tests {
         });
         engine.handle(Event::InterfaceUp {
             interface: "wg1".into(),
+            local_addresses: vec![],
             now_ms: 3,
         });
         let other = "fe80::3".parse().unwrap();
@@ -932,9 +1280,10 @@ mod tests {
 
     #[test]
     fn withdrawal_advances_sequence_and_sends_infinity() {
-        let mut engine = Engine::new(EngineConfig::<FixedMetric>::recommended(id(1)));
+        let mut engine = Engine::new(config(id(1)));
         engine.handle(Event::InterfaceUp {
             interface: "wg0".into(),
+            local_addresses: vec![],
             now_ms: 0,
         });
         engine.handle(Event::Originate {
@@ -960,13 +1309,15 @@ mod tests {
 
     #[test]
     fn learned_route_expires_and_is_retracted_from_selected_snapshot() {
-        let mut engine = Engine::new(EngineConfig::<FixedMetric>::recommended(id(1)));
+        let mut engine = Engine::new(config(id(1)));
         engine.handle(Event::InterfaceUp {
             interface: "wg0".into(),
+            local_addresses: vec![],
             now_ms: 0,
         });
         engine.handle(Event::InterfaceUp {
             interface: "wg1".into(),
+            local_addresses: vec![],
             now_ms: 0,
         });
         let source = "fe80::2".parse().unwrap();
@@ -1016,10 +1367,11 @@ mod tests {
 
     #[test]
     fn newer_retraction_removes_stale_alternate_candidates() {
-        let mut engine = Engine::new(EngineConfig::<FixedMetric>::recommended(id(1)));
+        let mut engine = Engine::new(config(id(1)));
         for (interface, source, metric) in [("wg0", "fe80::2", 0), ("wg1", "fe80::3", 10)] {
             engine.handle(Event::InterfaceUp {
                 interface: interface.into(),
+                local_addresses: vec![],
                 now_ms: 0,
             });
             let source = source.parse().unwrap();
@@ -1087,11 +1439,12 @@ mod tests {
 
     #[test]
     fn seqno_request_advances_local_origin_past_requested_value() {
-        let mut config = EngineConfig::<FixedMetric>::recommended(id(1));
+        let mut config = config(id(1));
         config.sequence_number = 7;
         let mut engine = Engine::new(config);
         engine.handle(Event::InterfaceUp {
             interface: "wg0".into(),
+            local_addresses: vec![],
             now_ms: 0,
         });
         engine.handle(Event::Originate {
@@ -1127,10 +1480,11 @@ mod tests {
 
     #[test]
     fn seqno_request_is_forwarded_towards_remote_origin() {
-        let mut engine = Engine::new(EngineConfig::<FixedMetric>::recommended(id(1)));
+        let mut engine = Engine::new(config(id(1)));
         for interface in ["upstream", "downstream"] {
             engine.handle(Event::InterfaceUp {
                 interface: interface.into(),
+                local_addresses: vec![],
                 now_ms: 0,
             });
         }
@@ -1185,5 +1539,180 @@ mod tests {
             Action::Send { interface, packet, .. }
                 if interface == "upstream" && packet.tlvs.iter().any(|tlv| matches!(tlv, Tlv::SeqnoRequest { seqno: 6, hop_count: 6, .. }))
         )));
+    }
+
+    #[test]
+    fn default_wired_metric_activates_a_stored_update_after_second_hello() {
+        let mut engine = Engine::new(EngineConfig::recommended(id(1)));
+        engine.handle(Event::InterfaceUp {
+            interface: "eth0".into(),
+            local_addresses: vec![],
+            now_ms: 0,
+        });
+        let source = "fe80::2".parse().unwrap();
+        engine.handle(Event::PacketReceived {
+            interface: "eth0".into(),
+            source,
+            now_ms: 10,
+            packet: Packet {
+                tlvs: vec![
+                    Tlv::Hello {
+                        unicast: false,
+                        seqno: 1,
+                        interval_cs: 400,
+                        sub_tlvs: vec![],
+                    },
+                    Tlv::Ihu {
+                        address: None,
+                        rxcost: 96,
+                        interval_cs: 1200,
+                        sub_tlvs: vec![],
+                    },
+                    Tlv::Update(Update {
+                        key: Some(key()),
+                        router_id: Some(id(2)),
+                        next_hop: Some(source),
+                        interval_cs: 1600,
+                        seqno: 1,
+                        metric: 0,
+                        v4_via_v6: false,
+                        sub_tlvs: vec![],
+                    }),
+                ],
+            },
+        });
+        assert!(engine.selected_routes().is_empty());
+        engine.handle(Event::PacketReceived {
+            interface: "eth0".into(),
+            source,
+            now_ms: 4_000,
+            packet: Packet {
+                tlvs: vec![Tlv::Hello {
+                    unicast: false,
+                    seqno: 2,
+                    interval_cs: 400,
+                    sub_tlvs: vec![],
+                }],
+            },
+        });
+        assert_eq!(engine.selected_routes()[0].metric, 96);
+    }
+
+    #[test]
+    fn ihu_change_recomputes_an_existing_candidate_without_an_update() {
+        let mut engine = Engine::new(config(id(1)));
+        engine.handle(Event::InterfaceUp {
+            interface: "eth0".into(),
+            local_addresses: vec![],
+            now_ms: 0,
+        });
+        let source = "fe80::2".parse().unwrap();
+        engine.handle(Event::PacketReceived {
+            interface: "eth0".into(),
+            source,
+            now_ms: 10,
+            packet: Packet {
+                tlvs: vec![
+                    Tlv::Hello {
+                        unicast: false,
+                        seqno: 1,
+                        interval_cs: 400,
+                        sub_tlvs: vec![],
+                    },
+                    Tlv::Ihu {
+                        address: None,
+                        rxcost: 96,
+                        interval_cs: 1200,
+                        sub_tlvs: vec![],
+                    },
+                    Tlv::Update(Update {
+                        key: Some(key()),
+                        router_id: Some(id(2)),
+                        next_hop: Some(source),
+                        interval_cs: 1600,
+                        seqno: 1,
+                        metric: 0,
+                        v4_via_v6: false,
+                        sub_tlvs: vec![],
+                    }),
+                ],
+            },
+        });
+        assert_eq!(engine.selected_routes()[0].metric, 96);
+        engine.handle(Event::PacketReceived {
+            interface: "eth0".into(),
+            source,
+            now_ms: 20,
+            packet: Packet {
+                tlvs: vec![Tlv::Ihu {
+                    address: None,
+                    rxcost: 200,
+                    interval_cs: 1200,
+                    sub_tlvs: vec![],
+                }],
+            },
+        });
+        assert_eq!(engine.selected_routes()[0].metric, 200);
+    }
+
+    #[test]
+    fn rfc9616_timestamp_exchange_feeds_the_rtt_metric() {
+        let mut config = config(id(1));
+        config.metric = Arc::new(crate::metric::RttMetric::recommended(Arc::new(
+            WiredMetric::new(96, 1, 1).unwrap(),
+        )));
+        let mut engine = Engine::new(config);
+        let actions = engine.handle(Event::InterfaceUp {
+            interface: "eth0".into(),
+            local_addresses: vec![],
+            now_ms: 0,
+        });
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Send { packet, .. }
+                if packet.tlvs.iter().any(|tlv| matches!(tlv, Tlv::Hello { sub_tlvs, .. }
+                    if sub_tlvs.contains(&SubTlv::TimestampHello(0))))
+        )));
+        let source = "fe80::2".parse().unwrap();
+        engine.handle(Event::PacketReceived {
+            interface: "eth0".into(),
+            source,
+            now_ms: 50,
+            packet: Packet {
+                tlvs: vec![
+                    Tlv::Hello {
+                        unicast: false,
+                        seqno: 1,
+                        interval_cs: 400,
+                        sub_tlvs: vec![SubTlv::TimestampHello(40_000)],
+                    },
+                    Tlv::Ihu {
+                        address: None,
+                        rxcost: 96,
+                        interval_cs: 1200,
+                        sub_tlvs: vec![SubTlv::TimestampIhu {
+                            origin: 0,
+                            received: 10_000,
+                        }],
+                    },
+                    Tlv::Update(Update {
+                        key: Some(key()),
+                        router_id: Some(id(2)),
+                        next_hop: Some(source),
+                        interval_cs: 1600,
+                        seqno: 1,
+                        metric: 0,
+                        v4_via_v6: false,
+                        sub_tlvs: vec![],
+                    }),
+                ],
+            },
+        });
+        let status = engine.neighbour_status(50).pop().unwrap();
+        assert_eq!(status.last_rtt_us, Some(20_000));
+        assert_eq!(status.smoothed_rtt_us, Some(20_000));
+        assert_eq!(status.rtt_penalty, 14);
+        assert_eq!(status.link_cost, 110);
+        assert_eq!(engine.selected_routes()[0].metric, 110);
     }
 }

@@ -1,14 +1,15 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use ipnet::IpNet;
 use serde::Deserialize;
 use thiserror::Error;
 
-use babel_proto::RouteKey;
+use babel_proto::{EtxMetric, MetricProfile, RouteKey, RttMetric, WiredMetric};
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub router_id: Option<String>,
@@ -16,8 +17,130 @@ pub struct Config {
     pub state_file: String,
     pub interfaces: Vec<String>,
     #[serde(default)]
+    pub metric: MetricConfig,
+    #[serde(default)]
     pub origins: Vec<Origin>,
     pub export: Export,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MetricConfig {
+    Wired {
+        #[serde(default = "default_wired_cost")]
+        nominal_cost: u16,
+        #[serde(default = "default_wired_received")]
+        received: u8,
+        #[serde(default = "default_wired_window")]
+        window: u8,
+    },
+    Etx {
+        #[serde(default = "default_etx_window")]
+        window: u8,
+    },
+    Rtt {
+        #[serde(default)]
+        base: BaseMetricConfig,
+        #[serde(default = "default_rtt_alpha")]
+        alpha: f64,
+        #[serde(default = "default_rtt_min_ms")]
+        min_rtt_ms: u32,
+        #[serde(default = "default_rtt_max_ms")]
+        max_rtt_ms: u32,
+        #[serde(default = "default_rtt_max_penalty")]
+        max_penalty: u16,
+    },
+}
+
+impl Default for MetricConfig {
+    fn default() -> Self {
+        Self::Wired {
+            nominal_cost: default_wired_cost(),
+            received: default_wired_received(),
+            window: default_wired_window(),
+        }
+    }
+}
+
+impl MetricConfig {
+    pub fn build(&self) -> Result<Arc<dyn MetricProfile>, ConfigError> {
+        match self {
+            Self::Wired {
+                nominal_cost,
+                received,
+                window,
+            } => WiredMetric::new(*nominal_cost, *received, *window)
+                .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
+                .ok_or_else(|| ConfigError::InvalidMetric("invalid wired parameters".into())),
+            Self::Etx { window } => EtxMetric::new(*window)
+                .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
+                .ok_or_else(|| ConfigError::InvalidMetric("ETX window must be in 1..=16".into())),
+            Self::Rtt {
+                base,
+                alpha,
+                min_rtt_ms,
+                max_rtt_ms,
+                max_penalty,
+            } => {
+                let base = base.build()?;
+                let min_rtt_us = min_rtt_ms
+                    .checked_mul(1_000)
+                    .ok_or_else(|| ConfigError::InvalidMetric("min_rtt_ms is too large".into()))?;
+                let max_rtt_us = max_rtt_ms
+                    .checked_mul(1_000)
+                    .ok_or_else(|| ConfigError::InvalidMetric("max_rtt_ms is too large".into()))?;
+                RttMetric::new(base, *alpha, min_rtt_us, max_rtt_us, *max_penalty)
+                    .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
+                    .ok_or_else(|| ConfigError::InvalidMetric("invalid RTT parameters".into()))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BaseMetricConfig {
+    Wired {
+        #[serde(default = "default_wired_cost")]
+        nominal_cost: u16,
+        #[serde(default = "default_wired_received")]
+        received: u8,
+        #[serde(default = "default_wired_window")]
+        window: u8,
+    },
+    Etx {
+        #[serde(default = "default_etx_window")]
+        window: u8,
+    },
+}
+
+impl Default for BaseMetricConfig {
+    fn default() -> Self {
+        Self::Wired {
+            nominal_cost: default_wired_cost(),
+            received: default_wired_received(),
+            window: default_wired_window(),
+        }
+    }
+}
+
+impl BaseMetricConfig {
+    fn build(&self) -> Result<Arc<dyn MetricProfile>, ConfigError> {
+        match self {
+            Self::Wired {
+                nominal_cost,
+                received,
+                window,
+            } => WiredMetric::new(*nominal_cost, *received, *window)
+                .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
+                .ok_or_else(|| ConfigError::InvalidMetric("invalid wired base parameters".into())),
+            Self::Etx { window } => EtxMetric::new(*window)
+                .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
+                .ok_or_else(|| {
+                    ConfigError::InvalidMetric("ETX base window must be in 1..=16".into())
+                }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -69,6 +192,8 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("interfaces must not be empty")]
     NoInterfaces,
+    #[error("invalid metric configuration: {0}")]
+    InvalidMetric(String),
     #[error("interface match patterns must not be empty")]
     EmptyInterfacePattern,
     #[error("interface match pattern {0} is duplicated")]
@@ -145,6 +270,7 @@ impl Config {
         for origin in &self.origins {
             origin.key()?;
         }
+        self.metric.build()?;
         Ok(())
     }
 
@@ -155,7 +281,9 @@ impl Config {
     }
 
     pub fn reload_identity_matches(&self, candidate: &Self) -> bool {
-        self.router_id == candidate.router_id && self.state_file == candidate.state_file
+        self.router_id == candidate.router_id
+            && self.state_file == candidate.state_file
+            && self.metric == candidate.metric
     }
 }
 
@@ -189,6 +317,30 @@ fn default_protocol() -> u8 {
 }
 fn default_manage_rules() -> bool {
     true
+}
+fn default_wired_cost() -> u16 {
+    WiredMetric::DEFAULT_NOMINAL_COST
+}
+fn default_wired_received() -> u8 {
+    WiredMetric::DEFAULT_RECEIVED
+}
+fn default_wired_window() -> u8 {
+    WiredMetric::DEFAULT_WINDOW
+}
+fn default_etx_window() -> u8 {
+    EtxMetric::DEFAULT_WINDOW
+}
+fn default_rtt_alpha() -> f64 {
+    RttMetric::DEFAULT_ALPHA
+}
+fn default_rtt_min_ms() -> u32 {
+    RttMetric::DEFAULT_MIN_RTT_US / 1_000
+}
+fn default_rtt_max_ms() -> u32 {
+    RttMetric::DEFAULT_MAX_RTT_US / 1_000
+}
+fn default_rtt_max_penalty() -> u16 {
+    RttMetric::DEFAULT_MAX_PENALTY
 }
 
 #[cfg(test)]
@@ -285,5 +437,63 @@ table = 20000
             config.validate(),
             Err(ConfigError::DuplicateInterfacePattern(_))
         ));
+    }
+
+    #[test]
+    fn omitted_metric_uses_rfc_wired_defaults() {
+        let config = Config::parse(
+            r#"
+interfaces = ["eth0"]
+[export]
+[[export.views]]
+table = 20000
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.metric, MetricConfig::default());
+        assert_eq!(config.metric.build().unwrap().name(), "wired");
+    }
+
+    #[test]
+    fn rtt_metric_supports_a_configured_etx_base() {
+        let config = Config::parse(
+            r#"
+interfaces = ["mesh0"]
+[metric]
+type = "rtt"
+alpha = 0.85
+min_rtt_ms = 5
+max_rtt_ms = 80
+max_penalty = 200
+[metric.base]
+type = "etx"
+window = 8
+[export]
+[[export.views]]
+table = 20000
+"#,
+        )
+        .unwrap();
+        let profile = config.metric.build().unwrap();
+        assert_eq!(profile.name(), "rtt(etx)");
+        assert!(profile.timestamps_enabled());
+    }
+
+    #[test]
+    fn invalid_metric_parameters_are_rejected() {
+        let error = Config::parse(
+            r#"
+interfaces = ["eth0"]
+[metric]
+type = "wired"
+received = 4
+window = 3
+[export]
+[[export.views]]
+table = 20000
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::InvalidMetric(_)));
     }
 }
