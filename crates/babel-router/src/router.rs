@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use babel_proto::{
-    Action, DecodeContext, Engine, EngineConfig, Event, FixedMetric, LinkMetric, NeighborStatus,
-    RouteKey, RouterId, decode_packet, encode_packet,
+    Action, AdditiveMetric, DecodeContext, Engine, EngineConfig, Event, MetricAlgebra,
+    MetricProfile, NeighborStatus, RouteKey, RouterId, WiredMetric, decode_packet, encode_packet,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -45,6 +45,7 @@ pub struct RouterInterfaceStatus {
 
 #[derive(Clone, Debug, Default)]
 pub struct RouterStatus {
+    pub metric: String,
     pub interfaces: Vec<String>,
     pub interface_details: Vec<RouterInterfaceStatus>,
     pub neighbours: usize,
@@ -89,7 +90,8 @@ struct Runtime {
     received_tx: mpsc::Sender<Received>,
     shutdown: watch::Receiver<bool>,
     route_updates: watch::Sender<RouteSnapshot>,
-    metric: Arc<dyn LinkMetric>,
+    metric: Arc<dyn MetricProfile>,
+    metric_algebra: Arc<dyn MetricAlgebra>,
     sequence_number: u16,
     sequence_store: Arc<dyn SequenceStore>,
 }
@@ -179,7 +181,8 @@ pub struct BabelRouterBuilder {
     interfaces: Vec<String>,
     origins: Vec<(RouteKey, u16)>,
     exporter: Option<Arc<dyn RouteExporter>>,
-    metric: Option<Arc<dyn LinkMetric>>,
+    metric: Option<Arc<dyn MetricProfile>>,
+    metric_algebra: Option<Arc<dyn MetricAlgebra>>,
     sequence_number: u16,
     sequence_store: Option<Arc<dyn SequenceStore>>,
 }
@@ -201,8 +204,16 @@ impl BabelRouterBuilder {
         self.exporter = Some(Arc::new(value));
         self
     }
-    pub fn metric(mut self, value: impl LinkMetric) -> Self {
+    pub fn metric(mut self, value: impl MetricProfile) -> Self {
         self.metric = Some(Arc::new(value));
+        self
+    }
+    pub fn metric_profile(mut self, value: Arc<dyn MetricProfile>) -> Self {
+        self.metric = Some(value);
+        self
+    }
+    pub fn metric_algebra(mut self, value: impl MetricAlgebra) -> Self {
+        self.metric_algebra = Some(Arc::new(value));
         self
     }
     pub fn sequence_number(mut self, value: u16) -> Self {
@@ -257,7 +268,10 @@ impl BabelRouterBuilder {
             route_updates,
             metric: self
                 .metric
-                .unwrap_or_else(|| Arc::new(FixedMetric::default())),
+                .unwrap_or_else(|| Arc::new(WiredMetric::default())),
+            metric_algebra: self
+                .metric_algebra
+                .unwrap_or_else(|| Arc::new(AdditiveMetric)),
             sequence_number: self.sequence_number,
             sequence_store: self
                 .sequence_store
@@ -323,6 +337,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         mut shutdown,
         route_updates,
         metric,
+        metric_algebra,
         sequence_number,
         sequence_store,
     } = runtime;
@@ -331,6 +346,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     let mut engine = Engine::new(EngineConfig {
         router_id,
         metric,
+        metric_algebra,
         sequence_number,
         hello_interval_cs: 400,
         update_interval_cs: 1600,
@@ -347,6 +363,12 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
             &sequence_store,
             engine.handle(Event::InterfaceUp {
                 interface: interface.clone(),
+                local_addresses: sockets
+                    .get(interface)
+                    .into_iter()
+                    .flat_map(|socket| socket.local_addresses.iter().copied())
+                    .map(IpAddr::V6)
+                    .collect(),
                 now_ms: now(),
             }),
         )
@@ -369,6 +391,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     }
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     let mut status = RouterStatus {
+        metric: engine.metric_name(),
         interfaces,
         interface_details: interface_status(&sockets),
         ..RouterStatus::default()
@@ -455,7 +478,13 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                                 spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx);
                                 sockets.insert(interface.clone(), socket);
                                 interface_stops.insert(interface.clone(), stop);
-                                apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceUp { interface, now_ms: now() })).await?;
+                                let local_addresses = sockets
+                                    .get(&interface)
+                                    .into_iter()
+                                    .flat_map(|socket| socket.local_addresses.iter().copied())
+                                    .map(IpAddr::V6)
+                                    .collect();
+                                apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceUp { interface, local_addresses, now_ms: now() })).await?;
                                 status.interfaces = sorted_interface_names(&sockets);
                                 status.interface_details = interface_status(&sockets);
                                 Ok(())

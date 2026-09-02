@@ -62,6 +62,34 @@ split horizon on their ingress interface. Selection changes are advertised
 immediately, including an infinity retraction when the last selected path
 disappears.
 
+## Metric model
+
+The engine owns RFC protocol observations, not a link-quality formula. It
+maintains independent 16-bit Multicast and Unicast Hello histories, IHU hold
+state, RFC 9616 timestamp echo state, and validated RTT samples. A
+`MetricProfile` creates one `NeighborMetric` per adjacency. That state computes
+the receive cost advertised in IHU, the peer-advertised transmission cost, and
+the final link cost. A separate `MetricAlgebra` extends an advertised route
+metric across the link.
+
+The built-in profiles are RFC 8966 k-out-of-j wired sensing, RFC 8966 ETX, and
+the RFC 9616 RTT policy composed over either base. Algorithm constants live in
+those profiles; the engine retains only protocol constants such as infinity.
+It rejects zero link costs and any finite extended metric that is not strictly
+larger than the advertised metric, even for a custom implementation.
+
+Candidates retain both the received advertised metric and their current
+computed metric. Hello, IHU, RTT, or hold-timer changes recompute every affected
+candidate without waiting for another Update. Route selection also maintains a
+smoothed candidate metric with a three-Hello time constant and changes next hop
+only when the alternative is better in both instantaneous and smoothed cost,
+as recommended by RFC 8966 Appendix A.3.
+
+RFC 9616 wire behaviour remains in the engine: Timestamp sub-TLVs use the
+Hello/IHU Mills exchange, monotonic timestamps, modulo-32-bit arithmetic, and
+the recommended three-minute stale-sample bound. EWMA smoothing and bounded
+RTT-to-cost mapping belong to `RttMetric` and are therefore replaceable.
+
 ## Persistence and failure
 
 Router-ID and local sequence number share a versioned TOML state file. Startup

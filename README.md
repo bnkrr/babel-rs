@@ -30,8 +30,11 @@ feasibility, route selection, route and sequence-number requests, retractions,
 and multi-hop propagation. It also implements RFC 9079 source-specific routes
 and RFC 9229 IPv4 routes with IPv6 next hops.
 
-RFC 9616 Timestamp sub-TLVs are encoded and decoded, but the daemon currently
-uses a replaceable fixed-cost metric rather than an RTT metric. RFC 8967/8968
+Link quality is policy rather than an engine constant. The built-in profiles
+implement RFC 8966 wired k-out-of-j sensing and ETX, plus RFC 9616 timestamp
+sampling and its recommended RTT cost policy. Wired 2-out-of-3 with nominal
+cost 96 is the default. Embedders can supply a different `MetricProfile` and
+`MetricAlgebra` without replacing the protocol engine. RFC 8967/8968
 authentication is not implemented. Deployments should therefore run Babel on
 a protected link when authentication is required.
 
@@ -73,6 +76,36 @@ multiple names, and starting with no current matches is valid. The daemon
 continuously attaches new matches, withdraws routes when interfaces disappear,
 and rebinds a same-name interface created with a new ifindex.
 
+The optional `[metric]` table selects a built-in policy. Omitting it uses the
+RFC 8966 wired defaults:
+
+```toml
+[metric]
+type = "wired"
+nominal_cost = 96
+received = 2
+window = 3
+```
+
+RTT is an RFC 9616 modifier over a wired or ETX base. Its timestamp exchange is
+backwards compatible with peers that do not implement the extension:
+
+```toml
+[metric]
+type = "rtt"
+alpha = 0.836
+min_rtt_ms = 10
+max_rtt_ms = 120
+max_penalty = 150
+
+[metric.base]
+type = "wired"
+```
+
+ETX uses `type = "etx"` and an optional `window` in `1..=16` (default 6).
+All algorithm defaults remain configurable in the daemon rather than being
+embedded in the engine.
+
 ## Daemon behaviour
 
 Every route update and a two-second safety pass reconcile the complete
@@ -84,9 +117,10 @@ manager can set `manage_rules = false`.
 
 `SIGHUP` parses and validates a complete candidate before committing interface
 patterns, origins, and export policy. An invalid candidate leaves the active
-configuration unchanged. Router-ID and `state_file` identify persisted
-protocol state and cannot change during reload. SIGINT and SIGTERM retract
-local origins and then reconcile an empty snapshot.
+configuration unchanged. Router-ID, `state_file`, and metric policy identify
+live protocol state and cannot change during reload; changing them requires a
+restart. SIGINT and SIGTERM retract local origins and then reconcile an empty
+snapshot.
 
 `babel-rs --config ...` remains accepted for v0.1 compatibility, while the
 explicit `run` command enables the default control socket. Use
@@ -108,11 +142,12 @@ cargo run -p babel-router --example embedded
 ```
 
 `BabelRouter::builder()` accepts typed Router-ID, interfaces, originated
-routes, a `LinkMetric`, `SequenceStore`, and `RouteExporter`. `RouterHandle`
-supports originate and withdraw operations, dynamic interface changes, status,
-route subscription, and graceful shutdown. The exporter receives a
-generation-tagged full desired-state snapshot rather than an unrecoverable
-stream of deltas.
+routes, a `MetricProfile`, optional `MetricAlgebra`, `SequenceStore`, and
+`RouteExporter`. A profile creates independent per-neighbour state and receives
+typed Hello, IHU, and RTT observations. `RouterHandle` supports originate and
+withdraw operations, dynamic interface changes, status, route subscription,
+and graceful shutdown. The exporter receives a generation-tagged full
+desired-state snapshot rather than an unrecoverable stream of deltas.
 
 See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the protocol, runtime, and
 exporter boundaries.
@@ -136,8 +171,8 @@ BABEL_RS_E2E_HOST=router-test-vm tests/e2e/run-on-linux-vm.sh
 Set `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN`, or
 `BABEL_RS_E2E_REMOTE_ROOT` when their defaults do not fit the local setup. The
 suite covers `babeld`, BIRD, IPv4-over-IPv6, IPv6, source-specific routes,
-withdraw and reannounce, persisted restart state, stale-route cleanup,
-three-node propagation, link failure, and recovery.
+RFC 9616 RTT sampling, withdraw and reannounce, persisted restart state,
+stale-route cleanup, three-node propagation, link failure, and recovery.
 
 ## License
 

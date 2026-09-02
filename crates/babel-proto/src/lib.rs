@@ -6,7 +6,10 @@ pub mod model;
 pub mod wire;
 
 pub use engine::{Action, Engine, EngineConfig, Event, NeighborStatus};
-pub use metric::{FixedMetric, LinkMetric};
+pub use metric::{
+    AdditiveMetric, EtxMetric, HelloHistories, HelloHistory, HelloHistoryUpdate, MetricAlgebra,
+    MetricProfile, MetricStatus, NeighborMetric, RttMetric, WiredMetric,
+};
 pub use model::*;
 pub use wire::{
     DecodeContext, Packet, SubTlv, Tlv, Update, WireError, decode_packet, encode_packet,

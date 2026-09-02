@@ -30,6 +30,12 @@ prior active configuration on rejection, and returns its committed generation
 and SHA-256 digest. `shutdown` acknowledges and flushes its response before
 initiating the same graceful path used by SIGINT and SIGTERM.
 
+`status.metric` identifies the active metric profile. Each `neighbors` entry
+reports its concrete algorithm, separate `receive_cost`, `transmit_cost`, and
+`link_cost`, both 16-bit Hello histories, and (when RFC 9616 is active) the last
+and smoothed RTT in microseconds plus the current RTT penalty. `reachable` is
+derived from the final link cost rather than from receipt of a Hello alone.
+
 There are intentionally no imperative add/delete route, origin, neighbour, or
 interface commands. Those resources remain owned by the configuration and the
 protocol engine, so restart and reconciliation have one source of truth.
