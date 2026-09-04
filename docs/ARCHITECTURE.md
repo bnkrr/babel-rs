@@ -8,17 +8,26 @@ selected-route replacement, or sequence persistence. It performs no I/O,
 spawns no tasks, reads no clock, and contains no async or operating-system
 types.
 
+Inbound resolved messages and semantic outbound messages are distinct types.
 The wire decoder checks framing and TLV lengths before semantic decoding. Its
 per-packet context tracks Router-ID, Next-Hop and compressed prefixes, as
 required because an Update is not independently decodable. Unknown ordinary
 TLVs are retained, unknown optional sub-TLVs are skipped, and an unknown
 mandatory sub-TLV discards only its enclosing TLV.
 
+The outbound packetizer is the sole owner of Router-ID and Next-Hop context.
+It repeats context after packet boundaries and emits independently decodable
+datagrams within the IPv6 minimum-MTU UDP payload budget. This applies equally
+to finite updates and retractions.
+
 `babel-router` owns one serialized engine plus orthogonal per-interface UDP
-receiver tasks. Interfaces bind UDP/6696 with `SO_BINDTODEVICE`, join
+receiver and bounded sender tasks. Interfaces bind UDP/6696 with
+`SO_BINDTODEVICE`, join
 `ff02::1:6`, use hop limit 1, and accept only non-local unicast link-local
-sources. Bounded command and receive queues feed the engine. The public
-runtime boundary is:
+sources. Bounded command, receive, and output queues isolate the engine. Route
+export is an independent capacity-one desired-state worker: a slow exporter
+may skip obsolete generations but must converge to the newest snapshot. The
+public runtime boundary is:
 
 ```text
 BabelRouterBuilder -> BabelRouter -> RouterHandle
@@ -61,6 +70,9 @@ atomically; route selection then emits one new generation. Learned routes use
 split horizon on their ingress interface. Selection changes are advertised
 immediately, including an infinity retraction when the last selected path
 disappears.
+Source entries are maintained only when a finite route is actually advertised,
+are not refreshed by retractions, and expire after the RFC-recommended
+three-minute source GC interval.
 
 ## Metric model
 
@@ -94,7 +106,9 @@ Hello/IHU Mills exchange, monotonic timestamps, modulo-32-bit arithmetic, and
 the recommended three-minute stale-sample bound. RTT profiles may request an
 independent per-neighbour unicast probe interval instead of waiting for the
 regular IHU timer. Time-based EWMA smoothing and bounded RTT-to-cost mapping
-belong to `RttMetric` and are therefore replaceable.
+belong to `RttMetric` and are therefore replaceable. Probe schedules use
+per-neighbour jitter, enforce a 100 ms minimum interval, and cap work per
+engine tick.
 
 ## Persistence and failure
 
@@ -105,9 +119,12 @@ new file, fsynced, renamed, and followed by a parent-directory fsync.
 Malformed datagrams are dropped without affecting protocol state. Export
 failure leaves the selected RIB intact and is reported; the periodic reconciler
 retries its complete snapshot. SIGHUP validates a full candidate before
-applying interface, origin and export diffs; invalid input keeps the old active
-configuration. Router-ID, state-file location, metric policy, and route
-selection policy remain immutable during a process lifetime. Graceful shutdown
+replacing desired state; invalid input keeps the old active configuration.
+Origins are replaced as one engine event; interface and netlink state then
+converge asynchronously. Router-ID, state-file location, metric policy,
+route-selection policy, and Linux route protocol remain immutable during a
+process lifetime. The route protocol is an exclusive ownership token within
+one network namespace and is guarded by a process-life lock. Graceful shutdown
 sends infinity retractions for all current
 local origins while interface sockets remain open, then exports an empty
 snapshot and removes owned policy rules through the exporter's distinct

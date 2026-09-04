@@ -125,8 +125,9 @@ embedded in the engine.
 
 ## Daemon behaviour
 
-Every route update and a two-second safety pass reconcile the complete
-selected-route snapshot. Out-of-band deletion and stale owned state are
+Selected-route generations are complete desired-state snapshots. A dedicated
+worker coalesces intermediate generations and the two-second safety pass
+reconciles the newest snapshot. Out-of-band deletion and stale owned state are
 repaired while routes and rules owned by other protocols remain untouched.
 Export views project ordinary and source-specific routes into complete Linux
 tables. Standalone mode can manage one source rule per view; an external
@@ -134,10 +135,12 @@ manager can set `manage_rules = false`.
 
 `SIGHUP` parses and validates a complete candidate before committing interface
 patterns, origins, and export policy. An invalid candidate leaves the active
-configuration unchanged. Router-ID, `state_file`, metric policy, and route
-selection policy identify live protocol state and cannot change during reload;
-changing them requires a restart. SIGINT and SIGTERM retract local origins and
-then reconcile an empty snapshot.
+configuration unchanged. Router-ID, `state_file`, metric policy,
+route-selection policy, and the exclusive Linux route `protocol` identify live
+protocol state and cannot change during reload; changing them requires a
+restart. All locally originated routes are replaced in one serialized engine
+operation, so a valid reload does not expose a partially updated origin set.
+SIGINT and SIGTERM retract local origins and then reconcile an empty snapshot.
 
 `babel-rs --config ...` remains accepted for v0.1 compatibility, while the
 explicit `run` command enables the default control socket. Use
@@ -188,8 +191,9 @@ BABEL_RS_E2E_HOST=router-test-vm tests/e2e/run-on-linux-vm.sh
 Set `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN`, or
 `BABEL_RS_E2E_REMOTE_ROOT` when their defaults do not fit the local setup. The
 suite covers `babeld`, BIRD, IPv4-over-IPv6, IPv6, source-specific routes,
-RFC 9616 RTT sampling, withdraw and reannounce, persisted restart state,
-stale-route cleanup, three-node propagation, link failure, and recovery.
+RFC 9616 RTT sampling, delayed multipath selection and hysteresis, withdraw and
+reannounce, persisted restart state, stale-route cleanup, three-node
+propagation, link failure, and recovery.
 
 ## License
 

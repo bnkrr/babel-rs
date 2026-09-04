@@ -29,16 +29,20 @@ pub trait RouteExporter: Send + Sync + 'static {
     }
 }
 
+#[async_trait]
 pub trait SequenceStore: Send + Sync + 'static {
-    fn persist(&self, sequence_number: u16)
-    -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    async fn persist(
+        &self,
+        sequence_number: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopSequenceStore;
 
+#[async_trait]
 impl SequenceStore for NoopSequenceStore {
-    fn persist(
+    async fn persist(
         &self,
         _sequence_number: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

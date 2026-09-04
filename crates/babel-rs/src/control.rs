@@ -2,22 +2,26 @@ use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use babel_proto::INFINITY;
 use babel_router::{RouteSnapshot, RouterHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{RwLock, mpsc, oneshot, watch};
+use tokio::sync::{RwLock, Semaphore, mpsc, oneshot, watch};
 use tracing::warn;
 
 use crate::linux::LinuxExporter;
 
 pub const API_VERSION: u32 = 1;
 const MAX_FRAME: usize = 1024 * 1024;
+const MAX_CLIENTS: usize = 64;
+const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct RuntimeMetadata {
@@ -127,6 +131,7 @@ pub async fn serve(
         }
     })?;
     let _guard = SocketGuard(path);
+    let clients = Arc::new(Semaphore::new(MAX_CLIENTS));
 
     loop {
         tokio::select! {
@@ -137,9 +142,14 @@ pub async fn serve(
             }
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
+                    let Ok(permit) = Arc::clone(&clients).try_acquire_owned() else {
+                        warn!(limit = MAX_CLIENTS, "control client limit reached");
+                        continue;
+                    };
                     let shared = shared.clone();
                     let commands = commands.clone();
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(error) = handle_client(stream, shared, commands).await {
                             warn!(%error, "control client disconnected");
                         }
@@ -189,7 +199,7 @@ async fn handle_client(
 ) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
-    write_json(
+    io_timeout(write_json(
         &mut write,
         &json!({
             "type": "hello",
@@ -197,17 +207,17 @@ async fn handle_client(
             "server_version": env!("CARGO_PKG_VERSION"),
             "capabilities": ["status", "interfaces", "neighbors", "routes", "reload", "shutdown"]
         }),
-    )
+    ))
     .await?;
 
     loop {
-        let Some(frame) = read_frame(&mut read).await? else {
+        let Some(frame) = io_timeout(read_frame(&mut read)).await? else {
             return Ok(());
         };
         let request: Request = match serde_json::from_slice(&frame) {
             Ok(value) => value,
             Err(error) => {
-                write_json(
+                io_timeout(write_json(
                     &mut write,
                     &Response {
                         api_version: API_VERSION,
@@ -219,13 +229,13 @@ async fn handle_client(
                             message: error.to_string(),
                         }),
                     },
-                )
+                ))
                 .await?;
                 continue;
             }
         };
         let dispatched = dispatch(&request, &shared, &commands).await;
-        write_json(&mut write, &dispatched.response).await?;
+        io_timeout(write_json(&mut write, &dispatched.response)).await?;
         if let Some(flushed) = dispatched.after_flush {
             let _ = flushed.send(());
             return Ok(());
@@ -310,6 +320,7 @@ async fn status(shared: &Shared) -> Result<Value, (&'static str, String)> {
         "neighbors": router.neighbours,
         "route_generation": router.route_generation,
         "selected_routes": router.selected_routes,
+        "dropped_outbound_datagrams": router.dropped_outbound_datagrams,
         "export": {
             "last_success_age_seconds": export.last_success_age.map(|value| value.as_secs()),
             "last_error": export.last_error,
@@ -462,9 +473,12 @@ fn failure(id: u64, code: &'static str, message: String) -> Response<'static> {
     }
 }
 
-async fn read_frame<R: AsyncBufReadExt + Unpin>(read: &mut R) -> io::Result<Option<Vec<u8>>> {
+async fn read_frame<R: AsyncBufRead + Unpin>(read: &mut R) -> io::Result<Option<Vec<u8>>> {
     let mut frame = Vec::new();
-    let length = read.read_until(b'\n', &mut frame).await?;
+    let length = read
+        .take((MAX_FRAME + 1) as u64)
+        .read_until(b'\n', &mut frame)
+        .await?;
     if length == 0 {
         return Ok(None);
     }
@@ -480,14 +494,26 @@ async fn read_frame<R: AsyncBufReadExt + Unpin>(read: &mut R) -> io::Result<Opti
     Ok(Some(frame))
 }
 
-async fn write_json<W: AsyncWriteExt + Unpin, T: Serialize>(
+async fn write_json<W: AsyncWrite + Unpin, T: Serialize>(
     write: &mut W,
     value: &T,
 ) -> io::Result<()> {
     let mut data = serde_json::to_vec(value).map_err(io::Error::other)?;
     data.push(b'\n');
+    if data.len() > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "control response exceeds one MiB",
+        ));
+    }
     write.write_all(&data).await?;
     write.flush().await
+}
+
+async fn io_timeout<T>(future: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+    tokio::time::timeout(CLIENT_IO_TIMEOUT, future)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "control client timed out"))?
 }
 
 pub async fn request(
@@ -498,19 +524,19 @@ pub async fn request(
     let stream = UnixStream::connect(path).await?;
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
-    let hello = read_frame(&mut read)
+    let hello = io_timeout(read_frame(&mut read))
         .await?
         .ok_or(ControlClientError::Closed)?;
     let hello: Value = serde_json::from_slice(&hello)?;
     if hello.get("api_version") != Some(&Value::from(API_VERSION)) {
         return Err(ControlClientError::Version(hello));
     }
-    write_json(
+    io_timeout(write_json(
         &mut write,
         &json!({"api_version": API_VERSION, "id": 1, "command": command, "params": params}),
-    )
+    ))
     .await?;
-    let response = read_frame(&mut read)
+    let response = io_timeout(read_frame(&mut read))
         .await?
         .ok_or(ControlClientError::Closed)?;
     let response: Value = serde_json::from_slice(&response)?;
@@ -562,5 +588,17 @@ mod tests {
         .unwrap();
         assert_eq!(value["generation"], 3);
         assert_eq!(value["routes"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_bounded_before_newline() {
+        let (mut client, server) = tokio::io::duplex(MAX_FRAME + 2);
+        let writer = tokio::spawn(async move {
+            client.write_all(&vec![b'x'; MAX_FRAME + 1]).await.unwrap();
+        });
+        let mut server = BufReader::new(server);
+        let error = read_frame(&mut server).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        writer.await.unwrap();
     }
 }

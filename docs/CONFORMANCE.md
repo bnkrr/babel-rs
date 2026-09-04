@@ -11,20 +11,21 @@ optional Babel extension.
 | RFC 8966 separate Multicast/Unicast Hello histories and IHU expiry | implemented | history arithmetic, dynamic-cost, expiry and link-failure tests |
 | Feasibility distance and 16-bit sequence arithmetic | implemented | model/engine feasibility tests |
 | Route Request, Seqno Request and forwarding | implemented | local and remote Seqno Request tests; babeld reannouncement E2E |
-| Triggered/periodic Update and retraction | implemented | engine retraction tests and three-node E2E |
+| Triggered/periodic Update and retraction | implemented | finite/retraction wire-context tests, lifecycle and three-node E2E |
 | RFC 9079 Source Prefix sub-TLV | implemented | codec test and babeld/BIRD FIB checks |
 | RFC 9229 AE 4 IPv4-via-IPv6 | implemented | codec test and babeld/BIRD IPv4 FIB checks |
 | RFC 8966 wired k-out-of-j metric | implemented, default | 2-out-of-3/C=96 defaults; profile and delayed-acquisition tests |
 | RFC 8966 ETX metric | implemented, optional | receive/transmit loss calculation tests; configurable window |
 | RFC 8966 route-selection hysteresis | implemented | configurable metric margins and continuous better-path dwell |
 | RFC 9616 Timestamp exchange and RTT sampling | implemented, optional | timestamp codec and Mills-exchange engine test |
-| RFC 9616 RTT smoothing and bounded cost policy | implemented, optional | time-based EWMA, configurable probe interval, bounded cost tests |
+| RFC 9616 RTT smoothing and bounded cost policy | implemented, optional | time-based EWMA, jittered probes, bounded cost and delayed-multipath tests |
 | Custom metric profiles and algebra | library API | per-neighbour `MetricProfile`; guarded strictly monotonic extension |
 | RFC 8967/8968 authentication | not implemented | use a protected link such as WireGuard |
 
 The decoder is covered by an arbitrary-byte no-panic property test. The
-runtime additionally bounds each datagram to the UDP receive buffer and uses
-bounded Tokio channels. Larger-scale resource policy and authentication are
+runtime additionally packets output to 1232-byte UDP payloads, suppresses
+repeated wildcard full-table replies, expires source state, and uses bounded
+Tokio channels. Larger-scale resource policy and authentication are
 pre-1.0 hardening work rather than implied conformance claims.
 
 Normative sources:

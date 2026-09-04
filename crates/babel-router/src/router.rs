@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use babel_proto::{
-    Action, AdditiveMetric, DecodeContext, Engine, EngineConfig, Event, MetricAlgebra,
-    MetricProfile, NeighborStatus, RouteKey, RouteSelectionConfig, RouterId, WiredMetric,
-    decode_packet, encode_packet,
+    Action, AdditiveMetric, DEFAULT_UDP_PAYLOAD_SIZE, DecodeContext, Engine, EngineConfig, Event,
+    MetricAlgebra, MetricProfile, NeighborStatus, RouteKey, RouteSelectionConfig, RouterId,
+    WiredMetric, decode_packet, encode_packets,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -29,6 +29,10 @@ pub enum RouterError {
     },
     #[error("Babel interface {0} is not active")]
     InterfaceNotFound(String),
+    #[error("duplicate originated route {0:?}")]
+    DuplicateOrigin(RouteKey),
+    #[error("originated route metric must be below Babel infinity")]
+    InvalidOriginMetric,
     #[error("router task stopped")]
     Stopped,
     #[error("router task failed: {0}")]
@@ -53,6 +57,7 @@ pub struct RouterStatus {
     pub neighbour_details: Vec<NeighborStatus>,
     pub route_generation: u64,
     pub selected_routes: usize,
+    pub dropped_outbound_datagrams: u64,
 }
 
 pub type RouteStream = watch::Receiver<RouteSnapshot>;
@@ -60,6 +65,10 @@ pub type RouteStream = watch::Receiver<RouteSnapshot>;
 enum Command {
     Originate(RouteKey, u16),
     Withdraw(RouteKey),
+    ReplaceOrigins(
+        BTreeMap<RouteKey, u16>,
+        oneshot::Sender<Result<(), RouterError>>,
+    ),
     AddInterface(String, oneshot::Sender<Result<(), RouterError>>),
     RemoveInterface(String, oneshot::Sender<Result<(), RouterError>>),
     Status(oneshot::Sender<RouterStatus>),
@@ -84,8 +93,10 @@ struct Runtime {
     interfaces: Vec<String>,
     origins: Vec<(RouteKey, u16)>,
     sockets: HashMap<String, Arc<InterfaceSocket>>,
+    outbound: HashMap<String, mpsc::Sender<OutboundDatagram>>,
     interface_stops: HashMap<String, watch::Sender<bool>>,
     exporter: Arc<dyn RouteExporter>,
+    export_updates: watch::Sender<RouteSnapshot>,
     commands: mpsc::Receiver<Command>,
     received: mpsc::Receiver<Received>,
     received_tx: mpsc::Sender<Received>,
@@ -97,6 +108,13 @@ struct Runtime {
     sequence_number: u16,
     sequence_store: Arc<dyn SequenceStore>,
 }
+
+struct OutboundDatagram {
+    destination: Ipv6Addr,
+    bytes: Vec<u8>,
+}
+
+const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct RouterHandle {
@@ -118,6 +136,24 @@ impl RouterHandle {
             .send(Command::Withdraw(key))
             .await
             .map_err(|_| RouterError::Stopped)
+    }
+
+    pub async fn replace_origins(&self, origins: Vec<(RouteKey, u16)>) -> Result<(), RouterError> {
+        let mut desired = BTreeMap::new();
+        for (key, metric) in origins {
+            if metric == babel_proto::INFINITY {
+                return Err(RouterError::InvalidOriginMetric);
+            }
+            if desired.insert(key, metric).is_some() {
+                return Err(RouterError::DuplicateOrigin(key));
+            }
+        }
+        let (send, receive) = oneshot::channel();
+        self.commands
+            .send(Command::ReplaceOrigins(desired, send))
+            .await
+            .map_err(|_| RouterError::Stopped)?;
+        receive.await.map_err(|_| RouterError::Stopped)?
     }
 
     pub async fn add_interface(&self, interface: impl Into<String>) -> Result<(), RouterError> {
@@ -250,7 +286,10 @@ impl BabelRouterBuilder {
         let (received_tx, received_rx) = mpsc::channel(256);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (route_updates, route_stream) = watch::channel(RouteSnapshot::default());
+        let (export_updates, export_stream) = watch::channel(RouteSnapshot::default());
+        spawn_exporter(Arc::clone(&exporter), export_stream, shutdown_rx.clone());
         let mut interface_stops = HashMap::new();
+        let mut outbound = HashMap::new();
         for (name, socket) in &sockets {
             let (stop, stop_rx) = watch::channel(false);
             interface_stops.insert(name.clone(), stop);
@@ -258,16 +297,19 @@ impl BabelRouterBuilder {
                 Arc::clone(socket),
                 received_tx.clone(),
                 shutdown_rx.clone(),
-                stop_rx,
+                stop_rx.clone(),
             );
+            outbound.insert(name.clone(), spawn_sender(Arc::clone(socket), stop_rx));
         }
         let task = tokio::spawn(run_loop(Runtime {
             router_id,
             interfaces: self.interfaces,
             origins: self.origins,
             sockets,
+            outbound,
             interface_stops,
             exporter,
+            export_updates,
             commands: commands_rx,
             received: received_rx,
             received_tx,
@@ -331,14 +373,66 @@ fn spawn_receiver(
     });
 }
 
+fn spawn_sender(
+    socket: Arc<InterfaceSocket>,
+    mut stop: watch::Receiver<bool>,
+) -> mpsc::Sender<OutboundDatagram> {
+    let (send, mut receive) = mpsc::channel::<OutboundDatagram>(OUTBOUND_QUEUE_CAPACITY);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
+                item = receive.recv() => {
+                    let Some(item) = item else { return; };
+                    if let Err(error) = socket
+                        .socket
+                        .send_to(&item.bytes, socket.destination(item.destination))
+                        .await
+                    {
+                        warn!(interface = %socket.name, %error, "Babel send failed");
+                    }
+                }
+            }
+        }
+    });
+    send
+}
+
+fn spawn_exporter(
+    exporter: Arc<dyn RouteExporter>,
+    mut snapshots: watch::Receiver<RouteSnapshot>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let mut last_generation = None;
+        loop {
+            let snapshot = snapshots.borrow_and_update().clone();
+            if last_generation != Some(snapshot.generation) {
+                if let Err(error) = exporter.reconcile(snapshot.clone()).await {
+                    warn!(%error, generation = snapshot.generation, "route export failed");
+                } else {
+                    last_generation = Some(snapshot.generation);
+                }
+            }
+            tokio::select! {
+                changed = snapshots.changed() => if changed.is_err() { return; },
+                changed = shutdown.changed() => if changed.is_err() || *shutdown.borrow() { return; },
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {},
+            }
+        }
+    });
+}
+
 async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     let Runtime {
         router_id,
         interfaces,
         origins,
         mut sockets,
+        mut outbound,
         mut interface_stops,
         exporter,
+        export_updates,
         mut commands,
         mut received,
         received_tx,
@@ -362,14 +456,12 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         route_selection,
     });
     let initial = RouteSnapshot::default();
-    if let Err(error) = exporter.reconcile(initial.clone()).await {
-        warn!(%error, "initial route export failed");
-    }
+    export_updates.send_replace(initial.clone());
     route_updates.send_replace(initial);
     for interface in &interfaces {
         apply_actions(
-            &sockets,
-            &exporter,
+            &outbound,
+            &export_updates,
             &sequence_store,
             engine.handle(Event::InterfaceUp {
                 interface: interface.clone(),
@@ -388,8 +480,8 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     for (key, metric) in origins {
         origin_keys.insert(key);
         apply_actions(
-            &sockets,
-            &exporter,
+            &outbound,
+            &export_updates,
             &sequence_store,
             engine.handle(Event::Originate {
                 key,
@@ -419,11 +511,11 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 for key in &origin_keys {
                     let actions = engine.handle(Event::Withdraw { key: *key, now_ms: now() });
                     retractions.extend(actions.iter().filter(|action| matches!(action, Action::Send { .. })).cloned());
-                    apply_actions(&sockets, &exporter, &sequence_store, actions).await?;
+                    apply_actions(&outbound, &export_updates, &sequence_store, actions).await?;
                 }
                 for _ in 0..2 {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    apply_actions(&sockets, &exporter, &sequence_store, retractions.clone()).await?;
+                    apply_actions(&outbound, &export_updates, &sequence_store, retractions.clone()).await?;
                 }
                 let empty = RouteSnapshot { generation: status.route_generation.wrapping_add(1), routes: vec![] };
                 if let Err(error) = exporter.shutdown(empty.clone()).await { warn!(%error, "final route export cleanup failed"); }
@@ -431,7 +523,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 return Ok(());
             },
             _ = ticker.tick() => {
-                apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Tick { now_ms: now() })).await?;
+                apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::Tick { now_ms: now() })).await?;
                 status.neighbours = engine.neighbour_count();
                 status.neighbour_details = engine.neighbour_status(now());
             },
@@ -445,7 +537,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     }
                     match decode_packet(&bytes, DecodeContext { source }) {
                         Ok(packet) => {
-                            apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms: now() })).await?;
+                            apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms: now() })).await?;
                             status.neighbours = engine.neighbour_count();
                             status.neighbour_details = engine.neighbour_status(now());
                         },
@@ -457,10 +549,11 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     if is_current {
                         warn!(%interface, index, %error, "detaching failed Babel interface");
                         sockets.remove(&interface);
+                        outbound.remove(&interface);
                         if let Some(stop) = interface_stops.remove(&interface) {
                             let _ = stop.send(true);
                         }
-                        apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await?;
+                        apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await?;
                         status.interfaces = sorted_interface_names(&sockets);
                         status.interface_details = interface_status(&sockets);
                         status.neighbours = engine.neighbour_count();
@@ -469,13 +562,32 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 }
             },
             Some(command) = commands.recv() => match command {
+                Command::ReplaceOrigins(origins, reply) => {
+                    origin_keys = origins.keys().copied().collect();
+                    let result = apply_actions_with_status(
+                        &outbound,
+                        &export_updates,
+                        &sequence_store,
+                        &route_updates,
+                        &mut status,
+                        engine.handle(Event::ReplaceOrigins { origins, now_ms: now() }),
+                    ).await;
+                    match result {
+                        Ok(()) => { let _ = reply.send(Ok(())); }
+                        Err(error) => {
+                            let message = error.to_string();
+                            let _ = reply.send(Err(RouterError::Task(message.clone())));
+                            return Err(RouterError::Task(message));
+                        }
+                    }
+                },
                 Command::Originate(key, metric) => {
                     origin_keys.insert(key);
-                    apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Originate { key, metric, now_ms: now() })).await?
+                    apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::Originate { key, metric, now_ms: now() })).await?
                 },
                 Command::Withdraw(key) => {
                     origin_keys.remove(&key);
-                    apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() })).await?
+                    apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() })).await?
                 },
                 Command::AddInterface(interface, reply) => {
                     let result = if sockets.contains_key(&interface) {
@@ -485,7 +597,8 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                             Ok(socket) => {
                                 let socket = Arc::new(socket);
                                 let (stop, stop_rx) = watch::channel(false);
-                                spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx);
+                                spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx.clone());
+                                outbound.insert(interface.clone(), spawn_sender(socket.clone(), stop.subscribe()));
                                 sockets.insert(interface.clone(), socket);
                                 interface_stops.insert(interface.clone(), stop);
                                 let local_addresses = sockets
@@ -494,7 +607,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                                     .flat_map(|socket| socket.local_addresses.iter().copied())
                                     .map(IpAddr::V6)
                                     .collect();
-                                apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceUp { interface, local_addresses, now_ms: now() })).await?;
+                                apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceUp { interface, local_addresses, now_ms: now() })).await?;
                                 status.interfaces = sorted_interface_names(&sockets);
                                 status.interface_details = interface_status(&sockets);
                                 Ok(())
@@ -506,10 +619,11 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 }
                 Command::RemoveInterface(interface, reply) => {
                     let result = if sockets.remove(&interface).is_some() {
+                        outbound.remove(&interface);
                         if let Some(stop) = interface_stops.remove(&interface) {
                             let _ = stop.send(true);
                         }
-                        apply_actions_with_status(&sockets, &exporter, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await?;
+                        apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await?;
                         status.interfaces = sorted_interface_names(&sockets);
                         status.interface_details = interface_status(&sockets);
                         Ok(())
@@ -548,16 +662,16 @@ fn interface_status(sockets: &HashMap<String, Arc<InterfaceSocket>>) -> Vec<Rout
 }
 
 async fn apply_actions(
-    sockets: &HashMap<String, Arc<InterfaceSocket>>,
-    exporter: &Arc<dyn RouteExporter>,
+    outbound: &HashMap<String, mpsc::Sender<OutboundDatagram>>,
+    export_updates: &watch::Sender<RouteSnapshot>,
     sequence_store: &Arc<dyn SequenceStore>,
     actions: Vec<Action>,
 ) -> Result<(), RouterError> {
     let mut ignored = RouterStatus::default();
     let (updates, _) = watch::channel(RouteSnapshot::default());
     apply_actions_with_status(
-        sockets,
-        exporter,
+        outbound,
+        export_updates,
         sequence_store,
         &updates,
         &mut ignored,
@@ -567,13 +681,14 @@ async fn apply_actions(
 }
 
 async fn apply_actions_with_status(
-    sockets: &HashMap<String, Arc<InterfaceSocket>>,
-    exporter: &Arc<dyn RouteExporter>,
+    outbound: &HashMap<String, mpsc::Sender<OutboundDatagram>>,
+    export_updates: &watch::Sender<RouteSnapshot>,
     sequence_store: &Arc<dyn SequenceStore>,
     route_updates: &watch::Sender<RouteSnapshot>,
     status: &mut RouterStatus,
     actions: Vec<Action>,
 ) -> Result<(), RouterError> {
+    let mut queued = HashSet::new();
     for action in actions {
         match action {
             Action::Send {
@@ -581,17 +696,27 @@ async fn apply_actions_with_status(
                 destination: IpAddr::V6(destination),
                 packet,
             } => {
-                let Some(socket) = sockets.get(&interface) else {
+                let Some(sender) = outbound.get(&interface) else {
                     continue;
                 };
-                match encode_packet(&packet) {
-                    Ok(bytes) => {
-                        if let Err(error) = socket
-                            .socket
-                            .send_to(&bytes, socket.destination(destination))
-                            .await
-                        {
-                            warn!(%interface, %error, "Babel send failed");
+                match encode_packets(&packet, DEFAULT_UDP_PAYLOAD_SIZE) {
+                    Ok(packets) => {
+                        for bytes in packets {
+                            if !queued.insert((interface.clone(), destination, bytes.clone())) {
+                                continue;
+                            }
+                            match sender.try_send(OutboundDatagram { destination, bytes }) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    status.dropped_outbound_datagrams =
+                                        status.dropped_outbound_datagrams.saturating_add(1);
+                                    warn!(%interface, "bounded Babel output queue is full; dropping datagram");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    warn!(%interface, "Babel output task stopped");
+                                    break;
+                                }
+                            }
                         }
                     }
                     Err(error) => warn!(%interface, %error, "Babel packet encode failed"),
@@ -603,16 +728,66 @@ async fn apply_actions_with_status(
                 status.selected_routes = routes.len();
                 let snapshot = RouteSnapshot { generation, routes };
                 route_updates.send_replace(snapshot.clone());
-                if let Err(error) = exporter.reconcile(snapshot).await {
-                    warn!(%error, "route export failed");
-                }
+                export_updates.send_replace(snapshot);
             }
             Action::SequenceNumberChanged(value) => {
                 sequence_store
                     .persist(value)
+                    .await
                     .map_err(|error| RouterError::SequenceStore(error.to_string()))?;
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct SlowExporter {
+        generation: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl RouteExporter for SlowExporter {
+        async fn reconcile(
+            &self,
+            snapshot: RouteSnapshot,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            self.generation.store(snapshot.generation, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_exporter_coalesces_to_the_latest_complete_snapshot() {
+        let exporter = SlowExporter::default();
+        let observed = exporter.generation.clone();
+        let (snapshots, stream) = watch::channel(RouteSnapshot::default());
+        let (shutdown, shutdown_stream) = watch::channel(false);
+        spawn_exporter(Arc::new(exporter), stream, shutdown_stream);
+        tokio::task::yield_now().await;
+        for generation in 1..=20 {
+            snapshots.send_replace(RouteSnapshot {
+                generation,
+                routes: Vec::new(),
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while observed.load(Ordering::SeqCst) != 20 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(observed.load(Ordering::SeqCst) == 20);
+        let _ = shutdown.send(true);
+    }
 }

@@ -18,6 +18,7 @@ babel-router.workspace = true
 clap.workspace = true
 futures.workspace = true
 ipnet.workspace = true
+libc.workspace = true
 netlink-packet-route.workspace = true
 rtnetlink.workspace = true
 serde.workspace = true

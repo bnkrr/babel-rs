@@ -105,7 +105,12 @@ impl MetricConfig {
                     *max_penalty,
                 )
                 .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
-                .ok_or_else(|| ConfigError::InvalidMetric("invalid RTT parameters".into()))
+                .ok_or_else(|| {
+                    ConfigError::InvalidMetric(format!(
+                        "invalid RTT parameters (probe_interval_ms must be at least {})",
+                        RttMetric::MIN_PROBE_INTERVAL_MS
+                    ))
+                })
             }
         }
     }
@@ -247,6 +252,10 @@ pub enum ConfigError {
     DuplicateInterfacePattern(String),
     #[error("source and destination prefixes must use the same address family")]
     MixedAddressFamilies,
+    #[error("origin {0:?} is duplicated")]
+    DuplicateOrigin(RouteKey),
+    #[error("origin metric must be below Babel infinity")]
+    InvalidOriginMetric,
     #[error("export protocol must not be zero")]
     InvalidProtocol,
     #[error("export.views must not be empty")]
@@ -314,8 +323,15 @@ impl Config {
                 }
             }
         }
+        let mut origins = HashSet::new();
         for origin in &self.origins {
-            origin.key()?;
+            let key = origin.key()?;
+            if origin.metric == babel_proto::INFINITY {
+                return Err(ConfigError::InvalidOriginMetric);
+            }
+            if !origins.insert(key) {
+                return Err(ConfigError::DuplicateOrigin(key));
+            }
         }
         self.metric.build()?;
         if self.route_selection.switch_margin_percent > 100 {
@@ -342,6 +358,7 @@ impl Config {
             && self.state_file == candidate.state_file
             && self.metric == candidate.metric
             && self.route_selection == candidate.route_selection
+            && self.export.protocol == candidate.export.protocol
     }
 }
 
@@ -588,5 +605,23 @@ table = 20000
         )
         .unwrap_err();
         assert!(matches!(error, ConfigError::InvalidRouteSelection(_)));
+    }
+
+    #[test]
+    fn duplicate_origins_are_rejected_before_reload_commit() {
+        let error = Config::parse(
+            r#"
+interfaces = ["eth0"]
+[[origins]]
+destination = "2001:db8::/64"
+[[origins]]
+destination = "2001:db8::/64"
+[export]
+[[export.views]]
+table = 20000
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::DuplicateOrigin(_)));
     }
 }

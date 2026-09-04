@@ -1,10 +1,10 @@
 use std::net::IpAddr;
 
-use babel_proto::{DecodeContext, Packet, Tlv, decode_packet, encode_packet};
+use babel_proto::{DecodeContext, OutboundPacket, OutboundTlv, Tlv, decode_packet, encode_packet};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let packet = Packet {
-        tlvs: vec![Tlv::Hello {
+    let packet = OutboundPacket {
+        tlvs: vec![OutboundTlv::Hello {
             unicast: false,
             seqno: 7,
             interval_cs: 400,
@@ -18,7 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source: IpAddr::V6("fe80::1".parse()?),
         },
     )?;
-    assert_eq!(decoded, packet);
+    assert!(matches!(
+        decoded.tlvs.as_slice(),
+        [Tlv::Hello { seqno: 7, .. }]
+    ));
     println!("encoded {} bytes: {wire:02x?}", wire.len());
     Ok(())
 }

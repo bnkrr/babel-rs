@@ -3,7 +3,9 @@
 The daemon exposes a local, versioned control protocol over a Unix stream
 socket. The socket and a newly-created parent directory are mode `0600` and
 `0700`, respectively. Each frame is one UTF-8 JSON object followed by LF and
-is limited to one MiB.
+is limited to one MiB before allocation can grow past that boundary. The
+server accepts at most 64 concurrent clients and applies a 30-second idle I/O
+timeout.
 
 Immediately after accept, the server sends:
 
@@ -30,11 +32,12 @@ prior active configuration on rejection, and returns its committed generation
 and SHA-256 digest. `shutdown` acknowledges and flushes its response before
 initiating the same graceful path used by SIGINT and SIGTERM.
 
-`status.metric` identifies the active metric profile. Each `neighbors` entry
-reports its concrete algorithm, separate `receive_cost`, `transmit_cost`, and
-`link_cost`, both 16-bit Hello histories, and (when RFC 9616 is active) the last
-and smoothed RTT in microseconds plus the current RTT penalty. `reachable` is
-derived from the final link cost rather than from receipt of a Hello alone.
+`status.metric` identifies the active metric profile and
+`dropped_outbound_datagrams` exposes bounded-output overload. Each `neighbors`
+entry reports its concrete algorithm, separate `receive_cost`, `transmit_cost`,
+and `link_cost`, both 16-bit Hello histories, and (when RFC 9616 is active) the
+last and smoothed RTT in microseconds plus the current RTT penalty. `reachable`
+is derived from the final link cost rather than from receipt of a Hello alone.
 
 There are intentionally no imperative add/delete route, origin, neighbour, or
 interface commands. Those resources remain owned by the configuration and the
