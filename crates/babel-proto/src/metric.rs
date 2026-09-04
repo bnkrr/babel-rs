@@ -114,7 +114,7 @@ pub struct MetricStatus {
 pub trait NeighborMetric: Send + 'static {
     fn on_hello(&mut self, histories: HelloHistories);
     fn on_ihu(&mut self, receive_cost: u16);
-    fn on_rtt_sample(&mut self, sample_us: u32);
+    fn on_rtt_sample(&mut self, sample_us: u32, now_ms: u64);
     fn receive_cost(&self) -> u16;
     fn transmit_cost(&self) -> u16;
     fn link_cost(&self) -> u16;
@@ -127,6 +127,9 @@ pub trait MetricProfile: Send + Sync + 'static {
     fn new_neighbor(&self, interface: &str) -> Box<dyn NeighborMetric>;
     fn timestamps_enabled(&self) -> bool {
         false
+    }
+    fn rtt_probe_interval_ms(&self) -> Option<u64> {
+        None
     }
 }
 
@@ -228,7 +231,7 @@ impl NeighborMetric for WiredNeighbor {
         self.transmit_cost = receive_cost;
     }
 
-    fn on_rtt_sample(&mut self, _sample_us: u32) {}
+    fn on_rtt_sample(&mut self, _sample_us: u32, _now_ms: u64) {}
 
     fn receive_cost(&self) -> u16 {
         if self.reachable() {
@@ -327,7 +330,7 @@ impl NeighborMetric for EtxNeighbor {
         self.transmit_cost = receive_cost;
     }
 
-    fn on_rtt_sample(&mut self, _sample_us: u32) {}
+    fn on_rtt_sample(&mut self, _sample_us: u32, _now_ms: u64) {}
 
     fn receive_cost(&self) -> u16 {
         self.computed_receive_cost()
@@ -365,40 +368,47 @@ impl NeighborMetric for EtxNeighbor {
 #[derive(Clone)]
 pub struct RttMetric {
     base: Arc<dyn MetricProfile>,
-    alpha: f64,
+    probe_interval_ms: u64,
+    half_life_ms: u64,
     min_rtt_us: u32,
     max_rtt_us: u32,
     max_penalty: u16,
 }
 
 impl RttMetric {
-    pub const DEFAULT_ALPHA: f64 = 0.836;
+    pub const DEFAULT_PROBE_INTERVAL_MS: u64 = 2_000;
+    pub const DEFAULT_HALF_LIFE_MS: u64 = 6_000;
     pub const DEFAULT_MIN_RTT_US: u32 = 10_000;
     pub const DEFAULT_MAX_RTT_US: u32 = 120_000;
     pub const DEFAULT_MAX_PENALTY: u16 = 150;
 
     pub fn new(
         base: Arc<dyn MetricProfile>,
-        alpha: f64,
+        probe_interval_ms: u64,
+        half_life_ms: u64,
         min_rtt_us: u32,
         max_rtt_us: u32,
         max_penalty: u16,
     ) -> Option<Self> {
-        (alpha > 0.0 && alpha < 1.0 && min_rtt_us < max_rtt_us && max_penalty < INFINITY).then_some(
-            Self {
+        (probe_interval_ms > 0
+            && half_life_ms > 0
+            && min_rtt_us < max_rtt_us
+            && max_penalty < INFINITY)
+            .then_some(Self {
                 base,
-                alpha,
+                probe_interval_ms,
+                half_life_ms,
                 min_rtt_us,
                 max_rtt_us,
                 max_penalty,
-            },
-        )
+            })
     }
 
     pub fn recommended(base: Arc<dyn MetricProfile>) -> Self {
         Self::new(
             base,
-            Self::DEFAULT_ALPHA,
+            Self::DEFAULT_PROBE_INTERVAL_MS,
+            Self::DEFAULT_HALF_LIFE_MS,
             Self::DEFAULT_MIN_RTT_US,
             Self::DEFAULT_MAX_RTT_US,
             Self::DEFAULT_MAX_PENALTY,
@@ -416,29 +426,35 @@ impl MetricProfile for RttMetric {
         Box::new(RttNeighbor {
             base: self.base.new_neighbor(interface),
             algorithm: self.name(),
-            alpha: self.alpha,
+            half_life_ms: self.half_life_ms,
             min_rtt_us: self.min_rtt_us,
             max_rtt_us: self.max_rtt_us,
             max_penalty: self.max_penalty,
             last_rtt_us: None,
             smoothed_rtt_us: None,
+            last_rtt_sample_ms: None,
         })
     }
 
     fn timestamps_enabled(&self) -> bool {
         true
     }
+
+    fn rtt_probe_interval_ms(&self) -> Option<u64> {
+        Some(self.probe_interval_ms)
+    }
 }
 
 struct RttNeighbor {
     base: Box<dyn NeighborMetric>,
     algorithm: String,
-    alpha: f64,
+    half_life_ms: u64,
     min_rtt_us: u32,
     max_rtt_us: u32,
     max_penalty: u16,
     last_rtt_us: Option<u32>,
     smoothed_rtt_us: Option<f64>,
+    last_rtt_sample_ms: Option<u64>,
 }
 
 impl RttNeighbor {
@@ -467,12 +483,18 @@ impl NeighborMetric for RttNeighbor {
         self.base.on_ihu(receive_cost);
     }
 
-    fn on_rtt_sample(&mut self, sample_us: u32) {
-        self.base.on_rtt_sample(sample_us);
+    fn on_rtt_sample(&mut self, sample_us: u32, now_ms: u64) {
+        self.base.on_rtt_sample(sample_us, now_ms);
         self.last_rtt_us = Some(sample_us);
-        self.smoothed_rtt_us = Some(self.smoothed_rtt_us.map_or(f64::from(sample_us), |old| {
-            self.alpha * old + (1.0 - self.alpha) * f64::from(sample_us)
-        }));
+        self.smoothed_rtt_us = Some(self.smoothed_rtt_us.zip(self.last_rtt_sample_ms).map_or(
+            f64::from(sample_us),
+            |(old, previous_ms)| {
+                let elapsed_ms = now_ms.saturating_sub(previous_ms);
+                let alpha = 2.0_f64.powf(-(elapsed_ms as f64) / self.half_life_ms as f64);
+                alpha * old + (1.0 - alpha) * f64::from(sample_us)
+            },
+        ));
+        self.last_rtt_sample_ms = Some(now_ms);
     }
 
     fn receive_cost(&self) -> u16 {
@@ -563,12 +585,13 @@ mod tests {
         let mut metric = profile.new_neighbor("eth0");
         metric.on_hello(histories(&[1, 2], &[]));
         metric.on_ihu(96);
-        metric.on_rtt_sample(10_000);
+        metric.on_rtt_sample(10_000, 0);
         assert_eq!(metric.link_cost(), 96);
-        metric.on_rtt_sample(120_000);
+        metric.on_rtt_sample(120_000, 6_000);
+        assert_eq!(metric.status().smoothed_rtt_us, Some(65_000));
         assert!(metric.link_cost() > 96);
-        for _ in 0..64 {
-            metric.on_rtt_sample(120_000);
+        for sample in 2..=65 {
+            metric.on_rtt_sample(120_000, sample * 6_000);
         }
         assert_eq!(metric.link_cost(), 246);
     }

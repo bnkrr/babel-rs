@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use babel_proto::{
     Action, AdditiveMetric, DecodeContext, Engine, EngineConfig, Event, MetricAlgebra,
-    MetricProfile, NeighborStatus, RouteKey, RouterId, WiredMetric, decode_packet, encode_packet,
+    MetricProfile, NeighborStatus, RouteKey, RouteSelectionConfig, RouterId, WiredMetric,
+    decode_packet, encode_packet,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -92,6 +93,7 @@ struct Runtime {
     route_updates: watch::Sender<RouteSnapshot>,
     metric: Arc<dyn MetricProfile>,
     metric_algebra: Arc<dyn MetricAlgebra>,
+    route_selection: RouteSelectionConfig,
     sequence_number: u16,
     sequence_store: Arc<dyn SequenceStore>,
 }
@@ -183,6 +185,7 @@ pub struct BabelRouterBuilder {
     exporter: Option<Arc<dyn RouteExporter>>,
     metric: Option<Arc<dyn MetricProfile>>,
     metric_algebra: Option<Arc<dyn MetricAlgebra>>,
+    route_selection: Option<RouteSelectionConfig>,
     sequence_number: u16,
     sequence_store: Option<Arc<dyn SequenceStore>>,
 }
@@ -214,6 +217,10 @@ impl BabelRouterBuilder {
     }
     pub fn metric_algebra(mut self, value: impl MetricAlgebra) -> Self {
         self.metric_algebra = Some(Arc::new(value));
+        self
+    }
+    pub fn route_selection(mut self, value: RouteSelectionConfig) -> Self {
+        self.route_selection = Some(value);
         self
     }
     pub fn sequence_number(mut self, value: u16) -> Self {
@@ -272,6 +279,7 @@ impl BabelRouterBuilder {
             metric_algebra: self
                 .metric_algebra
                 .unwrap_or_else(|| Arc::new(AdditiveMetric)),
+            route_selection: self.route_selection.unwrap_or_default(),
             sequence_number: self.sequence_number,
             sequence_store: self
                 .sequence_store
@@ -338,6 +346,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         route_updates,
         metric,
         metric_algebra,
+        route_selection,
         sequence_number,
         sequence_store,
     } = runtime;
@@ -350,6 +359,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         sequence_number,
         hello_interval_cs: 400,
         update_interval_cs: 1600,
+        route_selection,
     });
     let initial = RouteSnapshot::default();
     if let Err(error) = exporter.reconcile(initial.clone()).await {

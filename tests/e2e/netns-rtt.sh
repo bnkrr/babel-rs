@@ -52,7 +52,7 @@ write_config() {
     printf 'router_id = "%s"\n' "${router_id}"
     printf 'state_file = "%s/%s.state"\n' "${runtime}" "${node}"
     printf 'interfaces = ["babel0"]\n\n'
-    printf '[metric]\ntype = "rtt"\nalpha = 0.836\nmin_rtt_ms = 10\nmax_rtt_ms = 120\nmax_penalty = 150\n\n'
+    printf '[metric]\ntype = "rtt"\nprobe_interval_ms = 2000\nhalf_life_ms = 6000\nmin_rtt_ms = 10\nmax_rtt_ms = 120\nmax_penalty = 150\n\n'
     printf '[metric.base]\ntype = "wired"\nnominal_cost = 96\nreceived = 2\nwindow = 3\n\n'
     if test -n "${origin}"; then
       printf '[[origins]]\ndestination = "%s"\n\n' "${origin}"

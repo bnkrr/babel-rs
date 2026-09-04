@@ -19,12 +19,20 @@ window = 3
 # RFC 9616 RTT can instead wrap a wired or ETX base metric:
 # [metric]
 # type = "rtt"
-# alpha = 0.836
+# probe_interval_ms = 2000
+# half_life_ms = 6000
 # min_rtt_ms = 10
 # max_rtt_ms = 120
 # max_penalty = 150
 # [metric.base]
 # type = "wired"
+
+# Optional route-switch policy. An unavailable current route is replaced
+# immediately; these thresholds apply only while it remains reachable.
+[route_selection]
+switch_margin_percent = 5
+switch_margin_metric = 8
+better_for_ms = 8000
 
 # Optional, repeatable. source omitted means the family-wide default source.
 [[origins]]

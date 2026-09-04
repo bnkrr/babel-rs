@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
@@ -10,6 +10,23 @@ use crate::model::{Distance, INFINITY, RouteKey, RouterId, SelectedRoute, seqno_
 use crate::wire::{Packet, SubTlv, Tlv, Update};
 
 pub const BABEL_MULTICAST_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 6));
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteSelectionConfig {
+    pub switch_margin_percent: u8,
+    pub switch_margin_metric: u16,
+    pub better_for_ms: u64,
+}
+
+impl Default for RouteSelectionConfig {
+    fn default() -> Self {
+        Self {
+            switch_margin_percent: 5,
+            switch_margin_metric: 8,
+            better_for_ms: 8_000,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NeighborStatus {
@@ -37,6 +54,7 @@ pub struct EngineConfig {
     pub sequence_number: u16,
     pub hello_interval_cs: u16,
     pub update_interval_cs: u16,
+    pub route_selection: RouteSelectionConfig,
 }
 
 impl EngineConfig {
@@ -48,6 +66,7 @@ impl EngineConfig {
             sequence_number: 0,
             hello_interval_cs: 400,
             update_interval_cs: 1600,
+            route_selection: RouteSelectionConfig::default(),
         }
     }
 }
@@ -119,6 +138,7 @@ struct Neighbor {
     last_ihu_ms: Option<u64>,
     ihu_interval_cs: u16,
     next_ihu_ms: u64,
+    next_rtt_probe_ms: Option<u64>,
     origin_timestamp: Option<u32>,
     receive_timestamp: Option<u32>,
     unicast_hello_seqno: u16,
@@ -138,8 +158,6 @@ struct Candidate {
     seqno: u16,
     advertised_metric: u16,
     metric: u16,
-    smoothed_metric: f64,
-    last_metric_update_ms: u64,
     next_hop: IpAddr,
     interface: String,
     expires_ms: u64,
@@ -151,6 +169,15 @@ struct Originated {
     seqno: u16,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingSwitch {
+    router_id: RouterId,
+    next_hop: IpAddr,
+    interface: String,
+    since_ms: u64,
+    current_peak_metric: u16,
+}
+
 pub struct Engine {
     config: EngineConfig,
     interfaces: BTreeMap<String, InterfaceState>,
@@ -160,6 +187,9 @@ pub struct Engine {
     originated: BTreeMap<RouteKey, Originated>,
     selected: BTreeMap<RouteKey, SelectedRoute>,
     pending_seqno: HashMap<(RouteKey, RouterId), u64>,
+    pending_switches: HashMap<RouteKey, PendingSwitch>,
+    settling_since: HashMap<RouteKey, u64>,
+    settled_routes: HashSet<RouteKey>,
     generation: u64,
     sequence_number: u16,
 }
@@ -176,6 +206,9 @@ impl Engine {
             originated: BTreeMap::new(),
             selected: BTreeMap::new(),
             pending_seqno: HashMap::new(),
+            pending_switches: HashMap::new(),
+            settling_since: HashMap::new(),
+            settled_routes: HashSet::new(),
             generation: 0,
         }
     }
@@ -348,30 +381,41 @@ impl Engine {
                         last_ihu_ms: None,
                         ihu_interval_cs: self.config.hello_interval_cs.saturating_mul(3),
                         next_ihu_ms: now_ms,
+                        next_rtt_probe_ms: self
+                            .config
+                            .metric
+                            .rtt_probe_interval_ms()
+                            .map(|_| now_ms),
                         origin_timestamp: None,
                         receive_timestamp: None,
                         unicast_hello_seqno: 0,
                         metric: self.config.metric.new_neighbor(&interface),
                     });
                 let previous_receive_cost = neighbour.metric.receive_cost();
-                let update = if *unicast {
-                    &mut neighbour.histories.unicast
-                } else {
-                    &mut neighbour.histories.multicast
-                }
-                .record(*seqno);
-                if update == HelloHistoryUpdate::Restarted {
-                    let mut histories = HelloHistories::default();
+                let update = (*interval_cs != 0).then(|| {
                     if *unicast {
-                        histories.unicast.record(*seqno);
+                        &mut neighbour.histories.unicast
                     } else {
-                        histories.multicast.record(*seqno);
+                        &mut neighbour.histories.multicast
+                    }
+                    .record(*seqno)
+                });
+                if update == Some(HelloHistoryUpdate::Restarted) {
+                    let mut histories = HelloHistories::default();
+                    if *interval_cs != 0 {
+                        if *unicast {
+                            histories.unicast.record(*seqno);
+                        } else {
+                            histories.multicast.record(*seqno);
+                        }
                     }
                     neighbour.histories = histories;
                     neighbour.multicast_timer = None;
                     neighbour.unicast_timer = None;
                     neighbour.last_ihu_ms = None;
                     neighbour.next_ihu_ms = now_ms;
+                    neighbour.next_rtt_probe_ms =
+                        self.config.metric.rtt_probe_interval_ms().map(|_| now_ms);
                     neighbour.origin_timestamp = None;
                     neighbour.receive_timestamp = None;
                     neighbour.unicast_hello_seqno = 0;
@@ -398,9 +442,6 @@ impl Engine {
                 if neighbour.metric.receive_cost() != previous_receive_cost
                     || now_ms >= neighbour.next_ihu_ms
                 {
-                    neighbour.next_ihu_ms = now_ms.saturating_add(
-                        u64::from(self.config.hello_interval_cs.saturating_mul(3)) * 10,
-                    );
                     send_ihu = true;
                 }
             }
@@ -409,7 +450,7 @@ impl Engine {
             && self.config.metric.timestamps_enabled()
             && let Some(neighbour) = self.neighbours.get_mut(&neighbour_key)
         {
-            neighbour.metric.on_rtt_sample(sample);
+            neighbour.metric.on_rtt_sample(sample, now_ms);
         }
         for tlv in &packet.tlvs {
             if let Tlv::Ihu {
@@ -502,8 +543,19 @@ impl Engine {
         let receive_cost = valid_cost(neighbour.metric.receive_cost());
         let echoed = neighbour.origin_timestamp.zip(neighbour.receive_timestamp);
         let interval_cs = self.config.hello_interval_cs.saturating_mul(3);
+        neighbour.next_ihu_ms = now_ms.saturating_add(u64::from(interval_cs) * 10);
+        let send_probe = neighbour
+            .next_rtt_probe_ms
+            .is_some_and(|deadline| now_ms >= deadline);
+        if send_probe {
+            neighbour.next_rtt_probe_ms = self
+                .config
+                .metric
+                .rtt_probe_interval_ms()
+                .map(|interval| now_ms.saturating_add(interval));
+        }
         let mut tlvs = Vec::new();
-        if self.config.metric.timestamps_enabled() {
+        if send_probe {
             neighbour.unicast_hello_seqno = neighbour.unicast_hello_seqno.wrapping_add(1);
             tlvs.push(Tlv::Hello {
                 unicast: true,
@@ -663,10 +715,6 @@ impl Engine {
             })
             .or_insert(distance);
         self.pending_seqno.remove(&(key, router_id));
-        let previous_smoothing = self
-            .candidates
-            .get(&candidate_key)
-            .map(|candidate| (candidate.smoothed_metric, candidate.last_metric_update_ms));
         self.candidates.insert(
             candidate_key,
             Candidate {
@@ -675,8 +723,6 @@ impl Engine {
                 seqno: update.seqno,
                 advertised_metric: update.metric,
                 metric,
-                smoothed_metric: previous_smoothing.map_or(f64::from(metric), |value| value.0),
-                last_metric_update_ms: previous_smoothing.map_or(now_ms, |value| value.1),
                 next_hop,
                 interface: neighbour_key.interface.clone(),
                 expires_ms: now_ms.saturating_add(u64::from(update.interval_cs) * 35),
@@ -731,15 +777,13 @@ impl Engine {
         let mut actions = self.reselect(now_ms);
         let ihu_due: Vec<_> = self
             .neighbours
-            .iter_mut()
+            .iter()
             .filter_map(|(key, neighbour)| {
-                if now_ms < neighbour.next_ihu_ms {
-                    return None;
-                }
-                neighbour.next_ihu_ms = now_ms.saturating_add(
-                    u64::from(self.config.hello_interval_cs.saturating_mul(3)) * 10,
-                );
-                Some(key.clone())
+                let regular_due = now_ms >= neighbour.next_ihu_ms;
+                let probe_due = neighbour
+                    .next_rtt_probe_ms
+                    .is_some_and(|deadline| now_ms >= deadline);
+                (regular_due || probe_due).then(|| key.clone())
             })
             .collect();
         for key in ihu_due {
@@ -869,17 +913,13 @@ impl Engine {
             .collect()
     }
 
-    fn recompute_candidate_metrics(&mut self, now_ms: u64, only: Option<&NeighborKey>) {
+    fn recompute_candidate_metrics(&mut self, _now_ms: u64, only: Option<&NeighborKey>) {
         let costs: HashMap<_, _> = self
             .neighbours
             .iter()
             .filter(|(key, _)| only.is_none_or(|wanted| wanted == *key))
             .map(|(key, neighbour)| (key.clone(), neighbour.metric.link_cost()))
             .collect();
-        let time_constant_ms = u64::from(self.config.hello_interval_cs)
-            .saturating_mul(10)
-            .saturating_mul(3)
-            .max(1);
         for ((_, _, neighbour_key), candidate) in &mut self.candidates {
             let Some(link_cost) = costs.get(neighbour_key) else {
                 continue;
@@ -890,21 +930,13 @@ impl Engine {
                 .extend(candidate.advertised_metric, *link_cost);
             if metric == INFINITY || metric <= candidate.advertised_metric {
                 candidate.metric = INFINITY;
-                candidate.last_metric_update_ms = now_ms;
                 continue;
             }
-            let elapsed = now_ms.saturating_sub(candidate.last_metric_update_ms);
-            if elapsed > 0 {
-                let alpha = (-(elapsed as f64) / time_constant_ms as f64).exp();
-                candidate.smoothed_metric =
-                    alpha * candidate.smoothed_metric + (1.0 - alpha) * f64::from(metric);
-            }
             candidate.metric = metric;
-            candidate.last_metric_update_ms = now_ms;
         }
     }
 
-    fn reselect(&mut self, _now_ms: u64) -> Vec<Action> {
+    fn reselect(&mut self, now_ms: u64) -> Vec<Action> {
         let before = self.selected.clone();
         let mut next = BTreeMap::new();
         let mut keys: Vec<_> = self
@@ -928,25 +960,89 @@ impl Engine {
                         && route.interface == selected.interface
                 })
             });
-            let chosen = if let Some(current) = current {
-                routes
-                    .iter()
-                    .copied()
-                    .filter(|route| {
-                        route.metric < current.metric
-                            && route.smoothed_metric < current.smoothed_metric
-                    })
-                    .min_by(candidate_order)
-                    .unwrap_or(current)
+            let settled = if self.settled_routes.contains(&key) {
+                true
             } else {
-                routes
-                    .into_iter()
-                    .min_by(candidate_order)
-                    .expect("non-empty")
+                let since = self.settling_since.entry(key).or_insert(now_ms);
+                if now_ms.saturating_sub(*since) >= self.config.route_selection.better_for_ms {
+                    self.settled_routes.insert(key);
+                    true
+                } else {
+                    false
+                }
+            };
+            let best = routes
+                .iter()
+                .copied()
+                .min_by(candidate_order)
+                .expect("non-empty");
+            let chosen = if let Some(current) = current {
+                if same_candidate(best, current)
+                    || !sufficiently_better(best, current, self.config.route_selection)
+                {
+                    self.pending_switches.remove(&key);
+                    current
+                } else if !settled {
+                    self.pending_switches.remove(&key);
+                    self.settling_since.insert(key, now_ms);
+                    best
+                } else {
+                    let pending =
+                        self.pending_switches
+                            .entry(key)
+                            .or_insert_with(|| PendingSwitch {
+                                router_id: best.router_id,
+                                next_hop: best.next_hop,
+                                interface: best.interface.clone(),
+                                since_ms: now_ms,
+                                current_peak_metric: current.metric,
+                            });
+                    if pending.router_id != best.router_id
+                        || pending.next_hop != best.next_hop
+                        || pending.interface != best.interface
+                    {
+                        *pending = PendingSwitch {
+                            router_id: best.router_id,
+                            next_hop: best.next_hop,
+                            interface: best.interface.clone(),
+                            since_ms: now_ms,
+                            current_peak_metric: current.metric,
+                        };
+                    }
+                    pending.current_peak_metric = pending.current_peak_metric.max(current.metric);
+                    let recovered = metric_improvement_is_significant(
+                        current.metric,
+                        pending.current_peak_metric,
+                        self.config.route_selection,
+                    );
+                    let ready = now_ms.saturating_sub(pending.since_ms)
+                        >= self.config.route_selection.better_for_ms;
+                    if recovered {
+                        self.pending_switches.remove(&key);
+                        current
+                    } else if ready {
+                        self.pending_switches.remove(&key);
+                        best
+                    } else {
+                        current
+                    }
+                }
+            } else {
+                self.pending_switches.remove(&key);
+                if !settled {
+                    self.settling_since.insert(key, now_ms);
+                }
+                best
             };
             next.insert(key, selected_from_candidate(chosen));
         }
         self.selected = next;
+        self.pending_switches
+            .retain(|key, _| self.selected.contains_key(key));
+        self.settling_since
+            .retain(|key, _| self.selected.contains_key(key));
+        self.settled_routes
+            .retain(|key| self.selected.contains_key(key));
         if self.selected != before {
             self.generation = self.generation.wrapping_add(1);
             let mut actions = vec![Action::RoutesChanged {
@@ -1109,6 +1205,32 @@ fn candidate_order(left: &&Candidate, right: &&Candidate) -> std::cmp::Ordering 
     ))
 }
 
+fn same_candidate(left: &Candidate, right: &Candidate) -> bool {
+    left.router_id == right.router_id
+        && left.next_hop == right.next_hop
+        && left.interface == right.interface
+}
+
+fn sufficiently_better(
+    candidate: &Candidate,
+    current: &Candidate,
+    policy: RouteSelectionConfig,
+) -> bool {
+    metric_improvement_is_significant(candidate.metric, current.metric, policy)
+}
+
+fn metric_improvement_is_significant(
+    better_metric: u16,
+    worse_metric: u16,
+    policy: RouteSelectionConfig,
+) -> bool {
+    let improvement = worse_metric.saturating_sub(better_metric);
+    let percentage = (u32::from(worse_metric) * u32::from(policy.switch_margin_percent))
+        .div_ceil(100)
+        .min(u32::from(u16::MAX)) as u16;
+    improvement >= policy.switch_margin_metric.max(percentage) && improvement > 0
+}
+
 fn selected_from_candidate(route: &Candidate) -> SelectedRoute {
     SelectedRoute {
         key: route.key,
@@ -1196,6 +1318,7 @@ mod tests {
             sequence_number: 0,
             hello_interval_cs: 400,
             update_interval_cs: 1600,
+            route_selection: RouteSelectionConfig::default(),
         });
         engine.handle(Event::InterfaceUp {
             interface: "wg0".into(),
@@ -1714,5 +1837,200 @@ mod tests {
         assert_eq!(status.rtt_penalty, 14);
         assert_eq!(status.link_cost, 110);
         assert_eq!(engine.selected_routes()[0].metric, 110);
+    }
+
+    #[test]
+    fn rtt_probe_runs_independently_of_the_regular_ihu_interval() {
+        let mut config = config(id(1));
+        config.metric = Arc::new(crate::metric::RttMetric::recommended(Arc::new(
+            WiredMetric::new(96, 1, 1).unwrap(),
+        )));
+        let mut engine = Engine::new(config);
+        engine.handle(Event::InterfaceUp {
+            interface: "eth0".into(),
+            local_addresses: vec![],
+            now_ms: 0,
+        });
+        let actions = engine.handle(Event::PacketReceived {
+            interface: "eth0".into(),
+            source: "fe80::2".parse().unwrap(),
+            now_ms: 10,
+            packet: Packet {
+                tlvs: vec![Tlv::Hello {
+                    unicast: false,
+                    seqno: 1,
+                    interval_cs: 400,
+                    sub_tlvs: vec![SubTlv::TimestampHello(0)],
+                }],
+            },
+        });
+        assert!(contains_unicast_timestamp_hello(&actions));
+        assert!(!contains_unicast_timestamp_hello(
+            &engine.handle(Event::Tick { now_ms: 2_009 })
+        ));
+        assert!(contains_unicast_timestamp_hello(
+            &engine.handle(Event::Tick { now_ms: 2_010 })
+        ));
+    }
+
+    #[test]
+    fn better_route_must_clear_margin_for_the_full_dwell_time() {
+        let mut engine = Engine::new(config(id(1)));
+        let route_key = key();
+        insert_candidate(&mut engine, route_key, id(2), "eth0", "fe80::2", 200);
+        insert_candidate(&mut engine, route_key, id(3), "eth1", "fe80::3", 180);
+        let current = engine
+            .candidates
+            .values()
+            .find(|candidate| candidate.interface == "eth0")
+            .map(selected_from_candidate)
+            .unwrap();
+        engine.selected.insert(route_key, current);
+        engine.settled_routes.insert(route_key);
+
+        engine.reselect(0);
+        assert_eq!(engine.selected_routes()[0].interface, "eth0");
+        engine.reselect(7_999);
+        assert_eq!(engine.selected_routes()[0].interface, "eth0");
+        engine.reselect(8_000);
+        assert_eq!(engine.selected_routes()[0].interface, "eth1");
+    }
+
+    #[test]
+    fn margin_loss_resets_dwell_but_current_route_loss_switches_immediately() {
+        let mut engine = Engine::new(config(id(1)));
+        let route_key = key();
+        insert_candidate(&mut engine, route_key, id(2), "eth0", "fe80::2", 200);
+        insert_candidate(&mut engine, route_key, id(3), "eth1", "fe80::3", 180);
+        let current = engine
+            .candidates
+            .values()
+            .find(|candidate| candidate.interface == "eth0")
+            .map(selected_from_candidate)
+            .unwrap();
+        engine.selected.insert(route_key, current);
+        engine.settled_routes.insert(route_key);
+
+        engine.reselect(0);
+        engine
+            .candidates
+            .values_mut()
+            .find(|candidate| candidate.interface == "eth1")
+            .unwrap()
+            .metric = 195;
+        engine.reselect(4_000);
+        engine
+            .candidates
+            .values_mut()
+            .find(|candidate| candidate.interface == "eth1")
+            .unwrap()
+            .metric = 180;
+        engine.reselect(5_000);
+        engine.reselect(12_999);
+        assert_eq!(engine.selected_routes()[0].interface, "eth0");
+
+        engine
+            .candidates
+            .retain(|(_, _, neighbour), _| neighbour.interface != "eth0");
+        engine.reselect(13_000);
+        assert_eq!(engine.selected_routes()[0].interface, "eth1");
+    }
+
+    #[test]
+    fn initial_candidate_discovery_is_not_delayed_by_hysteresis() {
+        let mut engine = Engine::new(config(id(1)));
+        let route_key = key();
+        insert_candidate(&mut engine, route_key, id(2), "eth0", "fe80::2", 200);
+        let current = engine
+            .candidates
+            .values()
+            .find(|candidate| candidate.interface == "eth0")
+            .map(selected_from_candidate)
+            .unwrap();
+        engine.selected.insert(route_key, current);
+        engine.settling_since.insert(route_key, 0);
+        insert_candidate(&mut engine, route_key, id(3), "eth1", "fe80::3", 180);
+
+        engine.reselect(1_000);
+        assert_eq!(engine.selected_routes()[0].interface, "eth1");
+        assert_eq!(engine.settling_since[&route_key], 1_000);
+        assert!(!engine.settled_routes.contains(&route_key));
+    }
+
+    #[test]
+    fn meaningful_current_route_recovery_cancels_a_stale_switch() {
+        let mut engine = Engine::new(config(id(1)));
+        let route_key = key();
+        insert_candidate(&mut engine, route_key, id(2), "eth0", "fe80::2", 200);
+        insert_candidate(&mut engine, route_key, id(3), "eth1", "fe80::3", 180);
+        let current = engine
+            .candidates
+            .values()
+            .find(|candidate| candidate.interface == "eth0")
+            .map(selected_from_candidate)
+            .unwrap();
+        engine.selected.insert(route_key, current);
+        engine.settled_routes.insert(route_key);
+
+        engine.reselect(0);
+        engine
+            .candidates
+            .values_mut()
+            .find(|candidate| candidate.interface == "eth0")
+            .unwrap()
+            .metric = 240;
+        engine.reselect(3_000);
+        engine
+            .candidates
+            .values_mut()
+            .find(|candidate| candidate.interface == "eth0")
+            .unwrap()
+            .metric = 220;
+        engine.reselect(7_000);
+        assert_eq!(engine.selected_routes()[0].interface, "eth0");
+
+        engine.reselect(8_000);
+        engine.reselect(15_999);
+        assert_eq!(engine.selected_routes()[0].interface, "eth0");
+        engine.reselect(16_000);
+        assert_eq!(engine.selected_routes()[0].interface, "eth1");
+    }
+
+    fn contains_unicast_timestamp_hello(actions: &[Action]) -> bool {
+        actions.iter().any(|action| matches!(
+            action,
+            Action::Send { packet, .. }
+                if packet.tlvs.iter().any(|tlv| matches!(tlv,
+                    Tlv::Hello { unicast: true, sub_tlvs, .. }
+                        if sub_tlvs.iter().any(|sub_tlv| matches!(sub_tlv, SubTlv::TimestampHello(_)))
+                ))
+        ))
+    }
+
+    fn insert_candidate(
+        engine: &mut Engine,
+        route_key: RouteKey,
+        router_id: RouterId,
+        interface: &str,
+        next_hop: &str,
+        metric: u16,
+    ) {
+        let neighbour = NeighborKey {
+            interface: interface.into(),
+            address: next_hop.parse().unwrap(),
+        };
+        engine.candidates.insert(
+            (route_key, router_id, neighbour),
+            Candidate {
+                key: route_key,
+                router_id,
+                seqno: 1,
+                advertised_metric: 0,
+                metric,
+                next_hop: next_hop.parse().unwrap(),
+                interface: interface.into(),
+                expires_ms: u64::MAX,
+            },
+        );
     }
 }

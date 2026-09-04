@@ -190,6 +190,7 @@ async fn run_daemon(
         .sequence_number(state.sequence_number)
         .sequence_store(state.store)
         .metric_profile(active_config.metric.build()?)
+        .route_selection(active_config.route_selection.into())
         .exporter(exporter.clone());
     for origin in &active_config.origins {
         builder = builder.originate(origin.key()?, origin.metric);
@@ -352,7 +353,7 @@ async fn reload(
     if !active.reload_identity_matches(&candidate) {
         return Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "router_id, state_file, and metric cannot change during reload",
+            "router_id, state_file, metric, and route_selection cannot change during reload",
         )));
     }
 

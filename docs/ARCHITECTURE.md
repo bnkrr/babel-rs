@@ -80,15 +80,21 @@ larger than the advertised metric, even for a custom implementation.
 
 Candidates retain both the received advertised metric and their current
 computed metric. Hello, IHU, RTT, or hold-timer changes recompute every affected
-candidate without waiting for another Update. Route selection also maintains a
-smoothed candidate metric with a three-Hello time constant and changes next hop
-only when the alternative is better in both instantaneous and smoothed cost,
-as recommended by RFC 8966 Appendix A.3.
+candidate without waiting for another Update. A reachable alternative must
+beat the current route by both the configured absolute and percentage margins
+for the complete `better_for_ms` interval. Falling below either margin resets
+that interval, as does a recovery of the current metric by the same margin from
+its worst value during the pending switch. Initial candidate discovery remains
+unhindered until one route has stayed selected for a full dwell interval. Loss
+of the current candidate also bypasses hysteresis and selects a reachable
+replacement immediately.
 
 RFC 9616 wire behaviour remains in the engine: Timestamp sub-TLVs use the
 Hello/IHU Mills exchange, monotonic timestamps, modulo-32-bit arithmetic, and
-the recommended three-minute stale-sample bound. EWMA smoothing and bounded
-RTT-to-cost mapping belong to `RttMetric` and are therefore replaceable.
+the recommended three-minute stale-sample bound. RTT profiles may request an
+independent per-neighbour unicast probe interval instead of waiting for the
+regular IHU timer. Time-based EWMA smoothing and bounded RTT-to-cost mapping
+belong to `RttMetric` and are therefore replaceable.
 
 ## Persistence and failure
 
@@ -100,8 +106,9 @@ Malformed datagrams are dropped without affecting protocol state. Export
 failure leaves the selected RIB intact and is reported; the periodic reconciler
 retries its complete snapshot. SIGHUP validates a full candidate before
 applying interface, origin and export diffs; invalid input keeps the old active
-configuration. Router-ID and state-file location remain immutable during a
-process lifetime. Graceful shutdown sends infinity retractions for all current
+configuration. Router-ID, state-file location, metric policy, and route
+selection policy remain immutable during a process lifetime. Graceful shutdown
+sends infinity retractions for all current
 local origins while interface sockets remain open, then exports an empty
 snapshot and removes owned policy rules through the exporter's distinct
 shutdown hook. Abrupt process death is recovered by neighbour expiry and by the
