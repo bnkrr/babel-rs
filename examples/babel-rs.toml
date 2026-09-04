@@ -59,6 +59,7 @@ manage_rules = true
 table = 20000
 
 # A source-specific view gets matching SADR routes plus ordinary fallbacks.
+# Nonzero source prefixes across all views must not overlap.
 # rule_priority defaults to table when omitted.
 [[export.views]]
 table = 20001

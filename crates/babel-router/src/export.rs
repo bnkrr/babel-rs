@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use babel_proto::SelectedRoute;
+use babel_proto::{RouteKey, SelectedRoute};
 use tokio::sync::RwLock;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RouteSnapshot {
     pub generation: u64,
     pub routes: Vec<SelectedRoute>,
+    /// Exact destinations that must not fall through to a less-specific route
+    /// while a withdrawn Babel route is retained as an unreachable tombstone.
+    pub unreachable: Vec<RouteKey>,
 }
 
 #[async_trait]

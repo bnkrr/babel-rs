@@ -33,6 +33,7 @@ impl InterfaceSocket {
         socket.join_multicast_v6(&Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 6), index)?;
         socket.set_multicast_if_v6(index)?;
         socket.set_multicast_hops_v6(1)?;
+        socket.set_unicast_hops_v6(1)?;
         socket.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(socket.into())?;
         Ok(Self {

@@ -579,6 +579,7 @@ mod tests {
             RouteSnapshot {
                 generation: 3,
                 routes: vec![route],
+                unreachable: vec![],
             },
             RouteFilter {
                 interface: Some("wg0".into()),

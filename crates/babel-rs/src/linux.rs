@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use babel_proto::SelectedRoute;
+use babel_proto::{INFINITY, RouteKey, SelectedRoute};
 use babel_router::{RouteExporter, RouteSnapshot};
 use futures::TryStreamExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::route::{
-    RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteScope, RouteVia,
+    RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteScope, RouteType, RouteVia,
 };
 use netlink_packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::{Handle, IpVersion, RouteMessageBuilder, new_connection};
@@ -54,6 +54,7 @@ struct RouteIdentity {
     priority: u32,
     output_interface: u32,
     gateway: Option<IpAddr>,
+    unreachable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -66,7 +67,8 @@ struct RuleIdentity {
 #[derive(Clone, Debug)]
 struct ProjectedRoute {
     table: u32,
-    selected: SelectedRoute,
+    key: RouteKey,
+    selected: Option<SelectedRoute>,
     source_specific: bool,
 }
 
@@ -202,46 +204,60 @@ impl LinuxExporter {
         let mut desired = HashSet::new();
         let mut messages = Vec::with_capacity(projected.len());
         for route in projected {
-            let ifindex = interface_index(&route.selected.interface)?;
-            let priority = DYNAMIC_PRIORITY_BASE + u32::from(route.selected.metric);
+            let priority = DYNAMIC_PRIORITY_BASE
+                + u32::from(
+                    route
+                        .selected
+                        .as_ref()
+                        .map_or(INFINITY, |value| value.metric),
+                );
             let mut builder = RouteMessageBuilder::<IpAddr>::new()
                 .destination_prefix(
-                    route.selected.key.destination.addr(),
-                    route.selected.key.destination.prefix_len(),
+                    route.key.destination.addr(),
+                    route.key.destination.prefix_len(),
                 )
                 .map_err(|error| LinuxError::InvalidRoute(error.to_string()))?
                 .table_id(route.table)
                 .protocol(RouteProtocol::Other(export.protocol))
-                .output_interface(ifindex)
                 .priority(priority);
-            let gateway = if export.device_only {
-                builder = builder.scope(RouteScope::Link);
-                None
+            let (message, ifindex, gateway, kind) = if let Some(selected) = &route.selected {
+                let ifindex = interface_index(&selected.interface)?;
+                builder = builder.output_interface(ifindex);
+                let gateway = if export.device_only {
+                    builder = builder.scope(RouteScope::Link);
+                    None
+                } else {
+                    builder = builder
+                        .gateway(selected.next_hop)
+                        .map_err(|error| LinuxError::InvalidRoute(error.to_string()))?
+                        .onlink();
+                    Some(selected.next_hop)
+                };
+                (builder.build(), ifindex, gateway, RouteType::Unicast)
             } else {
-                builder = builder
-                    .gateway(route.selected.next_hop)
-                    .map_err(|error| LinuxError::InvalidRoute(error.to_string()))?
-                    .onlink();
-                Some(route.selected.next_hop)
+                let mut message = builder.build();
+                message.header.kind = RouteType::Unreachable;
+                (message, 0, None, RouteType::Unreachable)
             };
-            let message = builder.build();
             let identity = RouteIdentity {
                 table: route.table,
-                destination: route.selected.key.destination,
+                destination: route.key.destination,
                 priority,
                 output_interface: ifindex,
                 gateway,
+                unreachable: kind == RouteType::Unreachable,
             };
             desired.insert(identity.clone());
             debug!(
                 table = route.table,
-                destination = %route.selected.key.destination,
-                source = ?route.selected.key.source,
+                destination = %route.key.destination,
+                source = ?route.key.source,
                 source_specific = route.source_specific,
-                interface = %route.selected.interface,
-                next_hop = %route.selected.next_hop,
+                interface = ?route.selected.as_ref().map(|value| value.interface.as_str()),
+                next_hop = ?route.selected.as_ref().map(|value| value.next_hop),
+                unreachable = route.selected.is_none(),
                 priority,
-                "installing selected route"
+                "installing Babel route"
             );
             messages.push((identity, message));
         }
@@ -408,18 +424,10 @@ fn project_routes(views: &[ExportView], snapshot: &RouteSnapshot) -> Vec<Project
     let mut projected: HashMap<(u32, IpNet), ProjectedRoute> = HashMap::new();
     for view in views {
         for route in &snapshot.routes {
-            let destination_is_v4 = route.key.destination.addr().is_ipv4();
-            let route_source = route.key.source.filter(|source| source.prefix_len() != 0);
-            let matches = match (view.source, route_source) {
-                (None, None) => true,
-                (Some(view_source), None) => view_source.addr().is_ipv4() == destination_is_v4,
-                (Some(view_source), Some(route_source)) => view_source == route_source,
-                (None, Some(_)) => false,
-            };
-            if !matches {
+            if !route_matches_view(view, route.key) {
                 continue;
             }
-            let source_specific = route_source.is_some();
+            let source_specific = route.key.source.is_some();
             let key = (view.table, route.key.destination);
             let replace = projected
                 .get(&key)
@@ -429,16 +437,42 @@ fn project_routes(views: &[ExportView], snapshot: &RouteSnapshot) -> Vec<Project
                     key,
                     ProjectedRoute {
                         table: view.table,
-                        selected: route.clone(),
+                        key: route.key,
+                        selected: Some(route.clone()),
                         source_specific,
                     },
                 );
             }
         }
+        for key in &snapshot.unreachable {
+            if !route_matches_view(view, *key) {
+                continue;
+            }
+            projected.insert(
+                (view.table, key.destination),
+                ProjectedRoute {
+                    table: view.table,
+                    key: *key,
+                    selected: None,
+                    source_specific: key.source.is_some(),
+                },
+            );
+        }
     }
     let mut result: Vec<_> = projected.into_values().collect();
-    result.sort_by_key(|route| (route.table, route.selected.key.destination));
+    result.sort_by_key(|route| (route.table, route.key.destination));
     result
+}
+
+fn route_matches_view(view: &ExportView, key: RouteKey) -> bool {
+    match (view.source, key.source) {
+        (None, None) => true,
+        (Some(view_source), None) => {
+            view_source.addr().is_ipv4() == key.destination.addr().is_ipv4()
+        }
+        (Some(view_source), Some(route_source)) => view_source == route_source,
+        (None, Some(_)) => false,
+    }
 }
 
 fn interface_index(name: &str) -> Result<u32, LinuxError> {
@@ -524,6 +558,7 @@ fn route_identity(route: &RouteMessage) -> Option<RouteIdentity> {
         priority,
         output_interface,
         gateway,
+        unreachable: route.header.kind == RouteType::Unreachable,
     })
 }
 
@@ -605,6 +640,7 @@ mod tests {
         let snapshot = RouteSnapshot {
             generation: 1,
             routes: vec![selected("192.0.2.0/24", None, 256)],
+            unreachable: vec![],
         };
         let views = vec![
             ExportView {
@@ -631,6 +667,7 @@ mod tests {
                 selected("0.0.0.0/0", None, 128),
                 selected("0.0.0.0/0", Some("10.0.0.0/8"), 512),
             ],
+            unreachable: vec![],
         };
         let views = vec![ExportView {
             table: 20001,
@@ -640,7 +677,7 @@ mod tests {
         let routes = project_routes(&views, &snapshot);
         assert_eq!(routes.len(), 1);
         assert!(routes[0].source_specific);
-        assert_eq!(routes[0].selected.metric, 512);
+        assert_eq!(routes[0].selected.as_ref().unwrap().metric, 512);
     }
 
     #[test]
@@ -648,6 +685,7 @@ mod tests {
         let snapshot = RouteSnapshot {
             generation: 1,
             routes: vec![selected("203.0.113.0/24", Some("0.0.0.0/0"), 96)],
+            unreachable: vec![],
         };
         let views = vec![
             ExportView {
@@ -664,5 +702,30 @@ mod tests {
         let routes = project_routes(&views, &snapshot);
         assert_eq!(routes.len(), 2);
         assert!(routes.iter().all(|route| !route.source_specific));
+    }
+
+    #[test]
+    fn unreachable_tombstone_is_projected_into_matching_views() {
+        let key = RouteKey::new("192.0.2.0/24".parse().unwrap(), None).unwrap();
+        let snapshot = RouteSnapshot {
+            generation: 2,
+            routes: vec![],
+            unreachable: vec![key],
+        };
+        let views = vec![
+            ExportView {
+                table: 20000,
+                source: None,
+                rule_priority: None,
+            },
+            ExportView {
+                table: 20001,
+                source: Some("10.0.0.0/8".parse().unwrap()),
+                rule_priority: None,
+            },
+        ];
+        let routes = project_routes(&views, &snapshot);
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().all(|route| route.selected.is_none()));
     }
 }

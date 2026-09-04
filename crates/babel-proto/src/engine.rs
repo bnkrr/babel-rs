@@ -14,6 +14,10 @@ use crate::wire::{
 pub const BABEL_MULTICAST_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 6));
 const SOURCE_GC_TIME_MS: u64 = 180_000;
 const MAX_RTT_PROBES_PER_TICK: usize = 32;
+const REQUEST_RETRY_INITIAL_MS: u64 = 2_000;
+const REQUEST_RETRIES: u8 = 3;
+const REQUEST_HOP_COUNT: u8 = 64;
+const RECENT_REQUEST_MS: u64 = 16_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RouteSelectionConfig {
@@ -121,6 +125,7 @@ pub enum Action {
     RoutesChanged {
         generation: u64,
         routes: Vec<SelectedRoute>,
+        unreachable: Vec<RouteKey>,
     },
     SequenceNumberChanged(u16),
 }
@@ -170,7 +175,9 @@ struct Candidate {
     metric: u16,
     next_hop: IpAddr,
     interface: String,
+    interval_cs: u16,
     expires_ms: u64,
+    refresh_requested: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -183,6 +190,25 @@ struct Originated {
 struct SourceEntry {
     distance: Distance,
     expires_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PendingSeqnoRequest {
+    seqno: u16,
+    hop_count: u8,
+    next_hop: NeighborKey,
+    requester: Option<NeighborKey>,
+    retries_left: u8,
+    next_retry_ms: u64,
+}
+
+struct SeqnoRequestSpec {
+    key: RouteKey,
+    router_id: RouterId,
+    seqno: u16,
+    hop_count: u8,
+    next_hop: NeighborKey,
+    requester: Option<NeighborKey>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,11 +224,13 @@ pub struct Engine {
     config: EngineConfig,
     interfaces: BTreeMap<String, InterfaceState>,
     neighbours: HashMap<NeighborKey, Neighbor>,
-    candidates: HashMap<(RouteKey, RouterId, NeighborKey), Candidate>,
+    candidates: HashMap<(RouteKey, NeighborKey), Candidate>,
     feasible: HashMap<(RouteKey, RouterId), SourceEntry>,
     originated: BTreeMap<RouteKey, Originated>,
     selected: BTreeMap<RouteKey, SelectedRoute>,
-    pending_seqno: HashMap<(RouteKey, RouterId), u64>,
+    pending_seqno: HashMap<(RouteKey, RouterId), PendingSeqnoRequest>,
+    recent_seqno: HashMap<(RouteKey, RouterId), (u16, u64)>,
+    tombstones: BTreeMap<RouteKey, u64>,
     pending_switches: HashMap<RouteKey, PendingSwitch>,
     settling_since: HashMap<RouteKey, u64>,
     settled_routes: HashSet<RouteKey>,
@@ -222,6 +250,8 @@ impl Engine {
             originated: BTreeMap::new(),
             selected: BTreeMap::new(),
             pending_seqno: HashMap::new(),
+            recent_seqno: HashMap::new(),
+            tombstones: BTreeMap::new(),
             pending_switches: HashMap::new(),
             settling_since: HashMap::new(),
             settled_routes: HashSet::new(),
@@ -302,6 +332,16 @@ impl Engine {
         self.selected.values().cloned().collect()
     }
 
+    pub fn unreachable_routes(&self) -> Vec<RouteKey> {
+        self.tombstones.keys().copied().collect()
+    }
+
+    fn interface_has_ipv4(&self, interface: &str) -> bool {
+        self.interfaces
+            .get(interface)
+            .is_some_and(|state| state.local_addresses.iter().any(IpAddr::is_ipv4))
+    }
+
     pub fn neighbour_count(&self) -> usize {
         self.neighbours.len()
     }
@@ -362,6 +402,7 @@ impl Engine {
             address: source,
         };
         let mut actions = Vec::new();
+        let mut changed_router_ids = HashSet::new();
         let receive_timestamp = timestamp_us(now_ms);
         let hello_timestamp = packet.tlvs.iter().find_map(|tlv| match tlv {
             Tlv::Hello { sub_tlvs, .. } => timestamp_hello(sub_tlvs),
@@ -502,23 +543,30 @@ impl Engine {
                 }),
                 Tlv::Hello { .. } | Tlv::Ihu { .. } => {}
                 Tlv::Update(update) => {
+                    if update.metric < INFINITY
+                        && let (Some(key), Some(router_id)) = (update.key, update.router_id)
+                        && self
+                            .candidates
+                            .get(&(key, neighbour_key.clone()))
+                            .is_some_and(|candidate| candidate.router_id != router_id)
+                    {
+                        changed_router_ids.insert(key);
+                    }
                     actions.extend(self.receive_update(&neighbour_key, update, now_ms))
                 }
                 Tlv::RouteRequest { key, .. } => {
                     if key.is_some() || self.full_update_request_allowed(&interface, now_ms) {
-                        actions.extend(self.send_updates(now_ms, key, Some(interface.clone())))
+                        let updates = self.send_updates(now_ms, key, Some(interface.clone()));
+                        if let Some(key) = key.filter(|_| updates.is_empty()) {
+                            actions.push(self.retraction_action(
+                                key,
+                                self.sequence_number,
+                                neighbour_key.clone(),
+                            ));
+                        } else {
+                            actions.extend(updates);
+                        }
                     }
-                }
-                Tlv::SeqnoRequest {
-                    key,
-                    seqno,
-                    hop_count: _,
-                    router_id,
-                    ..
-                } if router_id == self.config.router_id && self.originated.contains_key(&key) => {
-                    self.advance_sequence_number(seqno);
-                    actions.push(Action::SequenceNumberChanged(self.sequence_number));
-                    actions.extend(self.send_updates(now_ms, Some(key), Some(interface.clone())));
                 }
                 Tlv::SeqnoRequest {
                     key,
@@ -526,40 +574,30 @@ impl Engine {
                     hop_count,
                     router_id,
                     ..
-                } if hop_count > 1 => {
-                    if let Some(route) = self
-                        .selected
-                        .get(&key)
-                        .filter(|route| route.router_id == router_id)
-                    {
-                        if route.seqno == seqno || seqno_gt(route.seqno, seqno) {
-                            let route = route.clone();
-                            actions.push(self.learned_update_action(
-                                &route,
-                                interface.clone(),
-                                now_ms,
-                            ));
-                        } else if route.interface != interface {
-                            actions.push(Action::Send {
-                                interface: route.interface.clone(),
-                                destination: BABEL_MULTICAST_V6,
-                                packet: OutboundPacket {
-                                    tlvs: vec![OutboundTlv::SeqnoRequest {
-                                        key,
-                                        seqno,
-                                        hop_count: hop_count - 1,
-                                        router_id,
-                                        sub_tlvs: vec![],
-                                    }],
-                                },
-                            });
-                        }
-                    }
+                } => {
+                    actions.extend(self.handle_seqno_request(
+                        neighbour_key.clone(),
+                        key,
+                        seqno,
+                        hop_count,
+                        router_id,
+                        now_ms,
+                    ));
                 }
                 _ => {}
             }
         }
         actions.extend(self.reselect(now_ms));
+        // RFC 8966 section 3.5.3 requires a timely triggered update whenever
+        // an existing route entry changes Router-ID, even when that entry is
+        // not selected and route selection itself therefore did not change.
+        for key in changed_router_ids {
+            if self.originated.contains_key(&key) || self.selected.contains_key(&key) {
+                actions.extend(self.send_updates(now_ms, Some(key), None));
+            } else {
+                actions.extend(self.send_retraction(key, self.sequence_number, now_ms));
+            }
+        }
         actions
     }
 
@@ -580,7 +618,10 @@ impl Engine {
                 });
         }
         let mut tlvs = Vec::new();
-        if send_probe {
+        if send_probe || (self.config.metric.timestamps_enabled() && echoed.is_some()) {
+            if !send_probe {
+                neighbour.unicast_hello_seqno = neighbour.unicast_hello_seqno.wrapping_add(1);
+            }
             tlvs.push(OutboundTlv::Hello {
                 unicast: true,
                 seqno: neighbour.unicast_hello_seqno,
@@ -616,11 +657,26 @@ impl Engine {
     ) -> Vec<Action> {
         let Some(key) = update.key else {
             if update.metric == INFINITY {
-                self.candidates
-                    .retain(|(_, _, neighbour), _| neighbour != neighbour_key);
+                for ((_, neighbour), candidate) in &mut self.candidates {
+                    if neighbour == neighbour_key {
+                        candidate.advertised_metric = INFINITY;
+                        candidate.metric = INFINITY;
+                    }
+                }
             }
             return Vec::new();
         };
+        if forbidden_destination(key.destination) {
+            return Vec::new();
+        }
+        let candidate_key = (key, neighbour_key.clone());
+        if update.metric == INFINITY {
+            if let Some(candidate) = self.candidates.get_mut(&candidate_key) {
+                candidate.advertised_metric = INFINITY;
+                candidate.metric = INFINITY;
+            }
+            return Vec::new();
+        }
         let Some(router_id) = update.router_id else {
             return Vec::new();
         };
@@ -628,47 +684,6 @@ impl Engine {
         // A Router-ID identifies an originating Babel speaker, so accepting our
         // own Update can only manufacture a route back through ourselves.
         if router_id == self.config.router_id {
-            return Vec::new();
-        }
-        let candidate_key = (key, router_id, neighbour_key.clone());
-        if update.metric == INFINITY {
-            let newer_than_feasible = self
-                .feasible
-                .get(&(key, router_id))
-                .is_none_or(|entry| seqno_gt(update.seqno, entry.distance.seqno));
-            if newer_than_feasible {
-                self.candidates
-                    .retain(|(candidate_key, candidate_router, _), route| {
-                        *candidate_key != key
-                            || *candidate_router != router_id
-                            || !seqno_gt(update.seqno, route.seqno)
-                    });
-            }
-            self.candidates.remove(&candidate_key);
-            self.pending_seqno.remove(&(key, router_id));
-            if newer_than_feasible {
-                return self
-                    .interfaces
-                    .keys()
-                    .filter(|interface| *interface != &neighbour_key.interface)
-                    .map(|interface| Action::Send {
-                        interface: interface.clone(),
-                        destination: BABEL_MULTICAST_V6,
-                        packet: OutboundPacket {
-                            tlvs: vec![OutboundTlv::Update(OutboundUpdate {
-                                key: Some(key),
-                                router_id: Some(router_id),
-                                next_hop: None,
-                                interval_cs: self.config.update_interval_cs,
-                                seqno: update.seqno,
-                                metric: INFINITY,
-                                v4_via_v6: key.destination.addr().is_ipv4(),
-                                sub_tlvs: vec![],
-                            })],
-                        },
-                    })
-                    .collect();
-            }
             return Vec::new();
         }
         let Some(next_hop) = update.next_hop else {
@@ -690,38 +705,73 @@ impl Engine {
             .feasible
             .get(&(key, router_id))
             .map(|entry| entry.distance);
-        let already_acquired = self.candidates.contains_key(&candidate_key);
-        if let Some(fd) = feasible
-            && !distance.feasible_against(fd)
-            && !already_acquired
+        let is_feasible = feasible.is_none_or(|fd| distance.feasible_against(fd));
+        if !is_feasible
+            && self.selected.get(&key).is_some_and(|selected| {
+                selected.router_id == router_id
+                    && selected.interface == neighbour_key.interface
+                    && selected.next_hop == next_hop
+            })
         {
-            let pending_key = (key, router_id);
-            if self
-                .pending_seqno
-                .get(&pending_key)
-                .is_some_and(|expires| *expires > now_ms)
-            {
-                return Vec::new();
-            }
-            self.pending_seqno.insert(
-                pending_key,
-                now_ms.saturating_add(u64::from(self.config.hello_interval_cs) * 10),
-            );
-            return vec![Action::Send {
-                interface: neighbour_key.interface.clone(),
-                destination: BABEL_MULTICAST_V6,
-                packet: OutboundPacket {
-                    tlvs: vec![OutboundTlv::SeqnoRequest {
+            return feasible.map_or_else(Vec::new, |fd| {
+                self.originate_seqno_request(
+                    SeqnoRequestSpec {
                         key,
-                        seqno: fd.seqno.wrapping_add(1),
-                        hop_count: 16,
                         router_id,
-                        sub_tlvs: vec![],
-                    }],
-                },
-            }];
+                        seqno: fd.seqno.wrapping_add(1),
+                        hop_count: REQUEST_HOP_COUNT,
+                        next_hop: neighbour_key.clone(),
+                        requester: None,
+                    },
+                    now_ms,
+                )
+            });
         }
-        self.pending_seqno.remove(&(key, router_id));
+        let mut actions = Vec::new();
+        if is_feasible {
+            let satisfied: Vec<_> = self
+                .pending_seqno
+                .iter()
+                .filter(|((pending_key, pending_router), pending)| {
+                    *pending_key == key
+                        && (*pending_router != router_id
+                            || pending.seqno == update.seqno
+                            || seqno_gt(update.seqno, pending.seqno))
+                })
+                .map(|(pending_key, _)| *pending_key)
+                .collect();
+            for pending_key in satisfied {
+                if let Some(pending) = self.pending_seqno.remove(&pending_key) {
+                    if let Some(requester) = pending.requester {
+                        actions.push(self.update_action_to_candidate(
+                            key,
+                            router_id,
+                            update.seqno,
+                            metric,
+                            requester,
+                        ));
+                    }
+                    self.recent_seqno.insert(
+                        pending_key,
+                        (pending.seqno, now_ms.saturating_add(RECENT_REQUEST_MS)),
+                    );
+                }
+            }
+        } else if !self.pending_seqno.contains_key(&(key, router_id))
+            && let Some(fd) = feasible
+        {
+            actions.extend(self.originate_seqno_request(
+                SeqnoRequestSpec {
+                    key,
+                    router_id,
+                    seqno: fd.seqno.wrapping_add(1),
+                    hop_count: REQUEST_HOP_COUNT,
+                    next_hop: neighbour_key.clone(),
+                    requester: None,
+                },
+                now_ms,
+            ));
+        }
         self.candidates.insert(
             candidate_key,
             Candidate {
@@ -732,10 +782,190 @@ impl Engine {
                 metric,
                 next_hop,
                 interface: neighbour_key.interface.clone(),
+                interval_cs: update.interval_cs,
                 expires_ms: now_ms.saturating_add(u64::from(update.interval_cs) * 35),
+                refresh_requested: false,
             },
         );
-        Vec::new()
+        actions
+    }
+
+    fn handle_seqno_request(
+        &mut self,
+        requester: NeighborKey,
+        key: RouteKey,
+        seqno: u16,
+        hop_count: u8,
+        router_id: RouterId,
+        now_ms: u64,
+    ) -> Vec<Action> {
+        if let Some(route) = self.selected.get(&key).cloned()
+            && (route.router_id != router_id
+                || route.seqno == seqno
+                || seqno_gt(route.seqno, seqno))
+        {
+            return vec![self.update_action_to_candidate(
+                route.key,
+                route.router_id,
+                route.seqno,
+                route.metric,
+                requester,
+            )];
+        }
+
+        if router_id == self.config.router_id
+            && let Some(origin) = self.originated.get(&key).cloned()
+        {
+            let mut actions = Vec::new();
+            if seqno_gt(seqno, origin.seqno) {
+                // RFC 8966 section 3.8.1.2 permits at most one increment in
+                // reaction to a single request, even if it asks far ahead.
+                self.bump_sequence_number();
+                actions.push(Action::SequenceNumberChanged(self.sequence_number));
+            }
+            // Propagate the new source sequence on every interface. Limiting
+            // this reply to the requesting interface lets parallel paths stay
+            // one sequence behind and can perpetuate starvation.
+            actions.extend(self.send_updates(now_ms, Some(key), None));
+            return actions;
+        }
+
+        if hop_count <= 1 {
+            return Vec::new();
+        }
+
+        let pending_key = (key, router_id);
+        if self
+            .pending_seqno
+            .get(&pending_key)
+            .is_some_and(|pending| pending.seqno == seqno || seqno_gt(pending.seqno, seqno))
+        {
+            return Vec::new();
+        }
+        if self
+            .recent_seqno
+            .get(&pending_key)
+            .is_some_and(|(recent, expires)| {
+                *expires >= now_ms && (*recent == seqno || seqno_gt(*recent, seqno))
+            })
+        {
+            return Vec::new();
+        }
+        let Some((next_hop, _)) = self
+            .candidates
+            .iter()
+            .filter(|((candidate_key, neighbour), candidate)| {
+                *candidate_key == key && candidate.router_id == router_id && *neighbour != requester
+            })
+            .min_by_key(|(_, candidate)| {
+                let feasible = self.candidate_is_feasible(candidate);
+                (!feasible, candidate.metric, candidate.seqno)
+            })
+        else {
+            return Vec::new();
+        };
+        self.originate_seqno_request(
+            SeqnoRequestSpec {
+                key,
+                router_id,
+                seqno,
+                hop_count: hop_count - 1,
+                next_hop: next_hop.1.clone(),
+                requester: Some(requester),
+            },
+            now_ms,
+        )
+    }
+
+    fn originate_seqno_request(&mut self, request: SeqnoRequestSpec, now_ms: u64) -> Vec<Action> {
+        let SeqnoRequestSpec {
+            key,
+            router_id,
+            seqno,
+            hop_count,
+            next_hop,
+            requester,
+        } = request;
+        self.pending_seqno.insert(
+            (key, router_id),
+            PendingSeqnoRequest {
+                seqno,
+                hop_count,
+                next_hop: next_hop.clone(),
+                requester,
+                retries_left: REQUEST_RETRIES,
+                next_retry_ms: now_ms.saturating_add(REQUEST_RETRY_INITIAL_MS),
+            },
+        );
+        vec![seqno_request_action(
+            key, router_id, seqno, hop_count, next_hop,
+        )]
+    }
+
+    fn update_action_to_candidate(
+        &self,
+        key: RouteKey,
+        router_id: RouterId,
+        seqno: u16,
+        metric: u16,
+        destination: NeighborKey,
+    ) -> Action {
+        let v4_via_v6 =
+            key.destination.addr().is_ipv4() && !self.interface_has_ipv4(&destination.interface);
+        Action::Send {
+            interface: destination.interface,
+            destination: destination.address,
+            packet: OutboundPacket {
+                tlvs: vec![OutboundTlv::Update(OutboundUpdate {
+                    key: Some(key),
+                    router_id: Some(router_id),
+                    next_hop: None,
+                    interval_cs: self.config.update_interval_cs,
+                    seqno,
+                    metric,
+                    v4_via_v6,
+                    sub_tlvs: vec![],
+                })],
+            },
+        }
+    }
+
+    fn retraction_action(&self, key: RouteKey, seqno: u16, destination: NeighborKey) -> Action {
+        Action::Send {
+            interface: destination.interface,
+            destination: destination.address,
+            packet: OutboundPacket {
+                tlvs: vec![OutboundTlv::Update(OutboundUpdate {
+                    key: Some(key),
+                    router_id: None,
+                    next_hop: None,
+                    interval_cs: self.config.update_interval_cs,
+                    seqno,
+                    metric: INFINITY,
+                    v4_via_v6: key.destination.addr().is_ipv4(),
+                    sub_tlvs: vec![],
+                })],
+            },
+        }
+    }
+
+    fn candidate_is_feasible(&self, candidate: &Candidate) -> bool {
+        let retained_selected = self.selected.get(&candidate.key).is_some_and(|selected| {
+            selected.router_id == candidate.router_id
+                && selected.interface == candidate.interface
+                && selected.next_hop == candidate.next_hop
+        });
+        retained_selected
+            || self
+                .feasible
+                .get(&(candidate.key, candidate.router_id))
+                .is_none_or(|source| {
+                    Distance {
+                        seqno: candidate.seqno,
+                        metric: candidate.advertised_metric,
+                    }
+                    .feasible_against(source.distance)
+                })
     }
 
     fn tick(&mut self, now_ms: u64) -> Vec<Action> {
@@ -770,7 +1000,7 @@ impl Engine {
         for key in expired {
             self.neighbours.remove(&key);
             self.candidates
-                .retain(|(_, _, neighbour), _| neighbour != &key);
+                .retain(|(_, neighbour), _| neighbour != &key);
         }
         for (key, neighbour) in &mut self.neighbours {
             if neighbour.last_ihu_ms.is_some_and(|last| {
@@ -781,13 +1011,57 @@ impl Engine {
                 changed_neighbours.insert(key.clone());
             }
         }
-        let candidate_count = self.candidates.len();
-        self.candidates
-            .retain(|_, route| route.expires_ms >= now_ms);
-        routes_may_have_changed |= candidate_count != self.candidates.len();
-        self.pending_seqno.retain(|_, expires| *expires >= now_ms);
+        let expired_candidates: Vec<_> = self
+            .candidates
+            .iter()
+            .filter(|(_, route)| route.expires_ms < now_ms)
+            .map(|(key, route)| (key.clone(), route.metric == INFINITY))
+            .collect();
+        for (key, was_retracted) in expired_candidates {
+            if was_retracted {
+                self.candidates.remove(&key);
+            } else if let Some(route) = self.candidates.get_mut(&key) {
+                route.advertised_metric = INFINITY;
+                route.metric = INFINITY;
+                route.expires_ms =
+                    now_ms.saturating_add(u64::from(route.interval_cs).saturating_mul(35));
+            }
+            routes_may_have_changed = true;
+        }
+        let selected = self.selected.clone();
+        let mut refresh_actions = Vec::new();
+        for ((key, neighbour), candidate) in &mut self.candidates {
+            let refresh_margin = u64::from(candidate.interval_cs).saturating_mul(10);
+            let is_selected = selected.get(key).is_some_and(|route| {
+                route.router_id == candidate.router_id
+                    && route.interface == candidate.interface
+                    && route.next_hop == candidate.next_hop
+            });
+            if is_selected
+                && candidate.metric < INFINITY
+                && !candidate.refresh_requested
+                && now_ms.saturating_add(refresh_margin) >= candidate.expires_ms
+            {
+                candidate.refresh_requested = true;
+                refresh_actions.push(Action::Send {
+                    interface: neighbour.interface.clone(),
+                    destination: neighbour.address,
+                    packet: OutboundPacket {
+                        tlvs: vec![OutboundTlv::RouteRequest {
+                            key: Some(*key),
+                            sub_tlvs: vec![],
+                        }],
+                    },
+                });
+            }
+        }
+        let expired_tombstones = self.tombstones.len();
+        self.tombstones.retain(|_, expires| *expires >= now_ms);
+        routes_may_have_changed |= expired_tombstones != self.tombstones.len();
         self.feasible
             .retain(|_, source| source.expires_ms >= now_ms);
+        self.recent_seqno
+            .retain(|_, (_, expires_ms)| *expires_ms >= now_ms);
         for key in &changed_neighbours {
             routes_may_have_changed |= self.recompute_candidate_metrics(Some(key));
         }
@@ -796,6 +1070,37 @@ impl Engine {
         } else {
             Vec::new()
         };
+        actions.extend(refresh_actions);
+        let due_requests: Vec<_> = self
+            .pending_seqno
+            .iter()
+            .filter(|(_, pending)| now_ms >= pending.next_retry_ms)
+            .map(|(key, pending)| (*key, pending.clone()))
+            .collect();
+        for ((key, router_id), pending) in due_requests {
+            if pending.retries_left == 0 {
+                self.pending_seqno.remove(&(key, router_id));
+                self.recent_seqno.insert(
+                    (key, router_id),
+                    (pending.seqno, now_ms.saturating_add(RECENT_REQUEST_MS)),
+                );
+                continue;
+            }
+            actions.push(seqno_request_action(
+                key,
+                router_id,
+                pending.seqno,
+                pending.hop_count,
+                pending.next_hop.clone(),
+            ));
+            if let Some(value) = self.pending_seqno.get_mut(&(key, router_id)) {
+                let attempt = REQUEST_RETRIES.saturating_sub(value.retries_left);
+                value.retries_left -= 1;
+                value.next_retry_ms = now_ms.saturating_add(
+                    REQUEST_RETRY_INITIAL_MS.saturating_mul(1u64 << u32::from(attempt + 1)),
+                );
+            }
+        }
         let mut ihu_due: Vec<_> = self
             .neighbours
             .iter()
@@ -905,7 +1210,8 @@ impl Engine {
                             interval_cs: self.config.update_interval_cs,
                             seqno: origin.seqno,
                             metric: origin.metric,
-                            v4_via_v6: key.destination.addr().is_ipv4(),
+                            v4_via_v6: key.destination.addr().is_ipv4()
+                                && !self.interface_has_ipv4(&interface),
                             sub_tlvs: vec![],
                         }));
                     }
@@ -931,7 +1237,8 @@ impl Engine {
                             interval_cs: self.config.update_interval_cs,
                             seqno: route.seqno,
                             metric: route.metric,
-                            v4_via_v6: route.key.destination.addr().is_ipv4(),
+                            v4_via_v6: route.key.destination.addr().is_ipv4()
+                                && !self.interface_has_ipv4(&interface),
                             sub_tlvs: vec![],
                         }));
                     }
@@ -1036,7 +1343,7 @@ impl Engine {
             .map(|(key, neighbour)| (key.clone(), neighbour.metric.link_cost()))
             .collect();
         let mut changed = false;
-        for ((_, _, neighbour_key), candidate) in &mut self.candidates {
+        for ((_, neighbour_key), candidate) in &mut self.candidates {
             let Some(link_cost) = costs.get(neighbour_key) else {
                 continue;
             };
@@ -1057,12 +1364,13 @@ impl Engine {
 
     fn reselect(&mut self, now_ms: u64) -> Vec<Action> {
         let before = self.selected.clone();
+        let before_tombstones: Vec<_> = self.tombstones.keys().copied().collect();
         let mut next = BTreeMap::new();
         let mut grouped: BTreeMap<RouteKey, Vec<&Candidate>> = BTreeMap::new();
         for candidate in self
             .candidates
             .values()
-            .filter(|route| route.metric < INFINITY)
+            .filter(|route| route.metric < INFINITY && self.candidate_is_feasible(route))
         {
             grouped.entry(candidate.key).or_default().push(candidate);
         }
@@ -1151,17 +1459,35 @@ impl Engine {
             next.insert(key, selected_from_candidate(chosen));
         }
         self.selected = next;
+        for key in self.selected.keys() {
+            self.tombstones.remove(key);
+        }
+        for key in before.keys().filter(|key| !self.selected.contains_key(key)) {
+            let expires_ms = self
+                .candidates
+                .iter()
+                .filter(|((candidate_key, _), _)| *candidate_key == *key)
+                .map(|(_, candidate)| candidate.expires_ms)
+                .max()
+                .unwrap_or_else(|| {
+                    now_ms.saturating_add(u64::from(self.config.update_interval_cs) * 35)
+                });
+            self.tombstones.insert(*key, expires_ms);
+        }
         self.pending_switches
             .retain(|key, _| self.selected.contains_key(key));
         self.settling_since
             .retain(|key, _| self.selected.contains_key(key));
         self.settled_routes
             .retain(|key| self.selected.contains_key(key));
-        if self.selected != before {
+        let tombstones_changed =
+            self.tombstones.keys().copied().collect::<Vec<_>>() != before_tombstones;
+        if self.selected != before || tombstones_changed {
             self.generation = self.generation.wrapping_add(1);
             let mut actions = vec![Action::RoutesChanged {
                 generation: self.generation,
                 routes: self.selected_routes(),
+                unreachable: self.unreachable_routes(),
             }];
             actions.extend(self.selected_delta(&before, now_ms));
             actions
@@ -1178,7 +1504,39 @@ impl Engine {
         let mut actions = Vec::new();
         for (key, previous) in before {
             if !self.selected.contains_key(key) {
-                actions.extend(self.advertise_learned(previous, INFINITY, None, now_ms));
+                actions.extend(self.advertise_learned(previous, INFINITY, None));
+                let pending_key = (*key, previous.router_id);
+                let requested_seqno = self
+                    .feasible
+                    .get(&pending_key)
+                    .map_or(previous.seqno.wrapping_add(1), |source| {
+                        source.distance.seqno.wrapping_add(1)
+                    });
+                let next_hop = self
+                    .candidates
+                    .iter()
+                    .filter(|((candidate_key, _), candidate)| {
+                        candidate_key == key
+                            && candidate.metric < INFINITY
+                            && !self.candidate_is_feasible(candidate)
+                    })
+                    .map(|((_, neighbour), _)| neighbour.clone())
+                    .next();
+                if !self.pending_seqno.contains_key(&pending_key)
+                    && let Some(next_hop) = next_hop
+                {
+                    actions.extend(self.originate_seqno_request(
+                        SeqnoRequestSpec {
+                            key: *key,
+                            router_id: previous.router_id,
+                            seqno: requested_seqno,
+                            hop_count: REQUEST_HOP_COUNT,
+                            next_hop,
+                            requester: None,
+                        },
+                        now_ms,
+                    ));
+                }
             }
         }
         let changed: Vec<_> = self
@@ -1188,22 +1546,29 @@ impl Engine {
             .map(|(_, selected)| selected.clone())
             .collect();
         for selected in &changed {
+            self.maintain_source(
+                selected.key,
+                selected.router_id,
+                Distance {
+                    seqno: selected.seqno,
+                    metric: selected.metric,
+                },
+                now_ms,
+            );
             actions.extend(self.advertise_learned(
                 selected,
                 selected.metric,
                 Some(&selected.interface),
-                now_ms,
             ));
         }
         actions
     }
 
     fn advertise_learned(
-        &mut self,
+        &self,
         route: &SelectedRoute,
         metric: u16,
         exclude_interface: Option<&str>,
-        now_ms: u64,
     ) -> Vec<Action> {
         let interfaces: Vec<_> = self
             .interfaces
@@ -1211,69 +1576,29 @@ impl Engine {
             .filter(|interface| exclude_interface != Some(interface.as_str()))
             .cloned()
             .collect();
-        if metric < INFINITY && !interfaces.is_empty() {
-            self.maintain_source(
-                route.key,
-                route.router_id,
-                Distance {
-                    seqno: route.seqno,
-                    metric,
-                },
-                now_ms,
-            );
-        }
         interfaces
             .into_iter()
-            .map(|interface| Action::Send {
-                interface,
-                destination: BABEL_MULTICAST_V6,
-                packet: OutboundPacket {
-                    tlvs: vec![OutboundTlv::Update(OutboundUpdate {
-                        key: Some(route.key),
-                        router_id: Some(route.router_id),
-                        next_hop: None,
-                        interval_cs: self.config.update_interval_cs,
-                        seqno: route.seqno,
-                        metric,
-                        v4_via_v6: route.key.destination.addr().is_ipv4(),
-                        sub_tlvs: vec![],
-                    })],
-                },
+            .map(|interface| {
+                let v4_via_v6 =
+                    route.key.destination.addr().is_ipv4() && !self.interface_has_ipv4(&interface);
+                Action::Send {
+                    interface,
+                    destination: BABEL_MULTICAST_V6,
+                    packet: OutboundPacket {
+                        tlvs: vec![OutboundTlv::Update(OutboundUpdate {
+                            key: Some(route.key),
+                            router_id: Some(route.router_id),
+                            next_hop: None,
+                            interval_cs: self.config.update_interval_cs,
+                            seqno: route.seqno,
+                            metric,
+                            v4_via_v6,
+                            sub_tlvs: vec![],
+                        })],
+                    },
+                }
             })
             .collect()
-    }
-
-    fn learned_update_action(
-        &mut self,
-        route: &SelectedRoute,
-        interface: String,
-        now_ms: u64,
-    ) -> Action {
-        self.maintain_source(
-            route.key,
-            route.router_id,
-            Distance {
-                seqno: route.seqno,
-                metric: route.metric,
-            },
-            now_ms,
-        );
-        Action::Send {
-            interface,
-            destination: BABEL_MULTICAST_V6,
-            packet: OutboundPacket {
-                tlvs: vec![OutboundTlv::Update(OutboundUpdate {
-                    key: Some(route.key),
-                    router_id: Some(route.router_id),
-                    next_hop: None,
-                    interval_cs: self.config.update_interval_cs,
-                    seqno: route.seqno,
-                    metric: route.metric,
-                    v4_via_v6: route.key.destination.addr().is_ipv4(),
-                    sub_tlvs: vec![],
-                })],
-            },
-        }
     }
 
     fn maintain_source(
@@ -1304,12 +1629,27 @@ impl Engine {
             origin.seqno = self.sequence_number;
         }
     }
+}
 
-    fn advance_sequence_number(&mut self, requested: u16) {
-        if !seqno_gt(self.sequence_number, requested) {
-            self.sequence_number = requested;
-        }
-        self.bump_sequence_number();
+fn seqno_request_action(
+    key: RouteKey,
+    router_id: RouterId,
+    seqno: u16,
+    hop_count: u8,
+    next_hop: NeighborKey,
+) -> Action {
+    Action::Send {
+        interface: next_hop.interface,
+        destination: next_hop.address,
+        packet: OutboundPacket {
+            tlvs: vec![OutboundTlv::SeqnoRequest {
+                key,
+                seqno,
+                hop_count,
+                router_id,
+                sub_tlvs: vec![],
+            }],
+        },
     }
 }
 
@@ -1348,6 +1688,23 @@ fn recurring_probe_deadline(now_ms: u64, interval_ms: u64, key: &NeighborKey, se
 
 fn valid_cost(cost: u16) -> u16 {
     if cost == 0 { INFINITY } else { cost }
+}
+
+fn forbidden_destination(destination: ipnet::IpNet) -> bool {
+    match destination {
+        ipnet::IpNet::V4(prefix) => {
+            let octets = prefix.network().octets();
+            (prefix.prefix_len() == 32
+                && (prefix.network() == std::net::Ipv4Addr::UNSPECIFIED
+                    || prefix.network() == std::net::Ipv4Addr::LOCALHOST))
+                || (prefix.prefix_len() >= 8 && octets[0] == 224)
+        }
+        ipnet::IpNet::V6(prefix) => {
+            let octets = prefix.network().octets();
+            (prefix.prefix_len() >= 8 && octets[0] == 0xff)
+                || (prefix.prefix_len() >= 64 && octets[..8] == [0xfe, 0x80, 0, 0, 0, 0, 0, 0])
+        }
+    }
 }
 
 fn ihu_applies(address: Option<IpAddr>, local_addresses: &[IpAddr]) -> bool {
@@ -1695,7 +2052,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_retraction_removes_stale_alternate_candidates() {
+    fn retraction_only_retracts_the_route_from_its_neighbour() {
         let mut engine = Engine::new(config(id(1)));
         for (interface, source, metric) in [("wg0", "fe80::2", 0), ("wg1", "fe80::3", 10)] {
             engine.handle(Event::InterfaceUp {
@@ -1754,20 +2111,17 @@ mod tests {
                 })],
             },
         });
-        assert!(engine.selected_routes().is_empty());
-        assert!(actions.iter().any(
-            |action| matches!(action, Action::RoutesChanged { routes, .. } if routes.is_empty())
-        ));
+        assert_eq!(engine.selected_routes().len(), 1);
+        assert_eq!(engine.selected_routes()[0].interface, "wg1");
         assert!(actions.iter().any(|action| matches!(
             action,
-            Action::Send { interface, packet, .. }
-                if interface == "wg1"
-                    && packet.tlvs.iter().any(|tlv| matches!(tlv, OutboundTlv::Update(update) if update.metric == INFINITY && update.seqno == 8))
+            Action::RoutesChanged { routes, .. }
+                if routes.len() == 1 && routes[0].interface == "wg1"
         )));
     }
 
     #[test]
-    fn seqno_request_advances_local_origin_past_requested_value() {
+    fn seqno_request_increments_local_origin_at_most_once() {
         let mut config = config(id(1));
         config.sequence_number = 7;
         let mut engine = Engine::new(config);
@@ -1798,12 +2152,12 @@ mod tests {
         assert!(
             actions
                 .iter()
-                .any(|action| matches!(action, Action::SequenceNumberChanged(101)))
+                .any(|action| matches!(action, Action::SequenceNumberChanged(8)))
         );
         assert!(actions.iter().any(|action| matches!(
             action,
             Action::Send { packet, .. }
-                if packet.tlvs.iter().any(|tlv| matches!(tlv, OutboundTlv::Update(update) if update.seqno == 101))
+                if packet.tlvs.iter().any(|tlv| matches!(tlv, OutboundTlv::Update(update) if update.seqno == 8))
         )));
     }
 
@@ -2077,7 +2431,9 @@ mod tests {
             .and_then(|neighbour| neighbour.next_rtt_probe_ms)
             .unwrap();
         if deadline > 10 {
-            assert!(!contains_unicast_timestamp_hello(&actions));
+            // RFC 9616 requires an echoed Timestamp IHU to share a packet
+            // with a timestamped Hello, independently of probe scheduling.
+            assert!(contains_unicast_timestamp_hello(&actions));
             assert!(contains_unicast_timestamp_hello(
                 &engine.handle(Event::Tick { now_ms: deadline })
             ));
@@ -2273,7 +2629,7 @@ mod tests {
 
         engine
             .candidates
-            .retain(|(_, _, neighbour), _| neighbour.interface != "eth0");
+            .retain(|(_, neighbour), _| neighbour.interface != "eth0");
         engine.reselect(13_000);
         assert_eq!(engine.selected_routes()[0].interface, "eth1");
     }
@@ -2362,7 +2718,7 @@ mod tests {
             address: next_hop.parse().unwrap(),
         };
         engine.candidates.insert(
-            (route_key, router_id, neighbour),
+            (route_key, neighbour),
             Candidate {
                 key: route_key,
                 router_id,
@@ -2371,7 +2727,9 @@ mod tests {
                 metric,
                 next_hop: next_hop.parse().unwrap(),
                 interface: interface.into(),
+                interval_cs: 400,
                 expires_ms: u64::MAX,
+                refresh_requested: false,
             },
         );
     }

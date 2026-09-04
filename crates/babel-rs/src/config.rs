@@ -266,6 +266,10 @@ pub enum ConfigError {
     DuplicateView(String),
     #[error("source-specific export views in the same address family must use different tables")]
     SharedSourceTable,
+    #[error(
+        "overlapping source-specific export views are not supported by the Linux exporter: {0} and {1}"
+    )]
+    OverlappingSourceViews(IpNet, IpNet),
     #[error("rule_priority is only valid on a source-specific export view")]
     OrdinaryRulePriority,
 }
@@ -276,7 +280,13 @@ impl Config {
     }
 
     pub fn parse(contents: &str) -> Result<Self, ConfigError> {
-        let value: Self = toml::from_str(contents)?;
+        let mut value: Self = toml::from_str(contents)?;
+        for origin in &mut value.origins {
+            origin.source = origin.source.filter(|source| source.prefix_len() != 0);
+        }
+        for view in &mut value.export.views {
+            view.source = view.source.filter(|source| source.prefix_len() != 0);
+        }
         value.validate()?;
         Ok(value)
     }
@@ -323,6 +333,19 @@ impl Config {
                 }
             }
         }
+        let sources: Vec<_> = self
+            .export
+            .views
+            .iter()
+            .filter_map(|view| view.source)
+            .collect();
+        for (index, left) in sources.iter().enumerate() {
+            for right in &sources[index + 1..] {
+                if prefixes_overlap(*left, *right) {
+                    return Err(ConfigError::OverlappingSourceViews(*left, *right));
+                }
+            }
+        }
         let mut origins = HashSet::new();
         for origin in &self.origins {
             let key = origin.key()?;
@@ -360,6 +383,11 @@ impl Config {
             && self.route_selection == candidate.route_selection
             && self.export.protocol == candidate.export.protocol
     }
+}
+
+fn prefixes_overlap(left: IpNet, right: IpNet) -> bool {
+    left.addr().is_ipv4() == right.addr().is_ipv4()
+        && (left.contains(&right.network()) || right.contains(&left.network()))
 }
 
 fn wildcard_match(pattern: &str, value: &str) -> bool {
@@ -489,6 +517,39 @@ source = "10.1.0.0/16"
             config.validate(),
             Err(ConfigError::SharedSourceTable)
         ));
+    }
+
+    #[test]
+    fn overlapping_source_views_are_rejected_even_in_different_tables() {
+        let error = Config::parse(
+            r#"
+interfaces = ["wg0"]
+[export]
+[[export.views]]
+table = 20001
+source = "10.0.0.0/8"
+[[export.views]]
+table = 20002
+source = "10.1.0.0/16"
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::OverlappingSourceViews(_, _)));
+    }
+
+    #[test]
+    fn zero_length_source_is_normalised_to_the_ordinary_view() {
+        let config = Config::parse(
+            r#"
+interfaces = ["wg0"]
+[export]
+[[export.views]]
+table = 20000
+source = "0.0.0.0/0"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.export.views[0].source, None);
     }
 
     #[test]

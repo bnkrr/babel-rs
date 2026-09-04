@@ -38,14 +38,15 @@ cost 96 is the default. Embedders can supply a different `MetricProfile` and
 authentication is not implemented. Deployments should therefore run Babel on
 a protected link when authentication is required.
 
-The standalone daemon is Linux-specific. It exports only the selected routes
-owned by its configured protocol and does not automatically redistribute the
-kernel routing table; local origins come from configuration or the embedding
-API.
+The standalone daemon is Linux-specific. It exports selected routes plus the
+temporary exact unreachable routes required by RFC 8966 hold time. It owns only
+its configured protocol and does not automatically redistribute the kernel
+routing table; local origins come from configuration or the embedding API.
 
 See [CONFORMANCE.md](docs/CONFORMANCE.md) for exact protocol claims and
 [INTEROPERABILITY.md](docs/INTEROPERABILITY.md) for tested peers and
-topologies.
+topologies. The conformance document also lists requirements that cannot be
+proved by unit tests and must be checked in a deployment audit.
 
 ## Quick start
 
@@ -131,7 +132,10 @@ reconciles the newest snapshot. Out-of-band deletion and stale owned state are
 repaired while routes and rules owned by other protocols remain untouched.
 Export views project ordinary and source-specific routes into complete Linux
 tables. Standalone mode can manage one source rule per view; an external
-manager can set `manage_rules = false`.
+manager can set `manage_rules = false`. Nonzero source-view prefixes must not
+overlap, because the Linux policy-rule exporter admits only the unambiguous
+subset where its lookup order is equivalent to RFC 9079 destination-first
+selection.
 
 `SIGHUP` parses and validates a complete candidate before committing interface
 patterns, origins, and export policy. An invalid candidate leaves the active

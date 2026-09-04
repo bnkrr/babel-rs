@@ -49,6 +49,11 @@ reconciliation repairs FIB drift and retries transient netlink failures even
 when the selected RIB generation has not changed. It never imports routes into
 the Babel RIB; origins are explicit configuration or library API calls.
 
+Route snapshots also carry exact unreachable tombstones. The Linux exporter
+installs them as unreachable routes until Babel's hold time ends, so a removed
+specific route cannot fall through to a covering route and form the transient
+loop described by RFC 8966 section 3.5.4.
+
 Linux export is expressed as policy views. An ordinary view receives ordinary
 routes. A source view receives ordinary fallbacks plus matching RFC 9079
 routes, with an exact source route winning at the same destination. Both IPv4
@@ -56,6 +61,9 @@ and IPv6 are projected as destination-only routes in the view table; an
 optional `from S` rule selects that table. This avoids relying on unsupported
 IPv4 source-prefix route attributes. Dynamic route priorities start at 65535,
 after the complete 0..65534 static metric range.
+Because Linux policy rules choose a source table before destination lookup,
+the daemon rejects overlapping nonzero source views; within that admitted
+subset, source-first and RFC 9079 destination-first lookup are equivalent.
 
 ## Route model
 
