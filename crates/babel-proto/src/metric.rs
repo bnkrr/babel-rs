@@ -376,6 +376,7 @@ pub struct RttMetric {
 }
 
 impl RttMetric {
+    pub const MIN_PROBE_INTERVAL_MS: u64 = 100;
     pub const DEFAULT_PROBE_INTERVAL_MS: u64 = 2_000;
     pub const DEFAULT_HALF_LIFE_MS: u64 = 6_000;
     pub const DEFAULT_MIN_RTT_US: u32 = 10_000;
@@ -390,7 +391,7 @@ impl RttMetric {
         max_rtt_us: u32,
         max_penalty: u16,
     ) -> Option<Self> {
-        (probe_interval_ms > 0
+        (probe_interval_ms >= Self::MIN_PROBE_INTERVAL_MS
             && half_life_ms > 0
             && min_rtt_us < max_rtt_us
             && max_penalty < INFINITY)

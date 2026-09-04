@@ -15,7 +15,7 @@ use netlink_packet_route::route::{
 use netlink_packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::{Handle, IpVersion, RouteMessageBuilder, new_connection};
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{Mutex, Notify, RwLock, watch};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, warn};
 
@@ -28,6 +28,7 @@ pub struct LinuxExporter {
     handle: Handle,
     state: Arc<RwLock<ExportState>>,
     apply_lock: Arc<Mutex<()>>,
+    reconcile_notify: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -96,11 +97,11 @@ impl LinuxExporter {
                 last_error: None,
             })),
             apply_lock: Arc::new(Mutex::new(())),
+            reconcile_notify: Arc::new(Notify::new()),
         })
     }
 
     pub async fn update_export(&self, export: Export) {
-        let _apply_guard = self.apply_lock.lock().await;
         {
             let mut state = self.state.write().await;
             let old_export = state.export.clone();
@@ -109,9 +110,7 @@ impl LinuxExporter {
             }
             state.export = export.clone();
         }
-        if let Err(error) = self.reconcile_locked().await {
-            warn!(%error, "route export after configuration reload failed; retry scheduled");
-        }
+        self.reconcile_notify.notify_one();
     }
 
     pub async fn reconcile_current(&self) -> Result<(), LinuxError> {
@@ -174,6 +173,11 @@ impl LinuxExporter {
                 _ = interval.tick() => {
                     if let Err(error) = self.reconcile_current().await {
                         warn!(%error, "periodic route export reconciliation failed");
+                    }
+                }
+                _ = self.reconcile_notify.notified() => {
+                    if let Err(error) = self.reconcile_current().await {
+                        warn!(%error, "requested route export reconciliation failed; retry scheduled");
                     }
                 }
             }

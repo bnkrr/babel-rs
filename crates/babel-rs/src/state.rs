@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use async_trait::async_trait;
 use babel_proto::RouterId;
 use babel_router::SequenceStore;
 use serde::{Deserialize, Serialize};
@@ -83,12 +84,16 @@ impl StateStore {
     }
 }
 
+#[async_trait]
 impl SequenceStore for StateStore {
-    fn persist(
+    async fn persist(
         &self,
         sequence_number: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.persist_state(sequence_number)
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.persist_state(sequence_number))
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
             .map_err(|error| Box::new(error) as _)
     }
 }
@@ -189,8 +194,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn state_is_versioned_atomic_and_advances_on_restart() {
+    #[tokio::test]
+    async fn state_is_versioned_atomic_and_advances_on_restart() {
         let directory = std::env::temp_dir().join(format!(
             "babel-rs-state-test-{}-{}",
             std::process::id(),
@@ -198,7 +203,7 @@ mod tests {
         ));
         let path = directory.join("state.toml");
         let first = load_or_create(Some("01:02:03:04:05:06:07:08"), &path).unwrap();
-        first.store.persist(400).unwrap();
+        first.store.persist(400).await.unwrap();
         let second = load_or_create(None, &path).unwrap();
         assert_eq!(second.router_id, first.router_id);
         assert_eq!(second.sequence_number, 401);

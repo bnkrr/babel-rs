@@ -12,5 +12,6 @@ pub use metric::{
 };
 pub use model::*;
 pub use wire::{
-    DecodeContext, Packet, SubTlv, Tlv, Update, WireError, decode_packet, encode_packet,
+    DEFAULT_UDP_PAYLOAD_SIZE, DecodeContext, OutboundPacket, OutboundTlv, OutboundUpdate, Packet,
+    ResolvedUpdate, SubTlv, Tlv, WireError, decode_packet, encode_packet, encode_packets,
 };

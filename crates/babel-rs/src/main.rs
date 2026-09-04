@@ -17,6 +17,7 @@ mod config;
 mod control;
 mod interfaces;
 mod linux;
+mod ownership;
 mod state;
 
 use config::Config;
@@ -180,6 +181,7 @@ async fn run_daemon(
     control_socket: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut active_config, digest) = load_config(&config_path)?;
+    let _protocol_ownership = ownership::ProtocolOwnership::acquire(active_config.export.protocol)?;
     let state = state::load_or_create(
         active_config.router_id.as_deref(),
         PathBuf::from(&active_config.state_file).as_path(),
@@ -353,28 +355,23 @@ async fn reload(
     if !active.reload_identity_matches(&candidate) {
         return Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "router_id, state_file, metric, and route_selection cannot change during reload",
+            "router_id, state_file, metric, route_selection, and export.protocol cannot change during reload",
         )));
     }
 
-    let old_origins = origin_map(active)?;
     let new_origins = origin_map(&candidate)?;
-    config_tx
-        .send(candidate.clone())
-        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "interface manager stopped"))?;
-    for (key, metric) in &new_origins {
-        if old_origins.get(key) != Some(metric) {
-            router.originate(*key, *metric).await?;
-        }
-    }
-    for key in old_origins.keys() {
-        if !new_origins.contains_key(key) {
-            router.withdraw(*key).await?;
-        }
-    }
+    // Commit the protocol-owned origins in one serialized engine event.  No
+    // observer sees the candidate configuration before all validation has
+    // completed, and removed origins share one durable sequence transition.
+    router
+        .replace_origins(new_origins.into_iter().collect())
+        .await?;
     if active.export != candidate.export {
         exporter.update_export(candidate.export.clone()).await;
     }
+    config_tx
+        .send(candidate.clone())
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "interface manager stopped"))?;
     *active = candidate;
     Ok(digest)
 }

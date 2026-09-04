@@ -10,6 +10,9 @@ pub const MAGIC: u8 = 42;
 pub const VERSION: u8 = 2;
 pub const PORT: u16 = 6696;
 pub const MAX_PACKET_SIZE: usize = u16::MAX as usize + 4;
+/// Conservative Babel UDP payload that fits the IPv6 minimum MTU without
+/// fragmentation (1280 byte IPv6 packet minus IPv6 and UDP headers).
+pub const DEFAULT_UDP_PAYLOAD_SIZE: usize = 1232;
 
 const TLV_PAD1: u8 = 0;
 const TLV_PADN: u8 = 1;
@@ -75,8 +78,10 @@ pub enum SubTlv {
     Unknown { type_: u8, value: Vec<u8> },
 }
 
+/// An inbound Update after packet-local Router-ID, Next-Hop and prefix state
+/// has been resolved by the decoder.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Update {
+pub struct ResolvedUpdate {
     pub key: Option<RouteKey>,
     pub router_id: Option<RouterId>,
     pub next_hop: Option<IpAddr>,
@@ -112,7 +117,7 @@ pub enum Tlv {
     },
     RouterId(RouterId),
     NextHop(IpAddr),
-    Update(Update),
+    Update(ResolvedUpdate),
     RouteRequest {
         key: Option<RouteKey>,
         sub_tlvs: Vec<SubTlv>,
@@ -133,6 +138,66 @@ pub enum Tlv {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Packet {
     pub tlvs: Vec<Tlv>,
+}
+
+/// A semantic outbound Update.  The packetizer emits the separate Router-ID
+/// and Next-Hop context TLVs required by the Babel wire format.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutboundUpdate {
+    pub key: Option<RouteKey>,
+    pub router_id: Option<RouterId>,
+    pub next_hop: Option<IpAddr>,
+    pub interval_cs: u16,
+    pub seqno: u16,
+    pub metric: u16,
+    pub v4_via_v6: bool,
+    pub sub_tlvs: Vec<SubTlv>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OutboundTlv {
+    Pad1,
+    PadN(Vec<u8>),
+    AckRequest {
+        nonce: u16,
+        interval_cs: u16,
+    },
+    Ack {
+        nonce: u16,
+    },
+    Hello {
+        unicast: bool,
+        seqno: u16,
+        interval_cs: u16,
+        sub_tlvs: Vec<SubTlv>,
+    },
+    Ihu {
+        address: Option<IpAddr>,
+        rxcost: u16,
+        interval_cs: u16,
+        sub_tlvs: Vec<SubTlv>,
+    },
+    Update(OutboundUpdate),
+    RouteRequest {
+        key: Option<RouteKey>,
+        sub_tlvs: Vec<SubTlv>,
+    },
+    SeqnoRequest {
+        key: RouteKey,
+        seqno: u16,
+        hop_count: u8,
+        router_id: RouterId,
+        sub_tlvs: Vec<SubTlv>,
+    },
+    Unknown {
+        type_: u8,
+        value: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OutboundPacket {
+    pub tlvs: Vec<OutboundTlv>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -156,6 +221,12 @@ pub enum WireError {
     InvalidTlv { type_: u8 },
     #[error("packet body is too large")]
     BodyTooLarge,
+    #[error("outbound route update has no router-id")]
+    MissingRouterId,
+    #[error("packet size budget is smaller than the Babel header")]
+    PacketBudgetTooSmall,
+    #[error("semantic TLVs require more than one independently decodable packet")]
+    PacketSplitRequired,
 }
 
 #[derive(Default)]
@@ -370,7 +441,7 @@ fn decode_update(value: &[u8], state: &mut ParserState) -> Result<Option<Tlv>, W
         if plen != 0 || omitted != 0 {
             return Ok(None);
         }
-        return Ok(Some(Tlv::Update(Update {
+        return Ok(Some(Tlv::Update(ResolvedUpdate {
             key: None,
             router_id: None,
             next_hop: None,
@@ -424,7 +495,7 @@ fn decode_update(value: &[u8], state: &mut ParserState) -> Result<Option<Tlv>, W
     if metric != INFINITY && next_hop.is_none() {
         return Ok(None);
     }
-    Ok(Some(Tlv::Update(Update {
+    Ok(Some(Tlv::Update(ResolvedUpdate {
         key: Some(key),
         router_id,
         next_hop,
@@ -617,11 +688,75 @@ fn has_unknown_mandatory(data: &[u8]) -> Result<bool, WireError> {
     Ok(decode_sub_tlvs(data, SubContext::Hello, None)?.mandatory_unknown)
 }
 
-pub fn encode_packet(packet: &Packet) -> Result<Vec<u8>, WireError> {
-    let mut body = Vec::new();
-    for tlv in &packet.tlvs {
-        encode_tlv(tlv, &mut body)?;
+pub fn encode_packet(packet: &OutboundPacket) -> Result<Vec<u8>, WireError> {
+    let mut packets = encode_packets(packet, MAX_PACKET_SIZE)?;
+    if packets.len() != 1 {
+        return Err(WireError::PacketSplitRequired);
     }
+    Ok(packets.pop().expect("exactly one packet was checked"))
+}
+
+/// Encode semantic outbound TLVs into independently decodable Babel packets.
+/// Router-ID and Next-Hop context is repeated after every packet boundary.
+pub fn encode_packets(
+    packet: &OutboundPacket,
+    max_packet_size: usize,
+) -> Result<Vec<Vec<u8>>, WireError> {
+    if max_packet_size < 4 {
+        return Err(WireError::PacketBudgetTooSmall);
+    }
+    let max_packet_size = max_packet_size.min(MAX_PACKET_SIZE);
+    let body_budget = max_packet_size - 4;
+    let mut packets = Vec::new();
+    let mut body = Vec::new();
+    let mut context = EncodeContext::default();
+    for tlv in &packet.tlvs {
+        if !body.is_empty() && requires_fresh_next_hop_context(tlv, &context) {
+            packets.push(finish_packet(std::mem::take(&mut body))?);
+            context = EncodeContext::default();
+        }
+        let mut next_context = context.clone();
+        let mut encoded = Vec::new();
+        encode_outbound_tlv(tlv, &mut next_context, &mut encoded)?;
+        if encoded.len() > body_budget {
+            return Err(WireError::BodyTooLarge);
+        }
+        if !body.is_empty() && body.len() + encoded.len() > body_budget {
+            packets.push(finish_packet(std::mem::take(&mut body))?);
+            context = EncodeContext::default();
+            next_context = context.clone();
+            encoded.clear();
+            encode_outbound_tlv(tlv, &mut next_context, &mut encoded)?;
+            if encoded.len() > body_budget {
+                return Err(WireError::BodyTooLarge);
+            }
+        }
+        body.extend(encoded);
+        context = next_context;
+    }
+    packets.push(finish_packet(body)?);
+    Ok(packets)
+}
+
+fn requires_fresh_next_hop_context(tlv: &OutboundTlv, context: &EncodeContext) -> bool {
+    let OutboundTlv::Update(update) = tlv else {
+        return false;
+    };
+    if update.metric == INFINITY || update.next_hop.is_some() {
+        return false;
+    }
+    if update.v4_via_v6
+        || update
+            .key
+            .is_some_and(|key| key.destination.addr().is_ipv6())
+    {
+        context.next_hop_v6.is_some()
+    } else {
+        context.next_hop_v4.is_some()
+    }
+}
+
+fn finish_packet(body: Vec<u8>) -> Result<Vec<u8>, WireError> {
     if body.len() > u16::MAX as usize {
         return Err(WireError::BodyTooLarge);
     }
@@ -632,18 +767,29 @@ pub fn encode_packet(packet: &Packet) -> Result<Vec<u8>, WireError> {
     Ok(result)
 }
 
-fn encode_tlv(tlv: &Tlv, out: &mut Vec<u8>) -> Result<(), WireError> {
+#[derive(Clone, Default)]
+struct EncodeContext {
+    router_id: Option<RouterId>,
+    next_hop_v4: Option<IpAddr>,
+    next_hop_v6: Option<IpAddr>,
+}
+
+fn encode_outbound_tlv(
+    tlv: &OutboundTlv,
+    context: &mut EncodeContext,
+    out: &mut Vec<u8>,
+) -> Result<(), WireError> {
     match tlv {
-        Tlv::Pad1 => out.push(TLV_PAD1),
-        Tlv::PadN(value) => put_tlv(out, TLV_PADN, value)?,
-        Tlv::AckRequest { nonce, interval_cs } => {
+        OutboundTlv::Pad1 => out.push(TLV_PAD1),
+        OutboundTlv::PadN(value) => put_tlv(out, TLV_PADN, value)?,
+        OutboundTlv::AckRequest { nonce, interval_cs } => {
             let mut v = vec![0, 0];
             v.extend(nonce.to_be_bytes());
             v.extend(interval_cs.to_be_bytes());
             put_tlv(out, TLV_ACK_REQ, &v)?;
         }
-        Tlv::Ack { nonce } => put_tlv(out, TLV_ACK, &nonce.to_be_bytes())?,
-        Tlv::Hello {
+        OutboundTlv::Ack { nonce } => put_tlv(out, TLV_ACK, &nonce.to_be_bytes())?,
+        OutboundTlv::Hello {
             unicast,
             seqno,
             interval_cs,
@@ -656,7 +802,7 @@ fn encode_tlv(tlv: &Tlv, out: &mut Vec<u8>) -> Result<(), WireError> {
             encode_sub_tlvs(sub_tlvs, None, &mut v)?;
             put_tlv(out, TLV_HELLO, &v)?;
         }
-        Tlv::Ihu {
+        OutboundTlv::Ihu {
             address,
             rxcost,
             interval_cs,
@@ -670,19 +816,30 @@ fn encode_tlv(tlv: &Tlv, out: &mut Vec<u8>) -> Result<(), WireError> {
             encode_sub_tlvs(sub_tlvs, None, &mut v)?;
             put_tlv(out, TLV_IHU, &v)?;
         }
-        Tlv::RouterId(id) => {
-            let mut v = vec![0, 0];
-            v.extend(id.octets());
-            put_tlv(out, TLV_ROUTER_ID, &v)?;
+        OutboundTlv::Update(update) => {
+            if update.key.is_some() {
+                let router_id = update.router_id.ok_or(WireError::MissingRouterId)?;
+                if context.router_id != Some(router_id) {
+                    encode_router_id(router_id, out)?;
+                    context.router_id = Some(router_id);
+                }
+            }
+            if update.metric != INFINITY
+                && let Some(next_hop) = update.next_hop
+            {
+                let active = if update.v4_via_v6 || next_hop.is_ipv6() {
+                    &mut context.next_hop_v6
+                } else {
+                    &mut context.next_hop_v4
+                };
+                if *active != Some(next_hop) {
+                    encode_next_hop(next_hop, out)?;
+                    *active = Some(next_hop);
+                }
+            }
+            encode_update(update, out)?;
         }
-        Tlv::NextHop(address) => {
-            let (ae, bytes) = encode_address(*address);
-            let mut v = vec![ae as u8, 0];
-            v.extend(bytes);
-            put_tlv(out, TLV_NEXT_HOP, &v)?;
-        }
-        Tlv::Update(update) => encode_update(update, out)?,
-        Tlv::RouteRequest { key, sub_tlvs } => {
+        OutboundTlv::RouteRequest { key, sub_tlvs } => {
             let mut v = Vec::new();
             if let Some(key) = key {
                 let ae = ae_for_key(key, false);
@@ -696,7 +853,7 @@ fn encode_tlv(tlv: &Tlv, out: &mut Vec<u8>) -> Result<(), WireError> {
             encode_sub_tlvs(sub_tlvs, key.as_ref().map(|k| ae_for_key(k, false)), &mut v)?;
             put_tlv(out, TLV_ROUTE_REQUEST, &v)?;
         }
-        Tlv::SeqnoRequest {
+        OutboundTlv::SeqnoRequest {
             key,
             seqno,
             hop_count,
@@ -713,12 +870,25 @@ fn encode_tlv(tlv: &Tlv, out: &mut Vec<u8>) -> Result<(), WireError> {
             encode_sub_tlvs(sub_tlvs, Some(ae), &mut v)?;
             put_tlv(out, TLV_SEQNO_REQUEST, &v)?;
         }
-        Tlv::Unknown { type_, value } => put_tlv(out, *type_, value)?,
+        OutboundTlv::Unknown { type_, value } => put_tlv(out, *type_, value)?,
     }
     Ok(())
 }
 
-fn encode_update(update: &Update, out: &mut Vec<u8>) -> Result<(), WireError> {
+fn encode_router_id(id: RouterId, out: &mut Vec<u8>) -> Result<(), WireError> {
+    let mut value = vec![0, 0];
+    value.extend(id.octets());
+    put_tlv(out, TLV_ROUTER_ID, &value)
+}
+
+fn encode_next_hop(address: IpAddr, out: &mut Vec<u8>) -> Result<(), WireError> {
+    let (ae, bytes) = encode_address(address);
+    let mut value = vec![ae as u8, 0];
+    value.extend(bytes);
+    put_tlv(out, TLV_NEXT_HOP, &value)
+}
+
+fn encode_update(update: &OutboundUpdate, out: &mut Vec<u8>) -> Result<(), WireError> {
     let Some(key) = update.key else {
         let mut v = vec![0, 0, 0, 0];
         v.extend(update.interval_cs.to_be_bytes());
@@ -926,20 +1096,17 @@ mod tests {
             Some(IpNet::from_str("10.0.0.0/8").unwrap()),
         )
         .unwrap();
-        let packet = Packet {
-            tlvs: vec![
-                Tlv::RouterId(rid()),
-                Tlv::Update(Update {
-                    key: Some(key),
-                    router_id: Some(rid()),
-                    next_hop: Some("fe80::1".parse().unwrap()),
-                    interval_cs: 1600,
-                    seqno: 9,
-                    metric: 96,
-                    v4_via_v6: true,
-                    sub_tlvs: vec![],
-                }),
-            ],
+        let packet = OutboundPacket {
+            tlvs: vec![OutboundTlv::Update(OutboundUpdate {
+                key: Some(key),
+                router_id: Some(rid()),
+                next_hop: Some("fe80::9".parse().unwrap()),
+                interval_cs: 1600,
+                seqno: 9,
+                metric: 96,
+                v4_via_v6: true,
+                sub_tlvs: vec![],
+            })],
         };
         let encoded = encode_packet(&packet).unwrap();
         let decoded = decode_packet(
@@ -949,7 +1116,131 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(decoded, packet);
+        assert_eq!(
+            decoded,
+            Packet {
+                tlvs: vec![
+                    Tlv::RouterId(rid()),
+                    Tlv::NextHop("fe80::9".parse().unwrap()),
+                    Tlv::Update(ResolvedUpdate {
+                        key: Some(key),
+                        router_id: Some(rid()),
+                        next_hop: Some("fe80::9".parse().unwrap()),
+                        interval_cs: 1600,
+                        seqno: 9,
+                        metric: 96,
+                        v4_via_v6: true,
+                        sub_tlvs: vec![],
+                    }),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn packetizer_repeats_context_and_respects_the_datagram_budget() {
+        let next_hop: IpAddr = "fe80::9".parse().unwrap();
+        let tlvs = (1..=32)
+            .map(|suffix| {
+                let destination = IpNet::from_str(&format!("2001:db8::{suffix}/128")).unwrap();
+                OutboundTlv::Update(OutboundUpdate {
+                    key: RouteKey::new(destination, None),
+                    router_id: Some(rid()),
+                    next_hop: Some(next_hop),
+                    interval_cs: 1600,
+                    seqno: suffix,
+                    metric: 96,
+                    v4_via_v6: false,
+                    sub_tlvs: vec![],
+                })
+            })
+            .collect();
+        let encoded = encode_packets(&OutboundPacket { tlvs }, 96).unwrap();
+        assert!(encoded.len() > 1);
+        let mut updates = 0;
+        for datagram in encoded {
+            assert!(datagram.len() <= 96);
+            let decoded = decode_packet(
+                &datagram,
+                DecodeContext {
+                    source: "fe80::1".parse().unwrap(),
+                },
+            )
+            .unwrap();
+            for tlv in decoded.tlvs {
+                if let Tlv::Update(update) = tlv {
+                    assert_eq!(update.router_id, Some(rid()));
+                    assert_eq!(update.next_hop, Some(next_hop));
+                    updates += 1;
+                }
+            }
+        }
+        assert_eq!(updates, 32);
+    }
+
+    #[test]
+    fn finite_and_retracted_updates_both_carry_router_id_context() {
+        let key = RouteKey::new(IpNet::from_str("2001:db8::/64").unwrap(), None).unwrap();
+        for metric in [96, INFINITY] {
+            let datagram = encode_packet(&OutboundPacket {
+                tlvs: vec![OutboundTlv::Update(OutboundUpdate {
+                    key: Some(key),
+                    router_id: Some(rid()),
+                    next_hop: None,
+                    interval_cs: 1600,
+                    seqno: 7,
+                    metric,
+                    v4_via_v6: false,
+                    sub_tlvs: vec![],
+                })],
+            })
+            .unwrap();
+            let decoded = decode_packet(
+                &datagram,
+                DecodeContext {
+                    source: "fe80::1".parse().unwrap(),
+                },
+            )
+            .unwrap();
+            assert!(matches!(decoded.tlvs[0], Tlv::RouterId(value) if value == rid()));
+            assert!(
+                matches!(&decoded.tlvs[1], Tlv::Update(update) if update.router_id == Some(rid()) && update.metric == metric)
+            );
+        }
+    }
+
+    #[test]
+    fn packetizer_resets_an_explicit_next_hop_before_source_default() {
+        let key = RouteKey::new(IpNet::from_str("2001:db8::/64").unwrap(), None).unwrap();
+        let update = |next_hop| {
+            OutboundTlv::Update(OutboundUpdate {
+                key: Some(key),
+                router_id: Some(rid()),
+                next_hop,
+                interval_cs: 1600,
+                seqno: 1,
+                metric: 96,
+                v4_via_v6: false,
+                sub_tlvs: vec![],
+            })
+        };
+        let datagrams = encode_packets(
+            &OutboundPacket {
+                tlvs: vec![update(Some("fe80::9".parse().unwrap())), update(None)],
+            },
+            DEFAULT_UDP_PAYLOAD_SIZE,
+        )
+        .unwrap();
+        assert_eq!(datagrams.len(), 2);
+        let second = decode_packet(
+            &datagrams[1],
+            DecodeContext {
+                source: "fe80::1".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(&second.tlvs[1], Tlv::Update(value)
+            if value.next_hop == Some("fe80::1".parse().unwrap())));
     }
 
     #[test]
@@ -981,15 +1272,15 @@ mod tests {
 
     #[test]
     fn timestamp_extension_round_trips() {
-        let packet = Packet {
+        let packet = OutboundPacket {
             tlvs: vec![
-                Tlv::Hello {
+                OutboundTlv::Hello {
                     unicast: false,
                     seqno: 17,
                     interval_cs: 400,
                     sub_tlvs: vec![SubTlv::TimestampHello(0x1020_3040)],
                 },
-                Tlv::Ihu {
+                OutboundTlv::Ihu {
                     address: None,
                     rxcost: 96,
                     interval_cs: 1200,
@@ -1008,7 +1299,28 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(decoded, packet);
+        assert_eq!(
+            decoded,
+            Packet {
+                tlvs: vec![
+                    Tlv::Hello {
+                        unicast: false,
+                        seqno: 17,
+                        interval_cs: 400,
+                        sub_tlvs: vec![SubTlv::TimestampHello(0x1020_3040)],
+                    },
+                    Tlv::Ihu {
+                        address: None,
+                        rxcost: 96,
+                        interval_cs: 1200,
+                        sub_tlvs: vec![SubTlv::TimestampIhu {
+                            origin: 0x1020_3040,
+                            received: 0x5060_7080,
+                        }],
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
