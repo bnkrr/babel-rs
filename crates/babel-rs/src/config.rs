@@ -7,7 +7,9 @@ use ipnet::IpNet;
 use serde::Deserialize;
 use thiserror::Error;
 
-use babel_proto::{EtxMetric, MetricProfile, RouteKey, RttMetric, WiredMetric};
+use babel_proto::{
+    EtxMetric, MetricProfile, RouteKey, RouteSelectionConfig, RttMetric, WiredMetric,
+};
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +20,8 @@ pub struct Config {
     pub interfaces: Vec<String>,
     #[serde(default)]
     pub metric: MetricConfig,
+    #[serde(default)]
+    pub route_selection: RouteSelection,
     #[serde(default)]
     pub origins: Vec<Origin>,
     pub export: Export,
@@ -41,8 +45,10 @@ pub enum MetricConfig {
     Rtt {
         #[serde(default)]
         base: BaseMetricConfig,
-        #[serde(default = "default_rtt_alpha")]
-        alpha: f64,
+        #[serde(default = "default_rtt_probe_interval_ms")]
+        probe_interval_ms: u64,
+        #[serde(default = "default_rtt_half_life_ms")]
+        half_life_ms: u64,
         #[serde(default = "default_rtt_min_ms")]
         min_rtt_ms: u32,
         #[serde(default = "default_rtt_max_ms")]
@@ -77,7 +83,8 @@ impl MetricConfig {
                 .ok_or_else(|| ConfigError::InvalidMetric("ETX window must be in 1..=16".into())),
             Self::Rtt {
                 base,
-                alpha,
+                probe_interval_ms,
+                half_life_ms,
                 min_rtt_ms,
                 max_rtt_ms,
                 max_penalty,
@@ -89,10 +96,48 @@ impl MetricConfig {
                 let max_rtt_us = max_rtt_ms
                     .checked_mul(1_000)
                     .ok_or_else(|| ConfigError::InvalidMetric("max_rtt_ms is too large".into()))?;
-                RttMetric::new(base, *alpha, min_rtt_us, max_rtt_us, *max_penalty)
-                    .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
-                    .ok_or_else(|| ConfigError::InvalidMetric("invalid RTT parameters".into()))
+                RttMetric::new(
+                    base,
+                    *probe_interval_ms,
+                    *half_life_ms,
+                    min_rtt_us,
+                    max_rtt_us,
+                    *max_penalty,
+                )
+                .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
+                .ok_or_else(|| ConfigError::InvalidMetric("invalid RTT parameters".into()))
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSelection {
+    #[serde(default = "default_switch_margin_percent")]
+    pub switch_margin_percent: u8,
+    #[serde(default = "default_switch_margin_metric")]
+    pub switch_margin_metric: u16,
+    #[serde(default = "default_better_for_ms")]
+    pub better_for_ms: u64,
+}
+
+impl Default for RouteSelection {
+    fn default() -> Self {
+        Self {
+            switch_margin_percent: default_switch_margin_percent(),
+            switch_margin_metric: default_switch_margin_metric(),
+            better_for_ms: default_better_for_ms(),
+        }
+    }
+}
+
+impl From<RouteSelection> for RouteSelectionConfig {
+    fn from(value: RouteSelection) -> Self {
+        Self {
+            switch_margin_percent: value.switch_margin_percent,
+            switch_margin_metric: value.switch_margin_metric,
+            better_for_ms: value.better_for_ms,
         }
     }
 }
@@ -194,6 +239,8 @@ pub enum ConfigError {
     NoInterfaces,
     #[error("invalid metric configuration: {0}")]
     InvalidMetric(String),
+    #[error("invalid route-selection configuration: {0}")]
+    InvalidRouteSelection(String),
     #[error("interface match patterns must not be empty")]
     EmptyInterfacePattern,
     #[error("interface match pattern {0} is duplicated")]
@@ -271,6 +318,16 @@ impl Config {
             origin.key()?;
         }
         self.metric.build()?;
+        if self.route_selection.switch_margin_percent > 100 {
+            return Err(ConfigError::InvalidRouteSelection(
+                "switch_margin_percent must be in 0..=100".into(),
+            ));
+        }
+        if self.route_selection.switch_margin_metric == babel_proto::INFINITY {
+            return Err(ConfigError::InvalidRouteSelection(
+                "switch_margin_metric must be below infinity".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -284,6 +341,7 @@ impl Config {
         self.router_id == candidate.router_id
             && self.state_file == candidate.state_file
             && self.metric == candidate.metric
+            && self.route_selection == candidate.route_selection
     }
 }
 
@@ -330,8 +388,11 @@ fn default_wired_window() -> u8 {
 fn default_etx_window() -> u8 {
     EtxMetric::DEFAULT_WINDOW
 }
-fn default_rtt_alpha() -> f64 {
-    RttMetric::DEFAULT_ALPHA
+fn default_rtt_probe_interval_ms() -> u64 {
+    RttMetric::DEFAULT_PROBE_INTERVAL_MS
+}
+fn default_rtt_half_life_ms() -> u64 {
+    RttMetric::DEFAULT_HALF_LIFE_MS
 }
 fn default_rtt_min_ms() -> u32 {
     RttMetric::DEFAULT_MIN_RTT_US / 1_000
@@ -341,6 +402,15 @@ fn default_rtt_max_ms() -> u32 {
 }
 fn default_rtt_max_penalty() -> u16 {
     RttMetric::DEFAULT_MAX_PENALTY
+}
+fn default_switch_margin_percent() -> u8 {
+    RouteSelectionConfig::default().switch_margin_percent
+}
+fn default_switch_margin_metric() -> u16 {
+    RouteSelectionConfig::default().switch_margin_metric
+}
+fn default_better_for_ms() -> u64 {
+    RouteSelectionConfig::default().better_for_ms
 }
 
 #[cfg(test)]
@@ -461,13 +531,18 @@ table = 20000
 interfaces = ["mesh0"]
 [metric]
 type = "rtt"
-alpha = 0.85
+probe_interval_ms = 1500
+half_life_ms = 5000
 min_rtt_ms = 5
 max_rtt_ms = 80
 max_penalty = 200
 [metric.base]
 type = "etx"
 window = 8
+[route_selection]
+switch_margin_percent = 7
+switch_margin_metric = 12
+better_for_ms = 5000
 [export]
 [[export.views]]
 table = 20000
@@ -477,6 +552,8 @@ table = 20000
         let profile = config.metric.build().unwrap();
         assert_eq!(profile.name(), "rtt(etx)");
         assert!(profile.timestamps_enabled());
+        assert_eq!(profile.rtt_probe_interval_ms(), Some(1500));
+        assert_eq!(config.route_selection.better_for_ms, 5000);
     }
 
     #[test]
@@ -495,5 +572,21 @@ table = 20000
         )
         .unwrap_err();
         assert!(matches!(error, ConfigError::InvalidMetric(_)));
+    }
+
+    #[test]
+    fn invalid_route_selection_margin_is_rejected() {
+        let error = Config::parse(
+            r#"
+interfaces = ["eth0"]
+[route_selection]
+switch_margin_percent = 101
+[export]
+[[export.views]]
+table = 20000
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::InvalidRouteSelection(_)));
     }
 }

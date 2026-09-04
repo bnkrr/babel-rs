@@ -16,9 +16,9 @@ optional Babel extension.
 | RFC 9229 AE 4 IPv4-via-IPv6 | implemented | codec test and babeld/BIRD IPv4 FIB checks |
 | RFC 8966 wired k-out-of-j metric | implemented, default | 2-out-of-3/C=96 defaults; profile and delayed-acquisition tests |
 | RFC 8966 ETX metric | implemented, optional | receive/transmit loss calculation tests; configurable window |
-| RFC 8966 route-selection hysteresis | implemented | instantaneous plus smoothed candidate selection |
+| RFC 8966 route-selection hysteresis | implemented | configurable metric margins and continuous better-path dwell |
 | RFC 9616 Timestamp exchange and RTT sampling | implemented, optional | timestamp codec and Mills-exchange engine test |
-| RFC 9616 RTT smoothing and bounded cost policy | implemented, optional | configurable RFC defaults and metric tests |
+| RFC 9616 RTT smoothing and bounded cost policy | implemented, optional | time-based EWMA, configurable probe interval, bounded cost tests |
 | Custom metric profiles and algebra | library API | per-neighbour `MetricProfile`; guarded strictly monotonic extension |
 | RFC 8967/8968 authentication | not implemented | use a protected link such as WireGuard |
 

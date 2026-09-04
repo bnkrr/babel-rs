@@ -93,13 +93,30 @@ backwards compatible with peers that do not implement the extension:
 ```toml
 [metric]
 type = "rtt"
-alpha = 0.836
+probe_interval_ms = 2000
+half_life_ms = 6000
 min_rtt_ms = 10
 max_rtt_ms = 120
 max_penalty = 150
 
 [metric.base]
 type = "wired"
+```
+
+RTT is sampled independently on every live adjacency; one link cost is shared
+by every route learned through that neighbour. The time-based half-life keeps
+filter behaviour stable if probe timing varies. Route changes use a separate
+local policy: after a newly discovered prefix has settled, an alternative must
+clear both margins continuously for the configured dwell time. Initial
+candidate discovery and loss of the current route bypass this delay. A
+meaningful recovery of the current route cancels a pending switch, preventing
+the tail of the RTT filter from moving traffic after a transient has ended.
+
+```toml
+[route_selection]
+switch_margin_percent = 5
+switch_margin_metric = 8
+better_for_ms = 8000
 ```
 
 ETX uses `type = "etx"` and an optional `window` in `1..=16` (default 6).
@@ -117,10 +134,10 @@ manager can set `manage_rules = false`.
 
 `SIGHUP` parses and validates a complete candidate before committing interface
 patterns, origins, and export policy. An invalid candidate leaves the active
-configuration unchanged. Router-ID, `state_file`, and metric policy identify
-live protocol state and cannot change during reload; changing them requires a
-restart. SIGINT and SIGTERM retract local origins and then reconcile an empty
-snapshot.
+configuration unchanged. Router-ID, `state_file`, metric policy, and route
+selection policy identify live protocol state and cannot change during reload;
+changing them requires a restart. SIGINT and SIGTERM retract local origins and
+then reconcile an empty snapshot.
 
 `babel-rs --config ...` remains accepted for v0.1 compatibility, while the
 explicit `run` command enables the default control socket. Use

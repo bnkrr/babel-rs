@@ -5,7 +5,7 @@ pub mod metric;
 pub mod model;
 pub mod wire;
 
-pub use engine::{Action, Engine, EngineConfig, Event, NeighborStatus};
+pub use engine::{Action, Engine, EngineConfig, Event, NeighborStatus, RouteSelectionConfig};
 pub use metric::{
     AdditiveMetric, EtxMetric, HelloHistories, HelloHistory, HelloHistoryUpdate, MetricAlgebra,
     MetricProfile, MetricStatus, NeighborMetric, RttMetric, WiredMetric,
