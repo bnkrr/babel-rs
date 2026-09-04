@@ -25,7 +25,7 @@ users opt into the Linux backend.
 
 ## Current scope
 
-The v0.1 profile implements RFC 8966 base TLVs, neighbour maintenance,
+The v0.2 profile implements RFC 8966 base TLVs, neighbour maintenance,
 feasibility, route selection, route and sequence-number requests, retractions,
 and multi-hop propagation. It also implements RFC 9079 source-specific routes
 and RFC 9229 IPv4 routes with IPv6 next hops.
