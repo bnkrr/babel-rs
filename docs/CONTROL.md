@@ -10,7 +10,7 @@ timeout.
 Immediately after accept, the server sends:
 
 ```json
-{"type":"hello","api_version":1,"server_version":"0.1.0","capabilities":["status","interfaces","neighbors","routes","reload","shutdown"]}
+{"type":"hello","api_version":1,"server_version":"0.2.0","capabilities":["status","interfaces","neighbors","routes","reload","shutdown"]}
 ```
 
 A client then sends requests of this form:

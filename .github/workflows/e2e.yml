@@ -33,5 +33,7 @@ jobs:
         run: sudo sh tests/e2e/netns-three-node.sh "$PWD/target/release/babel-rs"
       - name: Test RFC 9616 RTT metric
         run: sudo sh tests/e2e/netns-rtt.sh "$PWD/target/release/babel-rs"
+      - name: Test delayed multipath RTT selection
+        run: sudo sh tests/e2e/netns-rtt-multipath.sh "$PWD/target/release/babel-rs"
       - name: Test lifecycle and FIB reconciliation
         run: sudo sh tests/e2e/netns-lifecycle.sh "$PWD/target/release/babel-rs"
