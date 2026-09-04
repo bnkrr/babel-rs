@@ -45,6 +45,9 @@ impl RouteKey {
         if source.is_some_and(|value| value.addr().is_ipv4() != destination.addr().is_ipv4()) {
             return None;
         }
+        // RFC 9079 represents a zero-length source prefix by omitting the
+        // Source Prefix sub-TLV altogether.
+        let source = source.filter(|value| value.prefix_len() != 0);
         Some(Self {
             destination: destination.trunc(),
             source: source.map(|value| value.trunc()),

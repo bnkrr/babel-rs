@@ -14,4 +14,5 @@ pub use model::*;
 pub use wire::{
     DEFAULT_UDP_PAYLOAD_SIZE, DecodeContext, OutboundPacket, OutboundTlv, OutboundUpdate, Packet,
     ResolvedUpdate, SubTlv, Tlv, WireError, decode_packet, encode_packet, encode_packets,
+    stamp_hello_timestamps,
 };

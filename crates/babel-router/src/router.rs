@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use babel_proto::{
     Action, AdditiveMetric, DEFAULT_UDP_PAYLOAD_SIZE, DecodeContext, Engine, EngineConfig, Event,
     MetricAlgebra, MetricProfile, NeighborStatus, RouteKey, RouteSelectionConfig, RouterId,
-    WiredMetric, decode_packet, encode_packets,
+    WiredMetric, decode_packet, encode_packets, stamp_hello_timestamps,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -80,6 +80,7 @@ enum Received {
         index: u32,
         source: IpAddr,
         bytes: Vec<u8>,
+        now_ms: u64,
     },
     Failed {
         interface: String,
@@ -107,6 +108,7 @@ struct Runtime {
     route_selection: RouteSelectionConfig,
     sequence_number: u16,
     sequence_store: Arc<dyn SequenceStore>,
+    started: Arc<Instant>,
 }
 
 struct OutboundDatagram {
@@ -115,6 +117,10 @@ struct OutboundDatagram {
 }
 
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+
+fn elapsed_ms(started: &Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Clone)]
 pub struct RouterHandle {
@@ -290,6 +296,7 @@ impl BabelRouterBuilder {
         spawn_exporter(Arc::clone(&exporter), export_stream, shutdown_rx.clone());
         let mut interface_stops = HashMap::new();
         let mut outbound = HashMap::new();
+        let started = Arc::new(Instant::now());
         for (name, socket) in &sockets {
             let (stop, stop_rx) = watch::channel(false);
             interface_stops.insert(name.clone(), stop);
@@ -298,8 +305,12 @@ impl BabelRouterBuilder {
                 received_tx.clone(),
                 shutdown_rx.clone(),
                 stop_rx.clone(),
+                Arc::clone(&started),
             );
-            outbound.insert(name.clone(), spawn_sender(Arc::clone(socket), stop_rx));
+            outbound.insert(
+                name.clone(),
+                spawn_sender(Arc::clone(socket), stop_rx, Arc::clone(&started)),
+            );
         }
         let task = tokio::spawn(run_loop(Runtime {
             router_id,
@@ -326,6 +337,7 @@ impl BabelRouterBuilder {
             sequence_store: self
                 .sequence_store
                 .unwrap_or_else(|| Arc::new(NoopSequenceStore)),
+            started,
         }));
         Ok(BabelRouter {
             handle: RouterHandle {
@@ -343,6 +355,7 @@ fn spawn_receiver(
     received: mpsc::Sender<Received>,
     mut shutdown: watch::Receiver<bool>,
     mut stop: watch::Receiver<bool>,
+    started: Arc<Instant>,
 ) {
     tokio::spawn(async move {
         let mut buffer = vec![0u8; 65535];
@@ -352,9 +365,9 @@ fn spawn_receiver(
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
                 result = socket.socket.recv_from(&mut buffer) => match result {
                     Ok((length, SocketAddr::V6(source)))
-                        if source.ip().is_unicast_link_local()
-                            && !socket.local_addresses.contains(source.ip()) => {
-                        let item = Received::Packet { interface: socket.name.clone(), index: socket.index, source: IpAddr::V6(*source.ip()), bytes: buffer[..length].to_vec() };
+                        if valid_babel_source(&source, &socket.local_addresses) => {
+                        let now_ms = elapsed_ms(&started);
+                        let item = Received::Packet { interface: socket.name.clone(), index: socket.index, source: IpAddr::V6(*source.ip()), bytes: buffer[..length].to_vec(), now_ms };
                         if received.send(item).await.is_err() { return; }
                     }
                     Ok(_) => {}
@@ -373,9 +386,16 @@ fn spawn_receiver(
     });
 }
 
+fn valid_babel_source(source: &std::net::SocketAddrV6, local: &[Ipv6Addr]) -> bool {
+    source.port() == babel_proto::wire::PORT
+        && source.ip().is_unicast_link_local()
+        && !local.contains(source.ip())
+}
+
 fn spawn_sender(
     socket: Arc<InterfaceSocket>,
     mut stop: watch::Receiver<bool>,
+    started: Arc<Instant>,
 ) -> mpsc::Sender<OutboundDatagram> {
     let (send, mut receive) = mpsc::channel::<OutboundDatagram>(OUTBOUND_QUEUE_CAPACITY);
     tokio::spawn(async move {
@@ -383,7 +403,14 @@ fn spawn_sender(
             tokio::select! {
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
                 item = receive.recv() => {
-                    let Some(item) = item else { return; };
+                    let Some(mut item) = item else { return; };
+                    if let Err(error) = stamp_hello_timestamps(
+                        &mut item.bytes,
+                        elapsed_ms(&started).wrapping_mul(1_000) as u32,
+                    ) {
+                        warn!(interface = %socket.name, %error, "Babel timestamp patch failed");
+                        continue;
+                    }
                     if let Err(error) = socket
                         .socket
                         .send_to(&item.bytes, socket.destination(item.destination))
@@ -443,9 +470,9 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         route_selection,
         sequence_number,
         sequence_store,
+        started,
     } = runtime;
-    let started = Instant::now();
-    let now = || started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let now = || elapsed_ms(&started);
     let mut engine = Engine::new(EngineConfig {
         router_id,
         metric,
@@ -517,7 +544,11 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     apply_actions(&outbound, &export_updates, &sequence_store, retractions.clone()).await?;
                 }
-                let empty = RouteSnapshot { generation: status.route_generation.wrapping_add(1), routes: vec![] };
+                let empty = RouteSnapshot {
+                    generation: status.route_generation.wrapping_add(1),
+                    routes: vec![],
+                    unreachable: vec![],
+                };
                 if let Err(error) = exporter.shutdown(empty.clone()).await { warn!(%error, "final route export cleanup failed"); }
                 route_updates.send_replace(empty);
                 return Ok(());
@@ -528,7 +559,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 status.neighbour_details = engine.neighbour_status(now());
             },
             Some(item) = received.recv() => match item {
-                Received::Packet { interface, index, source, bytes } => {
+                Received::Packet { interface, index, source, bytes, now_ms } => {
                     if sockets
                         .get(&interface)
                         .is_none_or(|socket| socket.index != index)
@@ -537,7 +568,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     }
                     match decode_packet(&bytes, DecodeContext { source }) {
                         Ok(packet) => {
-                            apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms: now() })).await?;
+                            apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms })).await?;
                             status.neighbours = engine.neighbour_count();
                             status.neighbour_details = engine.neighbour_status(now());
                         },
@@ -597,8 +628,8 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                             Ok(socket) => {
                                 let socket = Arc::new(socket);
                                 let (stop, stop_rx) = watch::channel(false);
-                                spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx.clone());
-                                outbound.insert(interface.clone(), spawn_sender(socket.clone(), stop.subscribe()));
+                                spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx.clone(), Arc::clone(&started));
+                                outbound.insert(interface.clone(), spawn_sender(socket.clone(), stop.subscribe(), Arc::clone(&started)));
                                 sockets.insert(interface.clone(), socket);
                                 interface_stops.insert(interface.clone(), stop);
                                 let local_addresses = sockets
@@ -723,10 +754,18 @@ async fn apply_actions_with_status(
                 }
             }
             Action::Send { .. } => {}
-            Action::RoutesChanged { generation, routes } => {
+            Action::RoutesChanged {
+                generation,
+                routes,
+                unreachable,
+            } => {
                 status.route_generation = generation;
                 status.selected_routes = routes.len();
-                let snapshot = RouteSnapshot { generation, routes };
+                let snapshot = RouteSnapshot {
+                    generation,
+                    routes,
+                    unreachable,
+                };
                 route_updates.send_replace(snapshot.clone());
                 export_updates.send_replace(snapshot);
             }
@@ -748,6 +787,27 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    #[test]
+    fn rfc8966_transport_accepts_only_link_local_port_6696_sources() {
+        let local = ["fe80::1".parse().unwrap()];
+        assert!(valid_babel_source(
+            &"[fe80::2]:6696".parse().unwrap(),
+            &local
+        ));
+        assert!(!valid_babel_source(
+            &"[fe80::2]:1234".parse().unwrap(),
+            &local
+        ));
+        assert!(!valid_babel_source(
+            &"[2001:db8::2]:6696".parse().unwrap(),
+            &local
+        ));
+        assert!(!valid_babel_source(
+            &"[fe80::1]:6696".parse().unwrap(),
+            &local
+        ));
+    }
 
     #[derive(Clone, Default)]
     struct SlowExporter {
@@ -778,6 +838,7 @@ mod tests {
             snapshots.send_replace(RouteSnapshot {
                 generation,
                 routes: Vec::new(),
+                unreachable: Vec::new(),
             });
         }
         tokio::time::timeout(Duration::from_secs(1), async {

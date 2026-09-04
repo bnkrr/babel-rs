@@ -293,7 +293,12 @@ pub fn decode_packet(data: &[u8], context: DecodeContext) -> Result<Packet, Wire
 fn decode_tlv(type_: u8, value: &[u8], state: &mut ParserState) -> Result<Option<Tlv>, WireError> {
     let invalid = || WireError::InvalidTlv { type_ };
     Ok(match type_ {
-        TLV_PADN => Some(Tlv::PadN(value.to_vec())),
+        TLV_PADN => {
+            // RFC 8966 section 4.6.2 requires zeroes on transmission, but the
+            // complete PadN TLV (including its MBZ body) is silently ignored
+            // on reception.
+            Some(Tlv::PadN(value.to_vec()))
+        }
         TLV_ACK_REQ => {
             if value.len() < 6 {
                 return Err(invalid());
@@ -441,6 +446,10 @@ fn decode_update(value: &[u8], state: &mut ParserState) -> Result<Option<Tlv>, W
         if plen != 0 || omitted != 0 {
             return Ok(None);
         }
+        let sub = decode_sub_tlvs(&value[10..], SubContext::Prefix(ae), None)?;
+        if sub.mandatory_unknown || sub.source_prefix.is_some() {
+            return Ok(None);
+        }
         return Ok(Some(Tlv::Update(ResolvedUpdate {
             key: None,
             router_id: None,
@@ -449,7 +458,7 @@ fn decode_update(value: &[u8], state: &mut ParserState) -> Result<Option<Tlv>, W
             seqno,
             metric,
             v4_via_v6: false,
-            sub_tlvs: vec![],
+            sub_tlvs: sub.values,
         })));
     }
     if ae == AddressEncoding::Ipv6LinkLocal && omitted != 0 {
@@ -624,7 +633,11 @@ fn decode_sub_tlvs(
         let body = &data[offset..offset + len];
         offset += len;
         match type_ {
-            1 => result.values.push(SubTlv::PadN(body.to_vec())),
+            1 => {
+                // As with top-level PadN, section 4.7.2 says to ignore the
+                // complete sub-TLV on reception; MBZ is an encoder rule.
+                result.values.push(SubTlv::PadN(body.to_vec()));
+            }
             SUBTLV_TIMESTAMP => match context {
                 SubContext::Hello if body.len() >= 4 => {
                     result.values.push(SubTlv::TimestampHello(be32(body)))
@@ -694,6 +707,66 @@ pub fn encode_packet(packet: &OutboundPacket) -> Result<Vec<u8>, WireError> {
         return Err(WireError::PacketSplitRequired);
     }
     Ok(packets.pop().expect("exactly one packet was checked"))
+}
+
+/// Rewrite RFC 9616 Timestamp sub-TLVs carried by Hello TLVs immediately
+/// before a datagram is sent. This keeps queueing time out of RTT samples.
+pub fn stamp_hello_timestamps(data: &mut [u8], timestamp: u32) -> Result<(), WireError> {
+    if data.len() < 4 {
+        return Err(WireError::ShortHeader);
+    }
+    if data[0] != MAGIC {
+        return Err(WireError::BadMagic);
+    }
+    if data[1] != VERSION {
+        return Err(WireError::UnsupportedVersion(data[1]));
+    }
+    let body_len = usize::from(be16(&data[2..4]));
+    if data.len() < 4 + body_len {
+        return Err(WireError::TruncatedBody);
+    }
+    let mut offset = 4;
+    let end = 4 + body_len;
+    while offset < end {
+        let type_ = data[offset];
+        offset += 1;
+        if type_ == TLV_PAD1 {
+            continue;
+        }
+        if offset >= end {
+            return Err(WireError::TruncatedTlv { type_ });
+        }
+        let length = usize::from(data[offset]);
+        offset += 1;
+        if end - offset < length {
+            return Err(WireError::TruncatedTlv { type_ });
+        }
+        if type_ == TLV_HELLO && length >= 6 {
+            let mut sub = offset + 6;
+            let tlv_end = offset + length;
+            while sub < tlv_end {
+                let sub_type = data[sub];
+                sub += 1;
+                if sub_type == 0 {
+                    continue;
+                }
+                if sub >= tlv_end {
+                    return Err(WireError::InvalidTlv { type_: TLV_HELLO });
+                }
+                let sub_length = usize::from(data[sub]);
+                sub += 1;
+                if tlv_end - sub < sub_length {
+                    return Err(WireError::InvalidTlv { type_: TLV_HELLO });
+                }
+                if sub_type == SUBTLV_TIMESTAMP && sub_length >= 4 {
+                    data[sub..sub + 4].copy_from_slice(&timestamp.to_be_bytes());
+                }
+                sub += sub_length;
+            }
+        }
+        offset += length;
+    }
+    Ok(())
 }
 
 /// Encode semantic outbound TLVs into independently decodable Babel packets.
@@ -781,8 +854,12 @@ fn encode_outbound_tlv(
 ) -> Result<(), WireError> {
     match tlv {
         OutboundTlv::Pad1 => out.push(TLV_PAD1),
-        OutboundTlv::PadN(value) => put_tlv(out, TLV_PADN, value)?,
+        OutboundTlv::PadN(value) => {
+            require_zeroes(value, TLV_PADN)?;
+            put_tlv(out, TLV_PADN, value)?;
+        }
         OutboundTlv::AckRequest { nonce, interval_cs } => {
+            require_nonzero(*interval_cs, TLV_ACK_REQ)?;
             let mut v = vec![0, 0];
             v.extend(nonce.to_be_bytes());
             v.extend(interval_cs.to_be_bytes());
@@ -808,6 +885,7 @@ fn encode_outbound_tlv(
             interval_cs,
             sub_tlvs,
         } => {
+            require_nonzero(*interval_cs, TLV_IHU)?;
             let (ae, bytes) = encode_optional_address(*address);
             let mut v = vec![ae as u8, 0];
             v.extend(rxcost.to_be_bytes());
@@ -817,7 +895,8 @@ fn encode_outbound_tlv(
             put_tlv(out, TLV_IHU, &v)?;
         }
         OutboundTlv::Update(update) => {
-            if update.key.is_some() {
+            require_nonzero(update.interval_cs, TLV_UPDATE)?;
+            if update.key.is_some() && update.metric != INFINITY {
                 let router_id = update.router_id.ok_or(WireError::MissingRouterId)?;
                 if context.router_id != Some(router_id) {
                     encode_router_id(router_id, out)?;
@@ -860,6 +939,7 @@ fn encode_outbound_tlv(
             router_id,
             sub_tlvs,
         } => {
+            require_nonzero(u16::from(*hop_count), TLV_SEQNO_REQUEST)?;
             let ae = ae_for_key(key, false);
             let mut v = vec![ae as u8, key.destination.prefix_len()];
             v.extend(seqno.to_be_bytes());
@@ -929,7 +1009,10 @@ fn encode_sub_tlvs(
         match value {
             SubTlv::SourcePrefix(_) => {} // emitted from RouteKey exactly once
             SubTlv::Pad1 => out.push(0),
-            SubTlv::PadN(v) => put_tlv(out, 1, v)?,
+            SubTlv::PadN(v) => {
+                require_zeroes(v, 1)?;
+                put_tlv(out, 1, v)?;
+            }
             SubTlv::TimestampHello(v) => put_tlv(out, SUBTLV_TIMESTAMP, &v.to_be_bytes())?,
             SubTlv::TimestampIhu { origin, received } => {
                 let mut v = Vec::new();
@@ -941,6 +1024,22 @@ fn encode_sub_tlvs(
         }
     }
     Ok(())
+}
+
+fn require_nonzero(value: u16, type_: u8) -> Result<(), WireError> {
+    if value == 0 {
+        Err(WireError::InvalidTlv { type_ })
+    } else {
+        Ok(())
+    }
+}
+
+fn require_zeroes(value: &[u8], type_: u8) -> Result<(), WireError> {
+    if value.iter().any(|byte| *byte != 0) {
+        Err(WireError::InvalidTlv { type_ })
+    } else {
+        Ok(())
+    }
 }
 
 fn put_tlv(out: &mut Vec<u8>, type_: u8, value: &[u8]) -> Result<(), WireError> {
@@ -1179,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn finite_and_retracted_updates_both_carry_router_id_context() {
+    fn finite_update_requires_router_id_but_retraction_does_not() {
         let key = RouteKey::new(IpNet::from_str("2001:db8::/64").unwrap(), None).unwrap();
         for metric in [96, INFINITY] {
             let datagram = encode_packet(&OutboundPacket {
@@ -1202,10 +1301,16 @@ mod tests {
                 },
             )
             .unwrap();
-            assert!(matches!(decoded.tlvs[0], Tlv::RouterId(value) if value == rid()));
-            assert!(
-                matches!(&decoded.tlvs[1], Tlv::Update(update) if update.router_id == Some(rid()) && update.metric == metric)
-            );
+            if metric < INFINITY {
+                assert!(matches!(decoded.tlvs[0], Tlv::RouterId(value) if value == rid()));
+                assert!(
+                    matches!(&decoded.tlvs[1], Tlv::Update(update) if update.router_id == Some(rid()) && update.metric == metric)
+                );
+            } else {
+                assert!(
+                    matches!(&decoded.tlvs[0], Tlv::Update(update) if update.router_id.is_none() && update.metric == metric)
+                );
+            }
         }
     }
 

@@ -96,6 +96,17 @@ wait_route() {
   done
 }
 
+wait_unreachable() {
+  ns=$1 table=$2 prefix=$3 limit=$4 attempt=0
+  while :; do
+    route=$(ip -n "${ns}" -6 route show table "${table}" exact "${prefix}" proto 203 2>/dev/null || true)
+    echo "${route}" | grep -q "^unreachable ${prefix}" && return
+    attempt=$((attempt + 1))
+    test "${attempt}" -lt "${limit}" || { echo "unreachable route ${prefix} did not converge in ${ns}: ${route}" >&2; exit 1; }
+    sleep 1
+  done
+}
+
 wait_route "${ns_a}" 22001 2001:db8:c::/64 yes 45
 wait_route "${ns_c}" 22003 2001:db8:a::/64 yes 45
 
@@ -103,7 +114,7 @@ wait_route "${ns_c}" 22003 2001:db8:a::/64 yes 45
 # than leaving the two-hop route installed until its advertised hold time.
 ip -n "${ns_b}" link set babel1 down
 ip -n "${ns_c}" link set babel0 down
-wait_route "${ns_a}" 22001 2001:db8:c::/64 no 25
+wait_unreachable "${ns_a}" 22001 2001:db8:c::/64 25
 
 ip -n "${ns_b}" link set babel1 up
 ip -n "${ns_c}" link set babel0 up

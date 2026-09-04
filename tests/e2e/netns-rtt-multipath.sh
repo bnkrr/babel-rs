@@ -19,6 +19,12 @@ cleanup() {
   if test "${status}" -ne 0; then
     for node in "${nodes[@]}"; do
       test ! -f "${runtime}/${node}.log" || { echo "--- ${node}.log" >&2; tail -n 80 "${runtime}/${node}.log" >&2; }
+      test ! -S "${runtime}/${node}.ctl" || {
+        echo "--- ${node} neighbors" >&2
+        "${daemon}" neighbors --socket "${runtime}/${node}.ctl" >&2 || true
+        echo "--- ${node} routes" >&2
+        "${daemon}" routes --socket "${runtime}/${node}.ctl" >&2 || true
+      }
     done
     test ! -f "${runtime}/route.json" || cat "${runtime}/route.json" >&2
   fi
