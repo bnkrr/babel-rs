@@ -5,6 +5,9 @@ the interface. Exact names, `*`, and `?` patterns are supported. An unmatched
 interface is not enabled; a rule with no current matches remains valid so that
 the interface supervisor can attach future devices.
 
+Only structured `[[interfaces]]` rules are accepted. Metric overrides belong
+to the matching rule under `[interfaces.metric]`.
+
 ```toml
 [[interfaces]]
 match = ["test-special-*"]
@@ -40,11 +43,6 @@ times the effective Hello interval, so it is 16000 ms unless Hello is
 overridden. `hello_interval_ms` and `update_interval_ms` accept nonzero
 multiples of 10 up to 655350 ms. IHU uses three times the effective Hello
 interval and is not separately configurable.
-
-The `interfaces = ["test-*"]` form and top-level `[metric]` remain available for
-v0.2 compatibility. They describe one wired-style rule with split horizon
-enabled and the common timing defaults. The top-level metric table cannot be
-mixed with structured `[[interfaces]]` rules.
 
 The `interfaces` control command reports the resolved metric, Hello and Update
 intervals, and split-horizon value for every attached interface, in addition to

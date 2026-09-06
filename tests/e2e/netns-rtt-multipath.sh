@@ -90,9 +90,9 @@ write_config() {
   {
     printf 'router_id = "%s"\n' "${router_id}"
     printf 'state_file = "%s/%s.state"\n' "${runtime}" "${node}"
-    printf 'interfaces = %s\n\n' "${interfaces}"
-    printf '[metric]\ntype = "rtt"\nprobe_interval_ms = 1000\nhalf_life_ms = 3000\nmin_rtt_ms = 10\nmax_rtt_ms = 120\nmax_penalty = 150\n\n'
-    printf '[metric.base]\ntype = "wired"\nnominal_cost = 96\nreceived = 2\nwindow = 3\n\n'
+    printf '[[interfaces]]\nmatch = %s\nlink_type = "tunnel"\n' "${interfaces}"
+    printf '[interfaces.metric]\ntype = "rtt"\nprobe_interval_ms = 1000\nhalf_life_ms = 3000\nmin_rtt_ms = 10\nmax_rtt_ms = 120\nmax_penalty = 150\n\n'
+    printf '[interfaces.metric.base]\ntype = "wired"\nnominal_cost = 96\nreceived = 2\nwindow = 3\n\n'
     printf '[route_selection]\nswitch_margin_percent = 5\nswitch_margin_metric = 8\nbetter_for_ms = 5000\n\n'
     if test -n "${origin}"; then printf '[[origins]]\ndestination = "%s"\nmetric = 0\n\n' "${origin}"; fi
     printf '[export]\nprotocol = 203\ndevice_only = false\nmanage_rules = false\n\n[[export.views]]\ntable = %s\n' "${table}"

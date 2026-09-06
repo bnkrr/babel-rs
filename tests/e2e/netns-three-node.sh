@@ -70,7 +70,7 @@ write_config() {
   {
     printf 'router_id = "%s"\n' "${router_id}"
     printf 'state_file = "%s/%s.state"\n' "${runtime}" "${node}"
-    printf 'interfaces = [%s]\n\n' "${interfaces}"
+    printf '[[interfaces]]\nmatch = [%s]\n\n' "${interfaces}"
     if test -n "${origin}"; then
       printf '[[origins]]\ndestination = "%s"\n\n' "${origin}"
     fi

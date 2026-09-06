@@ -55,7 +55,9 @@ ip -n "${ns_rs}" -6 route add 2001:db8:dead::/64 dev babel0 table 20000 proto 20
 
 cat >"${runtime}/rs.toml" <<EOF
 state_file = "${runtime}/rs.router-id"
-interfaces = ["babel0"]
+
+[[interfaces]]
+match = ["babel0"]
 
 [[origins]]
 destination = "2001:db8:100::/64"

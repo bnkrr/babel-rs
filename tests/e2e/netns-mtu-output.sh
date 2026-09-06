@@ -52,7 +52,7 @@ write_config() {
   {
     printf 'router_id = "%s"\n' "${router_id}"
     printf 'state_file = "%s/%s.state"\n' "${runtime}" "${node}"
-    printf 'interfaces = ["babel0"]\n\n'
+    printf '[[interfaces]]\nmatch = ["babel0"]\n\n'
     sequence=1
     while test "${sequence}" -le "${origins}"; do
       printf '[[origins]]\ndestination = "2001:db8:25:%x::1/128"\n\n' "${sequence}"

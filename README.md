@@ -25,7 +25,7 @@ users opt into the Linux backend.
 
 ## Current scope
 
-The v0.3 profile implements RFC 8966 base TLVs, neighbour maintenance,
+The v0.4 profile implements RFC 8966 base TLVs, neighbour maintenance,
 feasibility, route selection, route and sequence-number requests, retractions,
 and multi-hop propagation. It also implements RFC 9079 source-specific routes
 and RFC 9229 IPv4 routes with IPv6 next hops.
@@ -94,7 +94,7 @@ names, and starting with no current matches is valid. The daemon continuously
 attaches new matches, withdraws routes when interfaces disappear, and rebinds
 a same-name interface created with a new ifindex. See
 [CONFIGURATION.md](docs/CONFIGURATION.md) for the complete default matrix,
-override rules, legacy syntax, and interval constraints.
+override rules, and interval constraints.
 
 RTT is an RFC 9616 modifier over a wired or ETX base. Its timestamp exchange is
 backwards compatible with peers that do not implement the extension:

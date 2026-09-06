@@ -17,20 +17,12 @@ pub struct Config {
     pub router_id: Option<String>,
     #[serde(default = "default_state_file")]
     pub state_file: String,
-    pub interfaces: Interfaces,
-    pub metric: Option<MetricConfig>,
+    pub interfaces: Vec<InterfaceSection>,
     #[serde(default)]
     pub route_selection: RouteSelection,
     #[serde(default)]
     pub origins: Vec<Origin>,
     pub export: Export,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum Interfaces {
-    Legacy(Vec<String>),
-    Sections(Vec<InterfaceSection>),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -308,8 +300,6 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("interfaces must not be empty")]
     NoInterfaces,
-    #[error("top-level metric is only valid with the legacy interfaces = [...] syntax")]
-    LegacyMetricWithInterfaceSections,
     #[error("invalid metric configuration: {0}")]
     InvalidMetric(String),
     #[error("invalid route-selection configuration: {0}")]
@@ -363,29 +353,18 @@ impl Config {
 
     fn validate(&self) -> Result<(), ConfigError> {
         let mut interfaces = HashSet::new();
-        match &self.interfaces {
-            Interfaces::Legacy(patterns) => {
-                validate_patterns(patterns, &mut interfaces)?;
-                self.metric.clone().unwrap_or_default().build()?;
-            }
-            Interfaces::Sections(sections) => {
-                if self.metric.is_some() {
-                    return Err(ConfigError::LegacyMetricWithInterfaceSections);
-                }
-                if sections.is_empty() {
-                    return Err(ConfigError::NoInterfaces);
-                }
-                for section in sections {
-                    validate_patterns(&section.patterns, &mut interfaces)?;
-                    effective_interval(section.hello_interval_ms, "hello_interval_ms")?;
-                    effective_update_interval(section)?;
-                    section
-                        .metric
-                        .clone()
-                        .unwrap_or_else(|| MetricConfig::for_link_type(section.link_type))
-                        .build()?;
-                }
-            }
+        if self.interfaces.is_empty() {
+            return Err(ConfigError::NoInterfaces);
+        }
+        for section in &self.interfaces {
+            validate_patterns(&section.patterns, &mut interfaces)?;
+            effective_interval(section.hello_interval_ms, "hello_interval_ms")?;
+            effective_update_interval(section)?;
+            section
+                .metric
+                .clone()
+                .unwrap_or_else(|| MetricConfig::for_link_type(section.link_type))
+                .build()?;
         }
         if self.export.protocol == 0 {
             return Err(ConfigError::InvalidProtocol);
@@ -453,45 +432,33 @@ impl Config {
     }
 
     pub fn effective_interface(&self, name: &str) -> Option<EffectiveInterface> {
-        match &self.interfaces {
-            Interfaces::Legacy(patterns) => patterns
-                .iter()
-                .any(|pattern| wildcard_match(pattern, name))
-                .then(|| EffectiveInterface {
-                    section: 0,
-                    link_type: LinkType::Wired,
-                    metric: self.metric.clone().unwrap_or_default(),
-                    hello_interval_cs: DEFAULT_HELLO_INTERVAL_CS,
-                    update_interval_cs: DEFAULT_UPDATE_INTERVAL_CS,
-                    split_horizon: true,
-                }),
-            Interfaces::Sections(sections) => {
-                sections.iter().enumerate().find_map(|(index, item)| {
-                    item.patterns
-                        .iter()
-                        .any(|pattern| wildcard_match(pattern, name))
-                        .then(|| {
-                            let hello_interval_cs =
-                                effective_interval(item.hello_interval_ms, "hello_interval_ms")
-                                    .expect("validated interface interval");
-                            EffectiveInterface {
-                                section: index,
-                                link_type: item.link_type,
-                                metric: item
-                                    .metric
-                                    .clone()
-                                    .unwrap_or_else(|| MetricConfig::for_link_type(item.link_type)),
-                                hello_interval_cs,
-                                update_interval_cs: effective_update_interval(item)
-                                    .expect("validated interface interval"),
-                                split_horizon: item
-                                    .split_horizon
-                                    .unwrap_or_else(|| item.link_type != LinkType::Wireless),
-                            }
-                        })
-                })
-            }
-        }
+        self.interfaces
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| {
+                item.patterns
+                    .iter()
+                    .any(|pattern| wildcard_match(pattern, name))
+                    .then(|| {
+                        let hello_interval_cs =
+                            effective_interval(item.hello_interval_ms, "hello_interval_ms")
+                                .expect("validated interface interval");
+                        EffectiveInterface {
+                            section: index,
+                            link_type: item.link_type,
+                            metric: item
+                                .metric
+                                .clone()
+                                .unwrap_or_else(|| MetricConfig::for_link_type(item.link_type)),
+                            hello_interval_cs,
+                            update_interval_cs: effective_update_interval(item)
+                                .expect("validated interface interval"),
+                            split_horizon: item
+                                .split_horizon
+                                .unwrap_or_else(|| item.link_type != LinkType::Wireless),
+                        }
+                    })
+            })
     }
 
     pub fn reload_identity_matches(&self, candidate: &Self) -> bool {
@@ -503,7 +470,6 @@ impl Config {
 }
 
 const DEFAULT_HELLO_INTERVAL_CS: u16 = 400;
-const DEFAULT_UPDATE_INTERVAL_CS: u16 = 1600;
 
 fn validate_patterns(patterns: &[String], seen: &mut HashSet<String>) -> Result<(), ConfigError> {
     if patterns.is_empty() {
@@ -620,7 +586,8 @@ mod tests {
     fn strict_config_supports_policy_views() {
         let config: Config = toml::from_str(
             r#"
-interfaces = ["wg0"]
+[[interfaces]]
+match = ["wg0"]
 [[origins]]
 destination = "192.0.2.0/24"
 source = "10.0.0.0/8"
@@ -656,7 +623,8 @@ source = "10.0.0.0/8"
     fn source_views_cannot_collide_in_one_table() {
         let config: Config = toml::from_str(
             r#"
-interfaces = ["wg0"]
+[[interfaces]]
+match = ["wg0"]
 [export]
 [[export.views]]
 table = 20001
@@ -677,7 +645,8 @@ source = "10.1.0.0/16"
     fn overlapping_source_views_are_rejected_even_in_different_tables() {
         let error = Config::parse(
             r#"
-interfaces = ["wg0"]
+[[interfaces]]
+match = ["wg0"]
 [export]
 [[export.views]]
 table = 20001
@@ -695,7 +664,8 @@ source = "10.1.0.0/16"
     fn zero_length_source_is_normalised_to_the_ordinary_view() {
         let config = Config::parse(
             r#"
-interfaces = ["wg0"]
+[[interfaces]]
+match = ["wg0"]
 [export]
 [[export.views]]
 table = 20000
@@ -710,7 +680,8 @@ source = "0.0.0.0/0"
     fn interface_patterns_support_exact_star_and_question() {
         let config: Config = toml::from_str(
             r#"
-interfaces = ["test-*", "backbone?"]
+[[interfaces]]
+match = ["test-*", "backbone?"]
 [export]
 [[export.views]]
 table = 20000
@@ -728,7 +699,8 @@ table = 20000
     fn duplicate_interface_patterns_are_rejected() {
         let config: Config = toml::from_str(
             r#"
-interfaces = ["test-*", "test-*"]
+[[interfaces]]
+match = ["test-*", "test-*"]
 [export]
 [[export.views]]
 table = 20000
@@ -806,8 +778,14 @@ table = 20000
     }
 
     #[test]
-    fn structured_interfaces_reject_legacy_global_metric() {
-        let error = Config::parse(
+    fn legacy_configuration_forms_are_rejected() {
+        for contents in [
+            r#"
+interfaces = ["eth0"]
+[export]
+[[export.views]]
+table = 20000
+"#,
             r#"
 [[interfaces]]
 match = ["eth0"]
@@ -817,12 +795,12 @@ type = "wired"
 [[export.views]]
 table = 20000
 "#,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigError::LegacyMetricWithInterfaceSections
-        ));
+        ] {
+            assert!(matches!(
+                Config::parse(contents),
+                Err(ConfigError::Parse(_))
+            ));
+        }
     }
 
     #[test]
@@ -850,14 +828,14 @@ table = 20000
     fn omitted_metric_uses_rfc_wired_defaults() {
         let config = Config::parse(
             r#"
-interfaces = ["eth0"]
+[[interfaces]]
+match = ["eth0"]
 [export]
 [[export.views]]
 table = 20000
 "#,
         )
         .unwrap();
-        assert_eq!(config.metric, None);
         assert_eq!(
             config
                 .effective_interface("eth0")
@@ -874,15 +852,16 @@ table = 20000
     fn rtt_metric_supports_a_configured_etx_base() {
         let config = Config::parse(
             r#"
-interfaces = ["mesh0"]
-[metric]
+[[interfaces]]
+match = ["mesh0"]
+[interfaces.metric]
 type = "rtt"
 probe_interval_ms = 1500
 half_life_ms = 5000
 min_rtt_ms = 5
 max_rtt_ms = 80
 max_penalty = 200
-[metric.base]
+[interfaces.metric.base]
 type = "etx"
 window = 8
 [route_selection]
@@ -895,7 +874,12 @@ table = 20000
 "#,
         )
         .unwrap();
-        let profile = config.metric.as_ref().unwrap().build().unwrap();
+        let profile = config
+            .effective_interface("mesh0")
+            .unwrap()
+            .metric
+            .build()
+            .unwrap();
         assert_eq!(profile.name(), "rtt(etx)");
         assert!(profile.timestamps_enabled());
         assert_eq!(profile.rtt_probe_interval_ms(), Some(1500));
@@ -906,8 +890,9 @@ table = 20000
     fn invalid_metric_parameters_are_rejected() {
         let error = Config::parse(
             r#"
-interfaces = ["eth0"]
-[metric]
+[[interfaces]]
+match = ["eth0"]
+[interfaces.metric]
 type = "wired"
 received = 4
 window = 3
@@ -924,7 +909,8 @@ table = 20000
     fn invalid_route_selection_margin_is_rejected() {
         let error = Config::parse(
             r#"
-interfaces = ["eth0"]
+[[interfaces]]
+match = ["eth0"]
 [route_selection]
 switch_margin_percent = 101
 [export]
@@ -940,7 +926,8 @@ table = 20000
     fn duplicate_origins_are_rejected_before_reload_commit() {
         let error = Config::parse(
             r#"
-interfaces = ["eth0"]
+[[interfaces]]
+match = ["eth0"]
 [[origins]]
 destination = "2001:db8::/64"
 [[origins]]

@@ -48,7 +48,9 @@ ip -n "${ns_c}" link set babel0 up
 cat >"${runtime}/rs.toml" <<EOF
 router_id = "11:12:13:14:15:16:17:18"
 state_file = "${runtime}/rs.router-id"
-interfaces = ["babel0"]
+
+[[interfaces]]
+match = ["babel0"]
 
 [[origins]]
 destination = "2001:db8:510::/64"
