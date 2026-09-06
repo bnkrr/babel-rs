@@ -25,7 +25,7 @@ users opt into the Linux backend.
 
 ## Current scope
 
-The v0.2 profile implements RFC 8966 base TLVs, neighbour maintenance,
+The v0.3 profile implements RFC 8966 base TLVs, neighbour maintenance,
 feasibility, route selection, route and sequence-number requests, retractions,
 and multi-hop propagation. It also implements RFC 9079 source-specific routes
 and RFC 9229 IPv4 routes with IPv6 next hops.
@@ -42,6 +42,12 @@ The standalone daemon is Linux-specific. It exports selected routes plus the
 temporary exact unreachable routes required by RFC 8966 hold time. It owns only
 its configured protocol and does not automatically redistribute the kernel
 routing table; local origins come from configuration or the embedding API.
+
+Outbound TLVs carry explicit monotonic deadlines from the protocol engine.
+Each interface has an independent scheduler that adds bounded jitter,
+aggregates compatible TLVs, and paces datagrams unless doing so would miss a
+deadline. Packet boundaries are selected at release time from the live Linux
+interface MTU; changing MTU does not require restarting the daemon.
 
 See [CONFORMANCE.md](docs/CONFORMANCE.md) for exact protocol claims and
 [INTEROPERABILITY.md](docs/INTEROPERABILITY.md) for tested peers and
@@ -72,27 +78,29 @@ interface must be administratively up and have an IPv6 link-local address.
 `babel-rs` sends standard Babel packets over UDP/6696 to `ff02::1:6`; peers do
 not need matching Linux interface names.
 
-An interface entry without metacharacters is an exact name. `*` and `?` match
-multiple names, and starting with no current matches is valid. The daemon
-continuously attaches new matches, withdraws routes when interfaces disappear,
-and rebinds a same-name interface created with a new ifindex.
-
-The optional `[metric]` table selects a built-in policy. Omitting it uses the
-RFC 8966 wired defaults:
+Structured interface rules are checked in order and the first matching rule
+wins. `link_type` supplies documented metric and split-horizon presets; timing
+defaults remain common across all link types. Explicit values override the
+preset for that interface:
 
 ```toml
-[metric]
-type = "wired"
-nominal_cost = 96
-received = 2
-window = 3
+[[interfaces]]
+match = ["vl-*"]
+link_type = "tunnel"
 ```
+
+An entry without metacharacters is an exact name. `*` and `?` match multiple
+names, and starting with no current matches is valid. The daemon continuously
+attaches new matches, withdraws routes when interfaces disappear, and rebinds
+a same-name interface created with a new ifindex. See
+[CONFIGURATION.md](docs/CONFIGURATION.md) for the complete default matrix,
+override rules, legacy syntax, and interval constraints.
 
 RTT is an RFC 9616 modifier over a wired or ETX base. Its timestamp exchange is
 backwards compatible with peers that do not implement the extension:
 
 ```toml
-[metric]
+[interfaces.metric]
 type = "rtt"
 probe_interval_ms = 2000
 half_life_ms = 6000
@@ -100,7 +108,7 @@ min_rtt_ms = 10
 max_rtt_ms = 120
 max_penalty = 150
 
-[metric.base]
+[interfaces.metric.base]
 type = "wired"
 ```
 
@@ -121,8 +129,6 @@ better_for_ms = 8000
 ```
 
 ETX uses `type = "etx"` and an optional `window` in `1..=16` (default 6).
-All algorithm defaults remain configurable in the daemon rather than being
-embedded in the engine.
 
 ## Daemon behaviour
 
@@ -138,8 +144,10 @@ subset where its lookup order is equivalent to RFC 9079 destination-first
 selection.
 
 `SIGHUP` parses and validates a complete candidate before committing interface
-patterns, origins, and export policy. An invalid candidate leaves the active
-configuration unchanged. Router-ID, `state_file`, metric policy,
+rules, origins, and export policy. An invalid candidate leaves the active
+configuration unchanged. A changed interface policy is applied in place;
+metric changes rebuild neighbour costs from retained Hello/IHU observations.
+Router-ID, `state_file`,
 route-selection policy, and the exclusive Linux route `protocol` identify live
 protocol state and cannot change during reload; changing them requires a
 restart. All locally originated routes are replaced in one serialized engine
@@ -166,12 +174,14 @@ cargo run -p babel-router --example embedded
 ```
 
 `BabelRouter::builder()` accepts typed Router-ID, interfaces, originated
-routes, a `MetricProfile`, optional `MetricAlgebra`, `SequenceStore`, and
-`RouteExporter`. A profile creates independent per-neighbour state and receives
-typed Hello, IHU, and RTT observations. `RouterHandle` supports originate and
-withdraw operations, dynamic interface changes, status, route subscription,
-and graceful shutdown. The exporter receives a generation-tagged full
-desired-state snapshot rather than an unrecoverable stream of deltas.
+routes, a default `MetricProfile`, optional `MetricAlgebra`, `SequenceStore`,
+and `RouteExporter`. `interface_with_policy` and
+`RouterHandle::add_interface_with_policy` select metric, timing and split
+horizon per interface. A profile creates independent per-neighbour state and
+receives typed Hello, IHU, and RTT observations. `RouterHandle` also supports
+originate and withdraw operations, dynamic interface changes, status, route
+subscription, and graceful shutdown. The exporter receives a generation-tagged
+full desired-state snapshot rather than an unrecoverable stream of deltas.
 
 See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the protocol, runtime, and
 exporter boundaries.
@@ -197,7 +207,8 @@ Set `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN`, or
 suite covers `babeld`, BIRD, IPv4-over-IPv6, IPv6, source-specific routes,
 RFC 9616 RTT sampling, delayed multipath selection and hysteresis, withdraw and
 reannounce, persisted restart state, stale-route cleanup, three-node
-propagation, link failure, and recovery.
+propagation, link failure and recovery, plus live-MTU packetisation under a
+large route announcement.
 
 ## License
 

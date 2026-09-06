@@ -4,28 +4,27 @@ router_id = "01:02:03:04:05:06:07:08"
 # Optional. Parent directories are created; updates use fsync + atomic rename.
 state_file = "/var/lib/babel-rs/state.toml"
 
-# Required, non-empty desired-state patterns. Exact names, `*`, and `?` are
-# supported. Zero current matches is valid; matching interfaces are attached
-# when they are up and have an IPv6 link-local address.
-interfaces = ["vl-*", "backbone0"]
+# Required, ordered desired-state rules. The first matching section wins.
+# Exact names, `*`, and `?` are supported; zero current matches is valid.
+[[interfaces]]
+match = ["vl-special-*"]
+link_type = "tunnel"
+hello_interval_ms = 1000
 
-# Optional. RFC 8966 wired 2-out-of-3 with nominal cost 96 is the default.
-[metric]
-type = "wired"
-nominal_cost = 96
-received = 2
-window = 3
+[[interfaces]]
+match = ["vl-*", "backbone0"]
+link_type = "tunnel"
 
-# RFC 9616 RTT can instead wrap a wired or ETX base metric:
-# [metric]
+# An explicit nested metric replaces the link_type metric preset atomically:
+# [interfaces.metric]
 # type = "rtt"
 # probe_interval_ms = 2000
 # half_life_ms = 6000
 # min_rtt_ms = 10
 # max_rtt_ms = 120
 # max_penalty = 150
-# [metric.base]
-# type = "wired"
+# [interfaces.metric.base]
+# type = "etx"
 
 # Optional route-switch policy. An unavailable current route is replaced
 # immediately; these thresholds apply only while it remains reachable.

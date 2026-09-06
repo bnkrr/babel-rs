@@ -37,3 +37,5 @@ jobs:
         run: sudo bash tests/e2e/netns-rtt-multipath.sh "$PWD/target/release/babel-rs"
       - name: Test lifecycle and FIB reconciliation
         run: sudo sh tests/e2e/netns-lifecycle.sh "$PWD/target/release/babel-rs"
+      - name: Test live MTU packetisation and output scheduling
+        run: sudo sh tests/e2e/netns-mtu-output.sh "$PWD/target/release/babel-rs"

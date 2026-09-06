@@ -6,6 +6,51 @@ use babel_proto::{Action, Event, INFINITY, OutboundTlv, Packet, ResolvedUpdate, 
 use common::{ConformanceHarness, id, key};
 
 #[test]
+fn rfc8966_3_1_output_actions_preserve_their_deadlines() {
+    let mut h = ConformanceHarness::new(id(1));
+    h.interface("a");
+
+    let periodic = h.tick(3900);
+    assert!(periodic.iter().any(|action| matches!(
+        action,
+        Action::Send { packet, timing, .. }
+            if matches!(packet.tlvs.as_slice(), [OutboundTlv::Hello { unicast: false, .. }])
+                && timing.deadline_ms == 4000
+                && timing.max_jitter_ms == 100
+    )));
+
+    let ack = h.receive(
+        "a",
+        "fe80::2",
+        vec![Tlv::AckRequest {
+            nonce: 7,
+            interval_cs: 9,
+        }],
+    );
+    assert!(ack.iter().any(|action| matches!(
+        action,
+        Action::Send { packet, timing, .. }
+            if matches!(packet.tlvs.as_slice(), [OutboundTlv::Ack { nonce: 7 }])
+                && timing.deadline_ms == 3991
+                && timing.max_jitter_ms == 90
+    )));
+
+    let request = h.receive(
+        "a",
+        "fe80::2",
+        vec![Tlv::RouteRequest {
+            key: Some(key("2001:db8:ffff::/64")),
+            sub_tlvs: vec![],
+        }],
+    );
+    assert!(request.iter().any(|action| matches!(
+        action,
+        Action::Send { timing, .. }
+            if timing.deadline_ms == 3922 && timing.max_jitter_ms == 20
+    )));
+}
+
+#[test]
 fn rfc8966_3_8_1_2_seqno_request_increments_an_origin_only_once() {
     let mut h = ConformanceHarness::new(id(1));
     h.interface("a");
@@ -52,7 +97,12 @@ fn rfc8966_3_8_1_2_forwarded_seqno_request_is_unicast_and_decrements_hop_count()
     );
     assert!(actions.iter().any(|action| matches!(
         action,
-        Action::Send { interface, destination, packet }
+        Action::Send {
+            interface,
+            destination,
+            packet,
+            ..
+        }
             if interface == "out"
                 && *destination == "fe80::20".parse::<IpAddr>().unwrap()
                 && matches!(packet.tlvs.as_slice(), [OutboundTlv::SeqnoRequest { hop_count: 8, .. }])
