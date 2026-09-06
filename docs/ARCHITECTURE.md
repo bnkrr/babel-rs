@@ -17,11 +17,17 @@ mandatory sub-TLV discards only its enclosing TLV.
 
 The outbound packetizer is the sole owner of Router-ID and Next-Hop context.
 It repeats context after packet boundaries and emits independently decodable
-datagrams within the IPv6 minimum-MTU UDP payload budget. This applies equally
-to finite updates and retractions.
+datagrams within the live interface MTU minus IPv6 and UDP headers. This
+applies equally to finite updates and retractions.
 
 `babel-router` owns one serialized engine plus orthogonal per-interface UDP
-receiver and bounded sender tasks. Interfaces bind UDP/6696 with
+receiver and bounded sender tasks. Every engine Send action includes an
+absolute deadline and permitted jitter. Each sender keeps semantic TLVs
+unencoded during that jitter window, aggregates work for the same destination,
+then reads the current Linux MTU and packetises at release time. Datagrams are
+paced by default, while an earlier deadline preempts the pacing gap. Queue
+backpressure is explicit; encode/send failures and deadline misses are exposed
+as status counters. Interfaces bind UDP/6696 with
 `SO_BINDTODEVICE`, join
 `ff02::1:6`, use hop limit 1, and accept only non-local unicast link-local
 sources. Bounded command, receive, and output queues isolate the engine. Route
@@ -38,10 +44,13 @@ BabelRouterBuilder -> BabelRouter -> RouterHandle
 ```
 
 `babel-rs` adds strict TOML, signals, versioned state, a versioned Unix control
-socket, an interface supervisor, and a Linux netlink exporter. Interface patterns are desired state. Netlink
-events plus periodic snapshots reconcile them against name, ifindex,
-administrative state and IPv6 link-local addresses. Removing or replacing an
-interface sends `InterfaceDown` to the engine before a new socket is attached.
+socket, an interface supervisor, and a Linux netlink exporter. Ordered
+interface rules are desired state. Netlink events plus periodic snapshots
+reconcile names, ifindex, administrative state, IPv6 link-local addresses and
+the resolved interface policy. Removing or replacing an interface sends
+`InterfaceDown` to the engine before a new socket is attached. Attachment sends
+an immediate wildcard Route Request so startup and policy reload do not wait
+for every neighbour's periodic Update interval.
 
 The exporter enumerates the configured protocol ownership scope, replaces
 desired routes and rules, and deletes stale owned state. A periodic full
@@ -74,8 +83,9 @@ retain Router-ID, sequence number, computed metric, interface and next hop.
 
 The engine keeps neighbour, feasibility/source, candidate, selected,
 originated and pending-sequence-request state separately. One event is applied
-atomically; route selection then emits one new generation. Learned routes use
-split horizon on their ingress interface. Selection changes are advertised
+atomically; route selection then emits one new generation. Split horizon is
+decided independently by each egress interface; it defaults off for wireless
+links and on for wired and tunnel links. Selection changes are advertised
 immediately, including an infinity retraction when the last selected path
 disappears.
 Source entries are maintained only when a finite route is actually advertised,
@@ -129,7 +139,9 @@ failure leaves the selected RIB intact and is reported; the periodic reconciler
 retries its complete snapshot. SIGHUP validates a full candidate before
 replacing desired state; invalid input keeps the old active configuration.
 Origins are replaced as one engine event; interface and netlink state then
-converge asynchronously. Router-ID, state-file location, metric policy,
+converge asynchronously. A changed per-interface policy is applied in place;
+metric changes rebuild neighbour state from retained Hello/IHU observations,
+while socket and selected-route state remain attached. Router-ID, state-file location,
 route-selection policy, and Linux route protocol remain immutable during a
 process lifetime. The route protocol is an exclusive ownership token within
 one network namespace and is guarded by a process-life lock. Graceful shutdown

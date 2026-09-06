@@ -18,6 +18,51 @@ const REQUEST_RETRY_INITIAL_MS: u64 = 2_000;
 const REQUEST_RETRIES: u8 = 3;
 const REQUEST_HOP_COUNT: u8 = 64;
 const RECENT_REQUEST_MS: u64 = 16_000;
+const URGENT_TIMEOUT_MS: u64 = 20;
+const MAX_TRIGGERED_JITTER_MS: u64 = 100;
+
+/// Delivery constraints for one semantic outbound Babel packet.
+///
+/// Times use the same monotonic millisecond clock as [`Event`].  The router
+/// may aggregate this packet with compatible work and choose any send time up
+/// to `max_jitter_ms` after enqueueing, but it must never intentionally send
+/// later than `deadline_ms`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SendTiming {
+    pub deadline_ms: u64,
+    pub max_jitter_ms: u64,
+}
+
+impl SendTiming {
+    pub const fn immediate(now_ms: u64) -> Self {
+        Self {
+            deadline_ms: now_ms,
+            max_jitter_ms: 0,
+        }
+    }
+
+    pub fn urgent(now_ms: u64) -> Self {
+        Self {
+            deadline_ms: now_ms.saturating_add(URGENT_TIMEOUT_MS),
+            max_jitter_ms: URGENT_TIMEOUT_MS,
+        }
+    }
+
+    pub fn triggered(now_ms: u64, hello_interval_cs: u16) -> Self {
+        let deadline_delta = u64::from(hello_interval_cs).saturating_mul(5);
+        Self {
+            deadline_ms: now_ms.saturating_add(deadline_delta),
+            max_jitter_ms: deadline_delta.min(MAX_TRIGGERED_JITTER_MS),
+        }
+    }
+
+    pub fn by_deadline(now_ms: u64, deadline_ms: u64) -> Self {
+        Self {
+            deadline_ms,
+            max_jitter_ms: deadline_ms.saturating_sub(now_ms),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RouteSelectionConfig {
@@ -65,6 +110,27 @@ pub struct EngineConfig {
     pub route_selection: RouteSelectionConfig,
 }
 
+/// Behaviour selected independently for one Babel interface.
+#[derive(Clone)]
+pub struct InterfacePolicy {
+    pub metric: Arc<dyn MetricProfile>,
+    pub hello_interval_cs: u16,
+    pub update_interval_cs: u16,
+    pub split_horizon: bool,
+}
+
+impl std::fmt::Debug for InterfacePolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InterfacePolicy")
+            .field("metric", &self.metric.name())
+            .field("hello_interval_cs", &self.hello_interval_cs)
+            .field("update_interval_cs", &self.update_interval_cs)
+            .field("split_horizon", &self.split_horizon)
+            .finish()
+    }
+}
+
 impl EngineConfig {
     pub fn recommended(router_id: RouterId) -> Self {
         Self {
@@ -84,6 +150,18 @@ pub enum Event {
     InterfaceUp {
         interface: String,
         local_addresses: Vec<IpAddr>,
+        now_ms: u64,
+    },
+    InterfaceUpWithPolicy {
+        interface: String,
+        local_addresses: Vec<IpAddr>,
+        policy: InterfacePolicy,
+        now_ms: u64,
+    },
+    InterfacePolicyChanged {
+        interface: String,
+        policy: InterfacePolicy,
+        reset_metric: bool,
         now_ms: u64,
     },
     InterfaceDown {
@@ -121,6 +199,7 @@ pub enum Action {
         interface: String,
         destination: IpAddr,
         packet: OutboundPacket,
+        timing: SendTiming,
     },
     RoutesChanged {
         generation: u64,
@@ -133,6 +212,7 @@ pub enum Action {
 #[derive(Clone, Debug)]
 struct InterfaceState {
     local_addresses: Vec<IpAddr>,
+    policy: InterfacePolicy,
     hello_seqno: u16,
     next_hello_ms: u64,
     next_update_ms: u64,
@@ -151,6 +231,7 @@ struct Neighbor {
     multicast_timer: Option<HelloTimer>,
     unicast_timer: Option<HelloTimer>,
     last_ihu_ms: Option<u64>,
+    last_ihu_cost: Option<u16>,
     ihu_interval_cs: u16,
     next_ihu_ms: u64,
     next_rtt_probe_ms: Option<u64>,
@@ -266,17 +347,21 @@ impl Engine {
                 local_addresses,
                 now_ms,
             } => {
-                self.interfaces
-                    .entry(interface.clone())
-                    .or_insert(InterfaceState {
-                        local_addresses,
-                        hello_seqno: 0,
-                        next_hello_ms: now_ms,
-                        next_update_ms: now_ms,
-                        last_full_update_ms: None,
-                    });
-                self.tick(now_ms)
+                let policy = self.default_interface_policy();
+                self.interface_up(interface, local_addresses, policy, now_ms)
             }
+            Event::InterfaceUpWithPolicy {
+                interface,
+                local_addresses,
+                policy,
+                now_ms,
+            } => self.interface_up(interface, local_addresses, policy, now_ms),
+            Event::InterfacePolicyChanged {
+                interface,
+                policy,
+                reset_metric,
+                now_ms,
+            } => self.interface_policy_changed(interface, policy, reset_metric, now_ms),
             Event::InterfaceDown { interface, now_ms } => {
                 self.interfaces.remove(&interface);
                 self.neighbours.retain(|key, _| key.interface != interface);
@@ -310,7 +395,7 @@ impl Engine {
                     },
                 );
                 actions.extend(self.reselect(now_ms));
-                actions.extend(self.send_updates(now_ms, Some(key), None));
+                actions.extend(self.send_updates(now_ms, Some(key), None, None));
                 actions
             }
             Event::Withdraw { key, now_ms } => {
@@ -328,6 +413,90 @@ impl Engine {
         }
     }
 
+    fn default_interface_policy(&self) -> InterfacePolicy {
+        InterfacePolicy {
+            metric: Arc::clone(&self.config.metric),
+            hello_interval_cs: self.config.hello_interval_cs,
+            update_interval_cs: self.config.update_interval_cs,
+            split_horizon: true,
+        }
+    }
+
+    fn interface_up(
+        &mut self,
+        interface: String,
+        local_addresses: Vec<IpAddr>,
+        policy: InterfacePolicy,
+        now_ms: u64,
+    ) -> Vec<Action> {
+        self.interfaces
+            .entry(interface.clone())
+            .or_insert(InterfaceState {
+                local_addresses,
+                policy,
+                hello_seqno: 0,
+                next_hello_ms: now_ms,
+                next_update_ms: now_ms,
+                last_full_update_ms: None,
+            });
+        let mut actions = self.tick(now_ms);
+        actions.push(Action::Send {
+            interface,
+            destination: BABEL_MULTICAST_V6,
+            packet: OutboundPacket {
+                tlvs: vec![OutboundTlv::RouteRequest {
+                    key: None,
+                    sub_tlvs: vec![],
+                }],
+            },
+            timing: SendTiming::urgent(now_ms),
+        });
+        actions
+    }
+
+    fn interface_policy_changed(
+        &mut self,
+        interface: String,
+        policy: InterfacePolicy,
+        reset_metric: bool,
+        now_ms: u64,
+    ) -> Vec<Action> {
+        let Some(state) = self.interfaces.get_mut(&interface) else {
+            return Vec::new();
+        };
+        state.policy = policy.clone();
+        state.next_hello_ms = now_ms;
+        state.next_update_ms = now_ms;
+        state.last_full_update_ms = None;
+
+        let mut actions = Vec::new();
+        if reset_metric {
+            for (key, neighbour) in &mut self.neighbours {
+                if key.interface != interface {
+                    continue;
+                }
+                let mut metric = policy.metric.new_neighbor(&interface);
+                metric.on_hello(neighbour.histories);
+                if let Some(cost) = neighbour.last_ihu_cost {
+                    metric.on_ihu(cost);
+                }
+                neighbour.metric = metric;
+                neighbour.next_ihu_ms = now_ms;
+                neighbour.next_rtt_probe_ms = policy
+                    .metric
+                    .rtt_probe_interval_ms()
+                    .map(|value| initial_probe_deadline(now_ms, value, key));
+                neighbour.origin_timestamp = None;
+                neighbour.receive_timestamp = None;
+            }
+            if self.recompute_candidate_metrics(None) {
+                actions.extend(self.reselect(now_ms));
+            }
+        }
+        actions.extend(self.tick(now_ms));
+        actions
+    }
+
     pub fn selected_routes(&self) -> Vec<SelectedRoute> {
         self.selected.values().cloned().collect()
     }
@@ -340,6 +509,22 @@ impl Engine {
         self.interfaces
             .get(interface)
             .is_some_and(|state| state.local_addresses.iter().any(IpAddr::is_ipv4))
+    }
+
+    fn interface_hello_interval(&self, interface: &str) -> u16 {
+        self.interfaces
+            .get(interface)
+            .map_or(self.config.hello_interval_cs, |state| {
+                state.policy.hello_interval_cs
+            })
+    }
+
+    fn interface_update_interval(&self, interface: &str) -> u16 {
+        self.interfaces
+            .get(interface)
+            .map_or(self.config.update_interval_cs, |state| {
+                state.policy.update_interval_cs
+            })
     }
 
     pub fn neighbour_count(&self) -> usize {
@@ -397,6 +582,8 @@ impl Engine {
             return Vec::new();
         };
         let local_addresses = interface_state.local_addresses.clone();
+        let metric_profile = Arc::clone(&interface_state.policy.metric);
+        let hello_interval_cs = interface_state.policy.hello_interval_cs;
         let neighbour_key = NeighborKey {
             interface: interface.clone(),
             address: source,
@@ -438,15 +625,16 @@ impl Engine {
                         multicast_timer: None,
                         unicast_timer: None,
                         last_ihu_ms: None,
-                        ihu_interval_cs: self.config.hello_interval_cs.saturating_mul(3),
+                        last_ihu_cost: None,
+                        ihu_interval_cs: hello_interval_cs.saturating_mul(3),
                         next_ihu_ms: now_ms,
-                        next_rtt_probe_ms: self.config.metric.rtt_probe_interval_ms().map(
-                            |interval| initial_probe_deadline(now_ms, interval, &neighbour_key),
-                        ),
+                        next_rtt_probe_ms: metric_profile.rtt_probe_interval_ms().map(|interval| {
+                            initial_probe_deadline(now_ms, interval, &neighbour_key)
+                        }),
                         origin_timestamp: None,
                         receive_timestamp: None,
                         unicast_hello_seqno: 0,
-                        metric: self.config.metric.new_neighbor(&interface),
+                        metric: metric_profile.new_neighbor(&interface),
                     });
                 let previous_receive_cost = neighbour.metric.receive_cost();
                 let update = (*interval_cs != 0).then(|| {
@@ -470,15 +658,15 @@ impl Engine {
                     neighbour.multicast_timer = None;
                     neighbour.unicast_timer = None;
                     neighbour.last_ihu_ms = None;
+                    neighbour.last_ihu_cost = None;
                     neighbour.next_ihu_ms = now_ms;
-                    neighbour.next_rtt_probe_ms =
-                        self.config.metric.rtt_probe_interval_ms().map(|interval| {
-                            initial_probe_deadline(now_ms, interval, &neighbour_key)
-                        });
+                    neighbour.next_rtt_probe_ms = metric_profile
+                        .rtt_probe_interval_ms()
+                        .map(|interval| initial_probe_deadline(now_ms, interval, &neighbour_key));
                     neighbour.origin_timestamp = None;
                     neighbour.receive_timestamp = None;
                     neighbour.unicast_hello_seqno = 0;
-                    neighbour.metric = self.config.metric.new_neighbor(&interface);
+                    neighbour.metric = metric_profile.new_neighbor(&interface);
                 }
                 neighbour.metric.on_hello(neighbour.histories);
                 neighbour.last_hello_ms = now_ms;
@@ -506,7 +694,7 @@ impl Engine {
             }
         }
         if let Some(sample) = rtt_sample
-            && self.config.metric.timestamps_enabled()
+            && metric_profile.timestamps_enabled()
             && let Some(neighbour) = self.neighbours.get_mut(&neighbour_key)
         {
             neighbour.metric.on_rtt_sample(sample, now_ms);
@@ -524,22 +712,27 @@ impl Engine {
             {
                 neighbour.metric.on_ihu(*rxcost);
                 neighbour.last_ihu_ms = Some(now_ms);
+                neighbour.last_ihu_cost = Some(*rxcost);
                 neighbour.ihu_interval_cs = *interval_cs;
             }
         }
         self.recompute_candidate_metrics(Some(&neighbour_key));
-        if send_ihu && let Some(action) = self.ihu_action(&neighbour_key, now_ms) {
+        if send_ihu && let Some(action) = self.ihu_action(&neighbour_key, now_ms, None) {
             actions.push(action);
         }
 
         for tlv in packet.tlvs {
             match tlv {
-                Tlv::AckRequest { nonce, .. } => actions.push(Action::Send {
+                Tlv::AckRequest { nonce, interval_cs } => actions.push(Action::Send {
                     interface: interface.clone(),
                     destination: source,
                     packet: OutboundPacket {
                         tlvs: vec![OutboundTlv::Ack { nonce }],
                     },
+                    timing: SendTiming::by_deadline(
+                        now_ms,
+                        now_ms.saturating_add(u64::from(interval_cs) * 10),
+                    ),
                 }),
                 Tlv::Hello { .. } | Tlv::Ihu { .. } => {}
                 Tlv::Update(update) => {
@@ -556,12 +749,18 @@ impl Engine {
                 }
                 Tlv::RouteRequest { key, .. } => {
                     if key.is_some() || self.full_update_request_allowed(&interface, now_ms) {
-                        let updates = self.send_updates(now_ms, key, Some(interface.clone()));
+                        let updates = self.send_updates(
+                            now_ms,
+                            key,
+                            Some(interface.clone()),
+                            Some(SendTiming::urgent(now_ms)),
+                        );
                         if let Some(key) = key.filter(|_| updates.is_empty()) {
                             actions.push(self.retraction_action(
                                 key,
                                 self.sequence_number,
                                 neighbour_key.clone(),
+                                now_ms,
                             ));
                         } else {
                             actions.extend(updates);
@@ -593,7 +792,12 @@ impl Engine {
         // not selected and route selection itself therefore did not change.
         for key in changed_router_ids {
             if self.originated.contains_key(&key) || self.selected.contains_key(&key) {
-                actions.extend(self.send_updates(now_ms, Some(key), None));
+                actions.extend(self.send_updates(
+                    now_ms,
+                    Some(key),
+                    None,
+                    Some(SendTiming::urgent(now_ms)),
+                ));
             } else {
                 actions.extend(self.send_retraction(key, self.sequence_number, now_ms));
             }
@@ -601,24 +805,32 @@ impl Engine {
         actions
     }
 
-    fn ihu_action(&mut self, key: &NeighborKey, now_ms: u64) -> Option<Action> {
+    fn ihu_action(
+        &mut self,
+        key: &NeighborKey,
+        now_ms: u64,
+        periodic_deadline: Option<u64>,
+    ) -> Option<Action> {
+        let policy = self.interfaces.get(&key.interface)?.policy.clone();
         let neighbour = self.neighbours.get_mut(key)?;
         let receive_cost = valid_cost(neighbour.metric.receive_cost());
         let echoed = neighbour.origin_timestamp.zip(neighbour.receive_timestamp);
-        let interval_cs = self.config.hello_interval_cs.saturating_mul(3);
-        neighbour.next_ihu_ms = now_ms.saturating_add(u64::from(interval_cs) * 10);
+        let interval_cs = policy.hello_interval_cs.saturating_mul(3);
+        neighbour.next_ihu_ms = periodic_deadline.map_or_else(
+            || now_ms.saturating_add(u64::from(interval_cs) * 10),
+            |deadline| next_periodic_deadline(deadline, now_ms, interval_cs),
+        );
         let send_probe = neighbour
             .next_rtt_probe_ms
             .is_some_and(|deadline| now_ms >= deadline);
         if send_probe {
             neighbour.unicast_hello_seqno = neighbour.unicast_hello_seqno.wrapping_add(1);
-            neighbour.next_rtt_probe_ms =
-                self.config.metric.rtt_probe_interval_ms().map(|interval| {
-                    recurring_probe_deadline(now_ms, interval, key, neighbour.unicast_hello_seqno)
-                });
+            neighbour.next_rtt_probe_ms = policy.metric.rtt_probe_interval_ms().map(|interval| {
+                recurring_probe_deadline(now_ms, interval, key, neighbour.unicast_hello_seqno)
+            });
         }
         let mut tlvs = Vec::new();
-        if send_probe || (self.config.metric.timestamps_enabled() && echoed.is_some()) {
+        if send_probe || (policy.metric.timestamps_enabled() && echoed.is_some()) {
             if !send_probe {
                 neighbour.unicast_hello_seqno = neighbour.unicast_hello_seqno.wrapping_add(1);
             }
@@ -629,7 +841,7 @@ impl Engine {
                 sub_tlvs: vec![SubTlv::TimestampHello(timestamp_us(now_ms))],
             });
         }
-        let sub_tlvs = if self.config.metric.timestamps_enabled() {
+        let sub_tlvs = if policy.metric.timestamps_enabled() {
             echoed.map_or_else(Vec::new, |(origin, received)| {
                 vec![SubTlv::TimestampIhu { origin, received }]
             })
@@ -646,6 +858,10 @@ impl Engine {
             interface: key.interface.clone(),
             destination: key.address,
             packet: OutboundPacket { tlvs },
+            timing: periodic_deadline.map_or_else(
+                || SendTiming::triggered(now_ms, policy.hello_interval_cs),
+                |deadline| SendTiming::by_deadline(now_ms, deadline),
+            ),
         })
     }
 
@@ -749,6 +965,7 @@ impl Engine {
                             update.seqno,
                             metric,
                             requester,
+                            now_ms,
                         ));
                     }
                     self.recent_seqno.insert(
@@ -810,6 +1027,7 @@ impl Engine {
                 route.seqno,
                 route.metric,
                 requester,
+                now_ms,
             )];
         }
 
@@ -826,7 +1044,12 @@ impl Engine {
             // Propagate the new source sequence on every interface. Limiting
             // this reply to the requesting interface lets parallel paths stay
             // one sequence behind and can perpetuate starvation.
-            actions.extend(self.send_updates(now_ms, Some(key), None));
+            actions.extend(self.send_updates(
+                now_ms,
+                Some(key),
+                None,
+                Some(SendTiming::urgent(now_ms)),
+            ));
             return actions;
         }
 
@@ -898,7 +1121,7 @@ impl Engine {
             },
         );
         vec![seqno_request_action(
-            key, router_id, seqno, hop_count, next_hop,
+            key, router_id, seqno, hop_count, next_hop, now_ms,
         )]
     }
 
@@ -909,7 +1132,9 @@ impl Engine {
         seqno: u16,
         metric: u16,
         destination: NeighborKey,
+        now_ms: u64,
     ) -> Action {
+        let update_interval_cs = self.interface_update_interval(&destination.interface);
         let v4_via_v6 =
             key.destination.addr().is_ipv4() && !self.interface_has_ipv4(&destination.interface);
         Action::Send {
@@ -920,17 +1145,25 @@ impl Engine {
                     key: Some(key),
                     router_id: Some(router_id),
                     next_hop: None,
-                    interval_cs: self.config.update_interval_cs,
+                    interval_cs: update_interval_cs,
                     seqno,
                     metric,
                     v4_via_v6,
                     sub_tlvs: vec![],
                 })],
             },
+            timing: SendTiming::urgent(now_ms),
         }
     }
 
-    fn retraction_action(&self, key: RouteKey, seqno: u16, destination: NeighborKey) -> Action {
+    fn retraction_action(
+        &self,
+        key: RouteKey,
+        seqno: u16,
+        destination: NeighborKey,
+        now_ms: u64,
+    ) -> Action {
+        let update_interval_cs = self.interface_update_interval(&destination.interface);
         Action::Send {
             interface: destination.interface,
             destination: destination.address,
@@ -939,13 +1172,14 @@ impl Engine {
                     key: Some(key),
                     router_id: None,
                     next_hop: None,
-                    interval_cs: self.config.update_interval_cs,
+                    interval_cs: update_interval_cs,
                     seqno,
                     metric: INFINITY,
                     v4_via_v6: key.destination.addr().is_ipv4(),
                     sub_tlvs: vec![],
                 })],
             },
+            timing: SendTiming::urgent(now_ms),
         }
     }
 
@@ -1007,6 +1241,7 @@ impl Engine {
                 now_ms > last.saturating_add(u64::from(neighbour.ihu_interval_cs) * 35)
             }) {
                 neighbour.last_ihu_ms = None;
+                neighbour.last_ihu_cost = None;
                 neighbour.metric.on_ihu(INFINITY);
                 changed_neighbours.insert(key.clone());
             }
@@ -1029,6 +1264,11 @@ impl Engine {
             routes_may_have_changed = true;
         }
         let selected = self.selected.clone();
+        let hello_intervals: HashMap<_, _> = self
+            .interfaces
+            .iter()
+            .map(|(name, state)| (name.clone(), state.policy.hello_interval_cs))
+            .collect();
         let mut refresh_actions = Vec::new();
         for ((key, neighbour), candidate) in &mut self.candidates {
             let refresh_margin = u64::from(candidate.interval_cs).saturating_mul(10);
@@ -1052,6 +1292,13 @@ impl Engine {
                             sub_tlvs: vec![],
                         }],
                     },
+                    timing: SendTiming::triggered(
+                        now_ms,
+                        hello_intervals
+                            .get(&neighbour.interface)
+                            .copied()
+                            .unwrap_or(self.config.hello_interval_cs),
+                    ),
                 });
             }
         }
@@ -1092,6 +1339,7 @@ impl Engine {
                 pending.seqno,
                 pending.hop_count,
                 pending.next_hop.clone(),
+                now_ms,
             ));
             if let Some(value) = self.pending_seqno.get_mut(&(key, router_id)) {
                 let attempt = REQUEST_RETRIES.saturating_sub(value.retries_left);
@@ -1104,12 +1352,10 @@ impl Engine {
         let mut ihu_due: Vec<_> = self
             .neighbours
             .iter()
-            .filter_map(|(key, neighbour)| {
-                let regular_due = now_ms >= neighbour.next_ihu_ms;
-                regular_due.then(|| key.clone())
-            })
+            .filter(|(_, neighbour)| periodic_window_open(now_ms, neighbour.next_ihu_ms))
+            .map(|(key, neighbour)| (key.clone(), Some(neighbour.next_ihu_ms)))
             .collect();
-        let regular: HashSet<_> = ihu_due.iter().cloned().collect();
+        let regular: HashSet<_> = ihu_due.iter().map(|(key, _)| key.clone()).collect();
         ihu_due.extend(
             self.neighbours
                 .iter()
@@ -1119,37 +1365,50 @@ impl Engine {
                             .next_rtt_probe_ms
                             .is_some_and(|deadline| now_ms >= deadline)
                 })
-                .map(|(key, _)| key.clone())
+                .map(|(key, _)| (key.clone(), None))
                 .take(MAX_RTT_PROBES_PER_TICK),
         );
-        for key in ihu_due {
-            if let Some(action) = self.ihu_action(&key, now_ms) {
+        for (key, deadline) in ihu_due {
+            if let Some(action) = self.ihu_action(&key, now_ms, deadline) {
                 actions.push(action);
             }
         }
         let interfaces: Vec<String> = self.interfaces.keys().cloned().collect();
         for interface in interfaces {
-            let mut send_hello = false;
-            let mut send_update = false;
+            let mut hello_deadline = None;
+            let mut update_deadline = None;
             let seqno;
             {
                 let state = self
                     .interfaces
                     .get_mut(&interface)
                     .expect("interface exists");
-                if now_ms >= state.next_hello_ms {
+                if periodic_window_open(now_ms, state.next_hello_ms) {
                     state.hello_seqno = state.hello_seqno.wrapping_add(1);
-                    state.next_hello_ms = now_ms + u64::from(self.config.hello_interval_cs) * 10;
-                    send_hello = true;
+                    hello_deadline = Some(state.next_hello_ms);
+                    state.next_hello_ms = next_periodic_deadline(
+                        state.next_hello_ms,
+                        now_ms,
+                        state.policy.hello_interval_cs,
+                    );
                 }
-                if now_ms >= state.next_update_ms {
-                    state.next_update_ms = now_ms + u64::from(self.config.update_interval_cs) * 10;
-                    send_update = true;
+                if periodic_window_open(now_ms, state.next_update_ms) {
+                    update_deadline = Some(state.next_update_ms);
+                    state.next_update_ms = next_periodic_deadline(
+                        state.next_update_ms,
+                        now_ms,
+                        state.policy.update_interval_cs,
+                    );
                 }
                 seqno = state.hello_seqno;
             }
-            if send_hello {
-                let sub_tlvs = if self.config.metric.timestamps_enabled() {
+            if let Some(deadline) = hello_deadline {
+                let policy = &self
+                    .interfaces
+                    .get(&interface)
+                    .expect("interface exists")
+                    .policy;
+                let sub_tlvs = if policy.metric.timestamps_enabled() {
                     vec![SubTlv::TimestampHello(timestamp_us(now_ms))]
                 } else {
                     Vec::new()
@@ -1161,14 +1420,20 @@ impl Engine {
                         tlvs: vec![OutboundTlv::Hello {
                             unicast: false,
                             seqno,
-                            interval_cs: self.config.hello_interval_cs,
+                            interval_cs: policy.hello_interval_cs,
                             sub_tlvs,
                         }],
                     },
+                    timing: SendTiming::by_deadline(now_ms, deadline),
                 });
             }
-            if send_update {
-                actions.extend(self.send_updates(now_ms, None, Some(interface)));
+            if let Some(deadline) = update_deadline {
+                actions.extend(self.send_updates(
+                    now_ms,
+                    None,
+                    Some(interface),
+                    Some(SendTiming::by_deadline(now_ms, deadline)),
+                ));
             }
         }
         actions
@@ -1179,6 +1444,7 @@ impl Engine {
         now_ms: u64,
         only: Option<RouteKey>,
         interface: Option<String>,
+        timing: Option<SendTiming>,
     ) -> Vec<Action> {
         let interfaces: Vec<_> =
             interface.map_or_else(|| self.interfaces.keys().cloned().collect(), |v| vec![v]);
@@ -1191,6 +1457,12 @@ impl Engine {
         interfaces
             .into_iter()
             .filter_map(|interface| {
+                let policy = &self.interfaces.get(&interface)?.policy;
+                let update_interval_cs = policy.update_interval_cs;
+                let split_horizon = policy.split_horizon;
+                let hello_interval_cs = policy.hello_interval_cs;
+                let send_timing =
+                    timing.unwrap_or_else(|| SendTiming::triggered(now_ms, hello_interval_cs));
                 let mut tlvs = Vec::new();
                 for (key, origin) in &origins {
                     if only.is_none_or(|wanted| wanted == *key) {
@@ -1207,7 +1479,7 @@ impl Engine {
                             key: Some(*key),
                             router_id: Some(self.config.router_id),
                             next_hop: None,
-                            interval_cs: self.config.update_interval_cs,
+                            interval_cs: update_interval_cs,
                             seqno: origin.seqno,
                             metric: origin.metric,
                             v4_via_v6: key.destination.addr().is_ipv4()
@@ -1219,7 +1491,8 @@ impl Engine {
                 for route in &selected {
                     // Split horizon: never advertise a selected route back on
                     // the interface from which its next hop was learned.
-                    if route.interface != interface && only.is_none_or(|wanted| wanted == route.key)
+                    if (!split_horizon || route.interface != interface)
+                        && only.is_none_or(|wanted| wanted == route.key)
                     {
                         self.maintain_source(
                             route.key,
@@ -1234,7 +1507,7 @@ impl Engine {
                             key: Some(route.key),
                             router_id: Some(route.router_id),
                             next_hop: None,
-                            interval_cs: self.config.update_interval_cs,
+                            interval_cs: update_interval_cs,
                             seqno: route.seqno,
                             metric: route.metric,
                             v4_via_v6: route.key.destination.addr().is_ipv4()
@@ -1253,13 +1526,14 @@ impl Engine {
                     interface,
                     destination: BABEL_MULTICAST_V6,
                     packet: OutboundPacket { tlvs },
+                    timing: send_timing,
                 })
             })
             .collect()
     }
 
     fn full_update_request_allowed(&self, interface: &str, now_ms: u64) -> bool {
-        let suppression_ms = u64::from(self.config.hello_interval_cs) * 10;
+        let suppression_ms = u64::from(self.interface_hello_interval(interface)) * 10;
         self.interfaces
             .get(interface)
             .and_then(|state| state.last_full_update_ms)
@@ -1309,14 +1583,14 @@ impl Engine {
             actions.extend(self.send_retraction(key, self.sequence_number, now_ms));
         }
         actions.extend(self.reselect(now_ms));
-        actions.extend(self.send_updates(now_ms, None, None));
+        actions.extend(self.send_updates(now_ms, None, None, None));
         actions
     }
 
-    fn send_retraction(&self, key: RouteKey, seqno: u16, _now_ms: u64) -> Vec<Action> {
+    fn send_retraction(&self, key: RouteKey, seqno: u16, now_ms: u64) -> Vec<Action> {
         self.interfaces
-            .keys()
-            .map(|interface| Action::Send {
+            .iter()
+            .map(|(interface, state)| Action::Send {
                 interface: interface.clone(),
                 destination: BABEL_MULTICAST_V6,
                 packet: OutboundPacket {
@@ -1324,13 +1598,14 @@ impl Engine {
                         key: Some(key),
                         router_id: Some(self.config.router_id),
                         next_hop: None,
-                        interval_cs: self.config.update_interval_cs,
+                        interval_cs: state.policy.update_interval_cs,
                         seqno,
                         metric: INFINITY,
                         v4_via_v6: key.destination.addr().is_ipv4(),
                         sub_tlvs: vec![],
                     })],
                 },
+                timing: SendTiming::triggered(now_ms, state.policy.hello_interval_cs),
             })
             .collect()
     }
@@ -1470,7 +1745,13 @@ impl Engine {
                 .map(|(_, candidate)| candidate.expires_ms)
                 .max()
                 .unwrap_or_else(|| {
-                    now_ms.saturating_add(u64::from(self.config.update_interval_cs) * 35)
+                    let longest = self
+                        .interfaces
+                        .values()
+                        .map(|state| state.policy.update_interval_cs)
+                        .max()
+                        .unwrap_or(self.config.update_interval_cs);
+                    now_ms.saturating_add(u64::from(longest) * 35)
                 });
             self.tombstones.insert(*key, expires_ms);
         }
@@ -1504,7 +1785,7 @@ impl Engine {
         let mut actions = Vec::new();
         for (key, previous) in before {
             if !self.selected.contains_key(key) {
-                actions.extend(self.advertise_learned(previous, INFINITY, None));
+                actions.extend(self.advertise_learned(previous, INFINITY, None, now_ms));
                 let pending_key = (*key, previous.router_id);
                 let requested_seqno = self
                     .feasible
@@ -1559,6 +1840,7 @@ impl Engine {
                 selected,
                 selected.metric,
                 Some(&selected.interface),
+                now_ms,
             ));
         }
         actions
@@ -1568,17 +1850,21 @@ impl Engine {
         &self,
         route: &SelectedRoute,
         metric: u16,
-        exclude_interface: Option<&str>,
+        learned_interface: Option<&str>,
+        now_ms: u64,
     ) -> Vec<Action> {
         let interfaces: Vec<_> = self
             .interfaces
-            .keys()
-            .filter(|interface| exclude_interface != Some(interface.as_str()))
-            .cloned()
+            .iter()
+            .filter(|(interface, state)| {
+                !state.policy.split_horizon || learned_interface != Some(interface.as_str())
+            })
+            .map(|(interface, _)| interface.clone())
             .collect();
         interfaces
             .into_iter()
             .map(|interface| {
+                let state = self.interfaces.get(&interface).expect("interface exists");
                 let v4_via_v6 =
                     route.key.destination.addr().is_ipv4() && !self.interface_has_ipv4(&interface);
                 Action::Send {
@@ -1589,13 +1875,14 @@ impl Engine {
                             key: Some(route.key),
                             router_id: Some(route.router_id),
                             next_hop: None,
-                            interval_cs: self.config.update_interval_cs,
+                            interval_cs: state.policy.update_interval_cs,
                             seqno: route.seqno,
                             metric,
                             v4_via_v6,
                             sub_tlvs: vec![],
                         })],
                     },
+                    timing: SendTiming::triggered(now_ms, state.policy.hello_interval_cs),
                 }
             })
             .collect()
@@ -1637,6 +1924,7 @@ fn seqno_request_action(
     seqno: u16,
     hop_count: u8,
     next_hop: NeighborKey,
+    now_ms: u64,
 ) -> Action {
     Action::Send {
         interface: next_hop.interface,
@@ -1650,6 +1938,21 @@ fn seqno_request_action(
                 sub_tlvs: vec![],
             }],
         },
+        timing: SendTiming::urgent(now_ms),
+    }
+}
+
+fn periodic_window_open(now_ms: u64, deadline_ms: u64) -> bool {
+    now_ms.saturating_add(MAX_TRIGGERED_JITTER_MS) >= deadline_ms
+}
+
+fn next_periodic_deadline(deadline_ms: u64, now_ms: u64, interval_cs: u16) -> u64 {
+    let interval_ms = u64::from(interval_cs).saturating_mul(10);
+    let anchored = deadline_ms.saturating_add(interval_ms);
+    if anchored > now_ms {
+        anchored
+    } else {
+        now_ms.saturating_add(interval_ms)
     }
 }
 
@@ -1814,6 +2117,138 @@ mod tests {
         let mut config = EngineConfig::recommended(router_id);
         config.metric = Arc::new(WiredMetric::new(96, 1, 1).unwrap());
         config
+    }
+
+    fn policy(cost: u16, hello_interval_cs: u16, split_horizon: bool) -> InterfacePolicy {
+        InterfacePolicy {
+            metric: Arc::new(WiredMetric::new(cost, 1, 1).unwrap()),
+            hello_interval_cs,
+            update_interval_cs: hello_interval_cs * 4,
+            split_horizon,
+        }
+    }
+
+    #[test]
+    fn configured_interface_policy_controls_wire_intervals_and_metric() {
+        let mut engine = Engine::new(config(id(1)));
+        let actions = engine.handle(Event::InterfaceUpWithPolicy {
+            interface: "mesh0".into(),
+            local_addresses: vec![],
+            policy: policy(222, 100, false),
+            now_ms: 0,
+        });
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Send { packet, .. }
+                if packet.tlvs.iter().any(|tlv| matches!(tlv,
+                    OutboundTlv::Hello { interval_cs: 100, .. }))
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Send { interface, destination, packet, .. }
+                if interface == "mesh0"
+                    && *destination == BABEL_MULTICAST_V6
+                    && packet.tlvs.iter().any(|tlv| matches!(tlv,
+                        OutboundTlv::RouteRequest { key: None, .. }))
+        )));
+
+        let source = "fe80::2".parse().unwrap();
+        engine.handle(Event::PacketReceived {
+            interface: "mesh0".into(),
+            source,
+            now_ms: 10,
+            packet: Packet {
+                tlvs: vec![
+                    Tlv::Hello {
+                        unicast: false,
+                        seqno: 1,
+                        interval_cs: 100,
+                        sub_tlvs: vec![],
+                    },
+                    Tlv::Ihu {
+                        address: None,
+                        rxcost: 222,
+                        interval_cs: 300,
+                        sub_tlvs: vec![],
+                    },
+                    Tlv::Update(ResolvedUpdate {
+                        key: Some(key()),
+                        router_id: Some(id(2)),
+                        next_hop: Some(source),
+                        interval_cs: 400,
+                        seqno: 1,
+                        metric: 0,
+                        v4_via_v6: false,
+                        sub_tlvs: vec![],
+                    }),
+                ],
+            },
+        });
+        assert_eq!(engine.selected_routes()[0].metric, 222);
+
+        let actions = engine.handle(Event::InterfacePolicyChanged {
+            interface: "mesh0".into(),
+            policy: policy(300, 50, true),
+            reset_metric: true,
+            now_ms: 20,
+        });
+        assert_eq!(engine.selected_routes()[0].metric, 222);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Send { packet, .. }
+                if packet.tlvs.iter().any(|tlv| matches!(tlv,
+                    OutboundTlv::Hello { interval_cs: 50, .. }))
+        )));
+    }
+
+    #[test]
+    fn split_horizon_is_decided_by_each_egress_interface() {
+        let mut engine = Engine::new(config(id(1)));
+        engine.handle(Event::InterfaceUpWithPolicy {
+            interface: "mesh0".into(),
+            local_addresses: vec![],
+            policy: policy(96, 100, false),
+            now_ms: 0,
+        });
+        engine.handle(Event::InterfaceUpWithPolicy {
+            interface: "wired0".into(),
+            local_addresses: vec![],
+            policy: policy(96, 200, true),
+            now_ms: 0,
+        });
+        engine.selected.insert(
+            key(),
+            SelectedRoute {
+                key: key(),
+                router_id: id(2),
+                seqno: 1,
+                metric: 96,
+                next_hop: "fe80::2".parse().unwrap(),
+                interface: "mesh0".into(),
+            },
+        );
+        let actions = engine.send_updates(10, Some(key()), None, None);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Send { interface, packet, .. }
+                if interface == "mesh0" && packet.tlvs.iter().any(|tlv| matches!(tlv,
+                    OutboundTlv::Update(update) if update.interval_cs == 400))
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Send { interface, packet, .. }
+                if interface == "wired0" && packet.tlvs.iter().any(|tlv| matches!(tlv,
+                    OutboundTlv::Update(update) if update.interval_cs == 800))
+        )));
+
+        engine.selected.get_mut(&key()).unwrap().interface = "wired0".into();
+        let actions = engine.send_updates(20, Some(key()), None, None);
+        assert!(actions.iter().any(
+            |action| matches!(action, Action::Send { interface, .. } if interface == "mesh0")
+        ));
+        assert!(!actions.iter().any(
+            |action| matches!(action, Action::Send { interface, .. } if interface == "wired0")
+        ));
     }
 
     #[test]

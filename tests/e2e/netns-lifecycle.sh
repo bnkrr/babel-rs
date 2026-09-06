@@ -36,10 +36,11 @@ write_config() {
   origin=${2:-}
   table=${3:-23201}
   origin2=${4:-}
+  hello_interval_ms=${5:-4000}
   {
     printf 'router_id = "11:12:13:14:15:16:17:18"\n'
     printf 'state_file = "%s/rs.state"\n' "${runtime}"
-    printf 'interfaces = ["babel?"]\n\n'
+    printf '[[interfaces]]\nmatch = ["babel?"]\nlink_type = "wired"\nhello_interval_ms = %s\n\n' "${hello_interval_ms}"
     if test -n "${origin}"; then
       printf '[[origins]]\ndestination = "%s"\n\n' "${origin}"
     fi
@@ -130,7 +131,7 @@ start_peer
 wait_route "${ns_rs}" 23201 "${prefix_initial}" yes 35
 
 # A complete valid candidate adds an origin without restarting the daemon.
-write_config "${runtime}/rs.toml.new" "${prefix_reload}" 23202 "${prefix_shutdown}"
+write_config "${runtime}/rs.toml.new" "${prefix_reload}" 23202 "${prefix_shutdown}" 1000
 mv "${runtime}/rs.toml.new" "${runtime}/rs.toml"
 ip netns exec "${ns_rs}" "${daemon}" reload --socket "${control_socket}" >"${runtime}/reload.json"
 grep -q 'active_config_sha256' "${runtime}/reload.json"
@@ -138,10 +139,15 @@ wait_route "${ns_peer}" 201 "${prefix_reload}" yes 20
 wait_route "${ns_peer}" 201 "${prefix_shutdown}" yes 20
 wait_route "${ns_rs}" 23202 "${prefix_initial}" yes 8
 wait_route "${ns_rs}" 23201 "${prefix_initial}" no 8
+ip netns exec "${ns_rs}" "${daemon}" interfaces --socket "${control_socket}" >"${runtime}/interfaces.json"
+grep -q '"metric": "wired"' "${runtime}/interfaces.json"
+grep -q '"hello_interval_ms": 1000' "${runtime}/interfaces.json"
+grep -q '"update_interval_ms": 4000' "${runtime}/interfaces.json"
+grep -q '"split_horizon": true' "${runtime}/interfaces.json"
 
 # Replacing the complete origin set retracts a removed prefix promptly.  The
 # peer must not wait for the advertised route-expiry timer.
-write_config "${runtime}/rs.toml.new" "${prefix_shutdown}" 23202
+write_config "${runtime}/rs.toml.new" "${prefix_shutdown}" 23202 "" 1000
 mv "${runtime}/rs.toml.new" "${runtime}/rs.toml"
 ip netns exec "${ns_rs}" "${daemon}" reload --socket "${control_socket}" >"${runtime}/reload-remove.json"
 wait_route "${ns_peer}" 201 "${prefix_reload}" no 8

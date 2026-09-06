@@ -321,6 +321,7 @@ async fn status(shared: &Shared) -> Result<Value, (&'static str, String)> {
         "route_generation": router.route_generation,
         "selected_routes": router.selected_routes,
         "dropped_outbound_datagrams": router.dropped_outbound_datagrams,
+        "missed_outbound_deadlines": router.missed_outbound_deadlines,
         "export": {
             "last_success_age_seconds": export.last_success_age.map(|value| value.as_secs()),
             "last_error": export.last_error,
@@ -343,6 +344,12 @@ async fn interfaces(shared: &Shared) -> Result<Value, (&'static str, String)> {
                     "name": item.name,
                     "ifindex": item.index,
                     "local_addresses": item.local_addresses.into_iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+                    "mtu": item.mtu,
+                    "udp_payload_budget": item.udp_payload_budget,
+                    "metric": item.metric,
+                    "hello_interval_ms": item.hello_interval_ms,
+                    "update_interval_ms": item.update_interval_ms,
+                    "split_horizon": item.split_horizon,
                     "attached": true,
                 })
             })

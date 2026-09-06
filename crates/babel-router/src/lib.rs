@@ -1,14 +1,16 @@
 #![forbid(unsafe_code)]
 
 mod export;
+mod output;
 mod router;
 mod transport;
 
 pub use babel_proto::{
-    AdditiveMetric, EtxMetric, MetricAlgebra, MetricProfile, NeighborMetric, RouteKey,
-    RouteSelectionConfig, RouterId, RttMetric, SelectedRoute, WiredMetric,
+    AdditiveMetric, EtxMetric, InterfacePolicy, MetricAlgebra, MetricProfile, NeighborMetric,
+    RouteKey, RouteSelectionConfig, RouterId, RttMetric, SelectedRoute, WiredMetric,
 };
 pub use export::{MemoryExporter, NoopSequenceStore, RouteExporter, RouteSnapshot, SequenceStore};
 pub use router::{
-    BabelRouter, BabelRouterBuilder, RouteStream, RouterError, RouterHandle, RouterStatus,
+    BabelRouter, BabelRouterBuilder, RouteStream, RouterError, RouterHandle, RouterInterfaceStatus,
+    RouterStatus,
 };

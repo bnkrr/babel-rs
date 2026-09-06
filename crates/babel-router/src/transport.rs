@@ -7,16 +7,24 @@ use tokio::net::UdpSocket;
 
 use babel_proto::wire::PORT;
 
+const IPV6_HEADER_BYTES: u32 = 40;
+const UDP_HEADER_BYTES: u32 = 8;
+const IPV6_MINIMUM_MTU: u32 = 1280;
+const MAX_UDP_PAYLOAD: usize = 65_527;
+
 pub struct InterfaceSocket {
     pub name: String,
     pub index: u32,
     pub local_addresses: Vec<Ipv6Addr>,
+    pub mtu: u32,
     pub socket: UdpSocket,
 }
 
 impl InterfaceSocket {
     pub fn open(name: &str) -> io::Result<Self> {
         let index = interface_index(name)?;
+        let mtu = interface_mtu(name)?;
+        payload_budget_for_mtu(mtu)?;
         let local_addresses = interface_ipv6_addresses(name)?;
         if !local_addresses.iter().any(Ipv6Addr::is_unicast_link_local) {
             return Err(io::Error::new(
@@ -40,6 +48,7 @@ impl InterfaceSocket {
             name: name.to_owned(),
             index,
             local_addresses,
+            mtu,
             socket,
         })
     }
@@ -47,6 +56,29 @@ impl InterfaceSocket {
     pub fn destination(&self, address: Ipv6Addr) -> SocketAddr {
         SocketAddr::V6(SocketAddrV6::new(address, PORT, 0, self.index))
     }
+
+    /// Return the current interface MTU, not merely the value observed when
+    /// the socket was opened.  Linux exposes MTU changes atomically through
+    /// sysfs, which keeps packetisation correct without restarting a session.
+    pub fn current_mtu(&self) -> io::Result<u32> {
+        interface_mtu(&self.name)
+    }
+
+    pub fn payload_budget(&self) -> io::Result<usize> {
+        payload_budget_for_mtu(self.current_mtu()?)
+    }
+}
+
+pub(crate) fn payload_budget_for_mtu(mtu: u32) -> io::Result<usize> {
+    if mtu < IPV6_MINIMUM_MTU {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("IPv6 interface MTU {mtu} is below the required minimum {IPV6_MINIMUM_MTU}"),
+        ));
+    }
+    Ok(usize::try_from(mtu - IPV6_HEADER_BYTES - UDP_HEADER_BYTES)
+        .unwrap_or(MAX_UDP_PAYLOAD)
+        .min(MAX_UDP_PAYLOAD))
 }
 
 fn interface_ipv6_addresses(name: &str) -> io::Result<Vec<Ipv6Addr>> {
@@ -81,4 +113,25 @@ fn interface_index(name: &str) -> io::Result<u32> {
         .trim()
         .parse()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn interface_mtu(name: &str) -> io::Result<u32> {
+    let value = std::fs::read_to_string(Path::new("/sys/class/net").join(name).join("mtu"))?;
+    value
+        .trim()
+        .parse()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_ipv6_udp_payload_budget() {
+        assert_eq!(payload_budget_for_mtu(1280).unwrap(), 1232);
+        assert_eq!(payload_budget_for_mtu(1500).unwrap(), 1452);
+        assert!(payload_budget_for_mtu(1279).is_err());
+        assert_eq!(payload_budget_for_mtu(u32::MAX).unwrap(), MAX_UDP_PAYLOAD);
+    }
 }

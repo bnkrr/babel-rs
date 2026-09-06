@@ -10,7 +10,7 @@ timeout.
 Immediately after accept, the server sends:
 
 ```json
-{"type":"hello","api_version":1,"server_version":"0.2.0","capabilities":["status","interfaces","neighbors","routes","reload","shutdown"]}
+{"type":"hello","api_version":1,"server_version":"0.3.0","capabilities":["status","interfaces","neighbors","routes","reload","shutdown"]}
 ```
 
 A client then sends requests of this form:
@@ -32,8 +32,13 @@ prior active configuration on rejection, and returns its committed generation
 and SHA-256 digest. `shutdown` acknowledges and flushes its response before
 initiating the same graceful path used by SIGINT and SIGTERM.
 
-`status.metric` identifies the active metric profile and
-`dropped_outbound_datagrams` exposes bounded-output overload. Each `neighbors`
+`status.metric` identifies the common active metric profile, or is
+`per-interface` when attached interfaces differ.
+`dropped_outbound_datagrams` counts encode and socket-send failures, while
+`missed_outbound_deadlines` detects runtime stalls that violate a protocol
+deadline. Each `interfaces` result includes its resolved metric, Hello and
+Update intervals, split-horizon setting, live MTU, and derived UDP payload
+budget. Each `neighbors`
 entry reports its concrete algorithm, separate `receive_cost`, `transmit_cost`,
 and `link_cost`, both 16-bit Hello histories, and (when RFC 9616 is active) the
 last and smoothed RTT in microseconds plus the current RTT penalty. `reachable`
