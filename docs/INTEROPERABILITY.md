@@ -13,6 +13,7 @@ namespaces. The reference versions currently installed there are babeld
 | two babel-rs nodes, RFC 9616 | pass | n/a | n/a | Timestamp exchange and non-null RTT status |
 | babel-rs lifecycle | pass | n/a | n/a | glob attach, rebind, reload, FIB repair |
 | three babel-rs nodes, restart | pass | n/a | n/a | graceful checkpoint, SIGKILL, missing state, stale seqno |
+| shutdown/startup cleanup | n/a | n/a | n/a | total deadline, stalled netlink/fsync, old tables and rules |
 
 The babeld test also injects a stale route in the owned table/protocol and
 requires startup reconciliation to remove it. Restart must preserve Router-ID,
@@ -28,6 +29,14 @@ Crash and lost-state recovery must propagate the new instance's sequence and
 a new origin to C before forwarding counts as restored. A deliberately old
 checkpoint also tests recovery after peer feasibility history expires; this
 case takes about three minutes and has a 240-second test deadline.
+
+`netns-shutdown-recovery.py` uses a locally compiled test preload to withhold
+netlink route-dump replies. It verifies the default five-second budget, a
+reloaded 700 ms budget, critical-service failure cleanup, and that a stalled
+checkpoint consumes part of the same total budget. A restart with different
+export tables and disabled rule management must remove old owned state while
+preserving a different protocol and another namespace. `netlink-stall.c` is a
+test fixture only; the daemon contains no fault-injection switches.
 
 The RFC 9616 test enables `rtt(wired)` on both nodes and requires both route
 convergence and non-null raw and smoothed RTT observations from the control

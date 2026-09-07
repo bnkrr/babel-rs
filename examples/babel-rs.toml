@@ -4,6 +4,9 @@ router_id = "01:02:03:04:05:06:07:08"
 # Optional. Parent directories are created; updates use fsync + atomic rename.
 state_file = "/var/lib/babel-rs/state.toml"
 
+# Optional, default 5000. Total orderly-shutdown budget; reloadable, nonzero.
+shutdown_timeout_ms = 5000
+
 # Required, ordered desired-state rules. The first matching section wins.
 # Exact names, `*`, and `?` are supported; zero current matches is valid.
 [[interfaces]]

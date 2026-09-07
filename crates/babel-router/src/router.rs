@@ -284,6 +284,13 @@ impl BabelRouter {
         self.handle.clone()
     }
 
+    /// Cancel the engine task when the host's orderly shutdown deadline expires.
+    /// Aborting can skip retractions, checkpointing and exporter cleanup. Hosts
+    /// must also stop their services and handle external state on the next start.
+    pub fn abort_handle(&self) -> tokio::task::AbortHandle {
+        self.task.abort_handle()
+    }
+
     pub async fn run(self) -> Result<(), RouterError> {
         self.task
             .await

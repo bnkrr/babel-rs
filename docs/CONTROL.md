@@ -34,6 +34,8 @@ initiating the same graceful path used by SIGINT and SIGTERM.
 
 `status.metric` identifies the common active metric profile, or is
 `per-interface` when attached interfaces differ.
+`status.shutdown_timeout_ms` reports the currently committed daemon-wide
+shutdown budget (default 5000 ms); a successful reload can change it.
 `status.sequence_number` is the current in-memory sequence number for local
 origins (not an interface's Hello sequence). It is checkpointed only on orderly
 shutdown; the running state file contains no sequence number.

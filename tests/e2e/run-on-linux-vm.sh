@@ -14,6 +14,15 @@ fi
 CARGO_HOME="${repo_root}/.local/cargo" RUSTUP_TOOLCHAIN=stable \
   "${cargo_bin}" build --release --package babel-rs
 
+test_assets=()
+if [[ ${1:-all} == all || ${1:-all} == shutdown-recovery ]]; then
+  fixture_dir="${repo_root}/.local/experiments/shutdown-recovery"
+  mkdir -p "${fixture_dir}"
+  "${CC:-cc}" -shared -fPIC -Wall -Wextra -Werror -O2 \
+    "${repo_root}/tests/e2e/netlink-stall.c" -o "${fixture_dir}/netlink-stall.so" -ldl
+  test_assets+=("${fixture_dir}/netlink-stall.so")
+fi
+
 ssh "${ssh_args[@]}" "${ssh_host}" "mkdir -p '${remote_root}'"
 scp "${ssh_args[@]}" \
   "${repo_root}/target/release/babel-rs" \
@@ -26,10 +35,15 @@ scp "${ssh_args[@]}" \
   "${repo_root}/tests/e2e/netns-three-node.sh" \
   "${repo_root}/tests/e2e/netns-capacity.py" \
   "${repo_root}/tests/e2e/netns-state-restart.py" \
+  "${repo_root}/tests/e2e/netns-shutdown-recovery.py" \
+  "${test_assets[@]}" \
   "${ssh_host}:${remote_root}/"
 case ${1:-all} in
   all)
-    remote_tests="'${remote_root}/netns-babeld.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-bird.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-three-node.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-rtt.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-rtt-multipath.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-lifecycle.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-mtu-output.sh' '${remote_root}/babel-rs' && python3 '${remote_root}/netns-capacity.py' '${remote_root}/babel-rs' && python3 '${remote_root}/netns-state-restart.py' '${remote_root}/babel-rs'"
+    remote_tests="'${remote_root}/netns-babeld.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-bird.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-three-node.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-rtt.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-rtt-multipath.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-lifecycle.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-mtu-output.sh' '${remote_root}/babel-rs' && python3 '${remote_root}/netns-capacity.py' '${remote_root}/babel-rs' && python3 '${remote_root}/netns-state-restart.py' '${remote_root}/babel-rs' && python3 '${remote_root}/netns-shutdown-recovery.py' '${remote_root}/babel-rs' '${remote_root}/netlink-stall.so'"
+    ;;
+  shutdown-recovery)
+    remote_tests="python3 '${remote_root}/netns-shutdown-recovery.py' '${remote_root}/babel-rs' '${remote_root}/netlink-stall.so'"
     ;;
   state-restart)
     remote_tests="python3 '${remote_root}/netns-state-restart.py' '${remote_root}/babel-rs'"
@@ -58,7 +72,7 @@ case ${1:-all} in
   mtu-output)
     remote_tests="'${remote_root}/netns-mtu-output.sh' '${remote_root}/babel-rs'"
     ;;
-  *) echo "usage: $0 [all|babeld|bird|three-node|rtt|rtt-multipath|lifecycle|mtu-output|capacity|state-restart]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|babeld|bird|three-node|rtt|rtt-multipath|lifecycle|mtu-output|capacity|state-restart|shutdown-recovery]" >&2; exit 2 ;;
 esac
 ssh "${ssh_args[@]}" "${ssh_host}" \
   "chmod 0700 '${remote_root}/babel-rs' '${remote_root}/netns-babeld.sh' '${remote_root}/netns-bird.sh' '${remote_root}/netns-three-node.sh' '${remote_root}/netns-rtt.sh' '${remote_root}/netns-rtt-multipath.sh' '${remote_root}/netns-lifecycle.sh' '${remote_root}/netns-mtu-output.sh' && ${remote_tests}"

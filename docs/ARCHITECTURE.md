@@ -184,6 +184,24 @@ snapshot and removes owned policy rules through the exporter's distinct
 shutdown hook. Abrupt process death is recovered by neighbour expiry and by the
 initial empty reconciliation on the next local start.
 
+The daemon bounds the entire cleanup sequence with one reloadable
+`shutdown_timeout_ms` deadline (default five seconds), including control-response
+flush and service joins. The checkpoint retains its separate one-second cap
+within that budget. Expiry logs the unfinished stage, aborts outstanding router
+and service tasks, and exits nonzero. A failed router also gets an explicit
+best-effort exporter cleanup using the remaining time. SIGINT/SIGTERM can
+interrupt a reload waiting for an asynchronous operation.
+
+Linux export latches a stopping state before final cleanup waits for any
+in-flight reconciliation. Later snapshots and periodic workers cannot restore
+old routes after cleanup. The netlink connection retains protocol ownership
+through runtime teardown. On restart, reconciliation removes obsolete owned
+IPv4/IPv6 routes and rules across all tables, even after export-view changes or
+with `manage_rules = false`; other protocols and namespaces remain untouched.
+This also removes owned rules that do not match the exporter's source-rule
+model. A changed protocol/namespace is a different ownership scope and is not
+used to delete the previous scope's state.
+
 Long-running protocol, interface, exporter, and control tasks are a single
 failure domain: an unexpected return or panic exits nonzero rather than trying
 to reconstruct a possibly inconsistent subset in process. Transient external

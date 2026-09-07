@@ -36,6 +36,7 @@ struct ExportState {
     export: Export,
     snapshot: RouteSnapshot,
     retain_rules: bool,
+    stopping: bool,
     retired: Vec<Export>,
     last_success: Option<Instant>,
     last_error: Option<String>,
@@ -85,15 +86,24 @@ pub enum LinuxError {
 }
 
 impl LinuxExporter {
-    pub fn new(export: Export) -> Result<Self, LinuxError> {
+    pub fn new(
+        export: Export,
+        ownership: Arc<crate::ownership::ProtocolOwnership>,
+    ) -> Result<Self, LinuxError> {
         let (connection, handle, _) = new_connection()?;
-        tokio::spawn(connection);
+        tokio::spawn(async move {
+            // Keep ownership while queued netlink work can still be executed,
+            // including the short interval before runtime teardown on timeout.
+            let _ownership = ownership;
+            connection.await;
+        });
         Ok(Self {
             handle,
             state: Arc::new(RwLock::new(ExportState {
                 export,
                 snapshot: RouteSnapshot::default(),
                 retain_rules: true,
+                stopping: false,
                 retired: Vec::new(),
                 last_success: None,
                 last_error: None,
@@ -106,6 +116,9 @@ impl LinuxExporter {
     pub async fn update_export(&self, export: Export) {
         {
             let mut state = self.state.write().await;
+            if state.stopping {
+                return;
+            }
             let old_export = state.export.clone();
             if old_export.protocol != export.protocol && !state.retired.contains(&old_export) {
                 state.retired.push(old_export);
@@ -117,6 +130,9 @@ impl LinuxExporter {
 
     pub async fn reconcile_current(&self) -> Result<(), LinuxError> {
         let _apply_guard = self.apply_lock.lock().await;
+        if self.state.read().await.stopping {
+            return Ok(());
+        }
         self.reconcile_locked().await
     }
 
@@ -273,10 +289,8 @@ impl LinuxExporter {
             }
         }
         for message in current {
-            if let Some(identity) = route_identity(&message)
-                && !desired.contains(&identity)
-            {
-                debug!(table = identity.table, destination = %identity.destination, "deleting stale owned route");
+            if route_identity(&message).is_none_or(|identity| !desired.contains(&identity)) {
+                debug!(table = route_table(&message), "deleting stale owned route");
                 self.handle.route().del(message).execute().await?;
             }
         }
@@ -307,9 +321,7 @@ impl LinuxExporter {
             self.add_rule(export.protocol, *rule).await?;
         }
         for message in current {
-            if let Some(identity) = rule_identity(&message)
-                && !desired.contains(&identity)
-            {
+            if rule_identity(&message).is_none_or(|identity| !desired.contains(&identity)) {
                 self.handle.rule().del(message).execute().await?;
             }
         }
@@ -396,6 +408,9 @@ impl RouteExporter for LinuxExporter {
         let _apply_guard = self.apply_lock.lock().await;
         {
             let mut state = self.state.write().await;
+            if state.stopping {
+                return Ok(());
+            }
             state.snapshot = snapshot;
             state.retain_rules = true;
         }
@@ -408,12 +423,15 @@ impl RouteExporter for LinuxExporter {
         &self,
         snapshot: RouteSnapshot,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _apply_guard = self.apply_lock.lock().await;
         {
             let mut state = self.state.write().await;
+            // Latch before waiting for an in-flight reconciliation. No worker
+            // may publish an old snapshot after shutdown cleanup completes.
+            state.stopping = true;
             state.snapshot = snapshot;
             state.retain_rules = false;
         }
+        let _apply_guard = self.apply_lock.lock().await;
         self.reconcile_locked()
             .await
             .map_err(|error| Box::new(error) as _)

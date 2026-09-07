@@ -17,6 +17,8 @@ pub struct Config {
     pub router_id: Option<String>,
     #[serde(default = "default_state_file")]
     pub state_file: String,
+    #[serde(default = "default_shutdown_timeout_ms")]
+    pub shutdown_timeout_ms: u32,
     pub interfaces: Vec<InterfaceSection>,
     #[serde(default)]
     pub route_selection: RouteSelection,
@@ -324,6 +326,8 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("interfaces must not be empty")]
     NoInterfaces,
+    #[error("shutdown_timeout_ms must be greater than zero")]
+    InvalidShutdownTimeout,
     #[error("invalid metric configuration: {0}")]
     InvalidMetric(String),
     #[error("invalid route-selection configuration: {0}")]
@@ -376,6 +380,9 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.shutdown_timeout_ms == 0 {
+            return Err(ConfigError::InvalidShutdownTimeout);
+        }
         let mut interfaces = HashSet::new();
         if self.interfaces.is_empty() {
             return Err(ConfigError::NoInterfaces);
@@ -560,6 +567,9 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 fn default_state_file() -> String {
     "/var/lib/babel-rs/router-id".into()
 }
+fn default_shutdown_timeout_ms() -> u32 {
+    5_000
+}
 fn default_protocol() -> u8 {
     203
 }
@@ -606,6 +616,19 @@ fn default_better_for_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_timeout_defaults_validates_and_can_reload() {
+        let base = "[[interfaces]]\nmatch = [\"wg0\"]\n[export]\n[[export.views]]\ntable = 20001\n";
+        let original = Config::parse(base).unwrap();
+        assert_eq!(original.shutdown_timeout_ms, 5_000);
+        let changed = Config::parse(&format!("shutdown_timeout_ms = 250\n{base}")).unwrap();
+        assert_eq!(changed.shutdown_timeout_ms, 250);
+        assert!(original.reload_identity_matches(&changed));
+        for value in ["0", "-1", "1.5", "4294967296"] {
+            assert!(Config::parse(&format!("shutdown_timeout_ms = {value}\n{base}")).is_err());
+        }
+    }
 
     #[test]
     fn limits_default_override_zero_and_reload_identity() {

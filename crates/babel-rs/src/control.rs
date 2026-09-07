@@ -25,6 +25,7 @@ const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct RuntimeMetadata {
+    pub shutdown_timeout_ms: u32,
     pub config_generation: u64,
     pub active_config_sha256: String,
     pub last_reload_error: Option<String>,
@@ -315,6 +316,7 @@ async fn status(shared: &Shared) -> Result<Value, (&'static str, String)> {
         "config_generation": metadata.config_generation,
         "active_config_sha256": metadata.active_config_sha256,
         "last_reload_error": metadata.last_reload_error,
+        "shutdown_timeout_ms": metadata.shutdown_timeout_ms,
         "metric": router.metric,
         "sequence_number": router.sequence_number,
         "attached_interfaces": router.interfaces.len(),

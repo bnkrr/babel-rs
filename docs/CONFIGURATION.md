@@ -1,5 +1,20 @@
 # Configuration
 
+The top-level `shutdown_timeout_ms` sets the daemon's total cleanup budget in
+milliseconds (default `5000`, nonzero 32-bit unsigned integer). It is reloadable
+and appears in `status`. Place it before any TOML table headers:
+
+```toml
+shutdown_timeout_ms = 5000
+```
+
+The timer begins when the daemon handles a stop signal, accepts a control
+shutdown request, or starts cleanup after a critical task failure. Response
+flush, route retractions, the sequence checkpoint, Linux route/rule cleanup and
+service completion share that single deadline. Expiry logs the unfinished
+stage, cancels pending router/service tasks and exits nonzero. A supervisor's
+forced-stop timeout should leave room beyond this budget.
+
 Optional `[limits]` controls global neighbors, global candidates, and candidates
 per neighbor. It uses built-in defaults when omitted and requires a restart to
 change. See [CAPACITY.md](CAPACITY.md) for all defaults and overload behavior.
@@ -63,10 +78,26 @@ Startup must be able to write the file and its parent directory: it consumes
 any checkpoint before advertising. While running, sequence changes cause no
 disk writes. SIGINT, SIGTERM and the control `shutdown` command attempt one
 final checkpoint, waiting at most one second. Save failures are logged and do
-not prevent cleanup. There is no persistence interval or timeout configuration.
+not prevent cleanup. The checkpoint's one-second limit also fits within the
+remaining global shutdown budget; a shorter `shutdown_timeout_ms` can interrupt
+it earlier. There is no separate checkpoint timeout or persistence interval.
 
 The daemon migrates old state files automatically. After a crash or a missing
 checkpoint it uses a random sequence number, so recovery may take several
 minutes while peers expire older feasibility history. If the entire file is
 lost, a configured `router_id` still preserves identity; otherwise a new ID is
 generated. See [ARCHITECTURE.md](ARCHITECTURE.md#persistence-and-failure).
+
+## Cleanup after an interrupted exit
+
+Startup reconciles from an empty RIB and continues retrying export failures
+periodically. It enumerates IPv4/IPv6 routes and policy rules carrying the
+configured `export.protocol` across all tables in the current network namespace,
+including tables no longer present in `export.views`. Obsolete entries are
+removed; currently desired source rules are retained or recreated. Changing
+`manage_rules` to false also removes leftover rules owned by this protocol.
+
+The ownership token is the namespace plus `export.protocol`. Other protocols
+and namespaces are untouched. Changing either token on restart does not clean
+the previous ownership scope automatically. Every manager must use its own
+protocol number within a namespace, including an external policy-rule manager.

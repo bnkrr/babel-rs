@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use babel_router::{BabelRouter, RouteKey, RouterHandle};
+use babel_router::{BabelRouter, RouteExporter, RouteKey, RouteSnapshot, RouterHandle};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -18,6 +18,7 @@ mod control;
 mod interfaces;
 mod linux;
 mod ownership;
+mod shutdown;
 mod state;
 
 use config::Config;
@@ -181,6 +182,9 @@ async fn run_daemon(
     control_socket: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut active_config, digest) = load_config(&config_path)?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
     let protocol_ownership = Arc::new(ownership::ProtocolOwnership::acquire(
         active_config.export.protocol,
     )?);
@@ -188,7 +192,10 @@ async fn run_daemon(
         active_config.router_id.as_deref(),
         PathBuf::from(&active_config.state_file).as_path(),
     )?;
-    let exporter = LinuxExporter::new(active_config.export.clone())?;
+    let exporter = LinuxExporter::new(
+        active_config.export.clone(),
+        Arc::clone(&protocol_ownership),
+    )?;
     let mut builder = BabelRouter::builder()
         .router_id(state.router_id)
         .sequence_number(state.sequence_number)
@@ -201,9 +208,11 @@ async fn run_daemon(
     }
     let router = builder.build().await?;
     let handle = router.handle();
+    let router_abort = router.abort_handle();
     let mut running = Box::pin(router.run());
 
     let metadata = Arc::new(RwLock::new(RuntimeMetadata {
+        shutdown_timeout_ms: active_config.shutdown_timeout_ms,
         config_generation: 1,
         active_config_sha256: digest,
         last_reload_error: None,
@@ -242,76 +251,139 @@ async fn run_daemon(
         });
     }
 
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    let mut hangup = signal(SignalKind::hangup())?;
     let mut router_finished = false;
-    let run_result: Result<(), Box<dyn std::error::Error>> = loop {
-        tokio::select! {
-            result = &mut running => {
-                router_finished = true;
-                break result.map_err(|error| Box::new(error) as _);
-            },
-            _ = interrupt.recv() => break Ok(()),
-            _ = terminate.recv() => break Ok(()),
-            value = hangup.recv() => {
-                if value.is_none() {
-                    break Err(Box::new(io::Error::new(io::ErrorKind::BrokenPipe, "SIGHUP signal stream ended")) as _);
-                }
-                if let Err(error) = reload_and_record(
-                    &config_path,
-                    &mut active_config,
-                    &handle,
-                    &config_tx,
-                    &exporter,
-                    &metadata,
-                ).await {
-                    warn!(%error, "configuration reload rejected; old configuration remains active");
-                }
-            }
-            command = command_rx.recv(), if control_enabled => match command {
-                Some(DaemonCommand::Reload { reply }) => {
-                    let result = reload_and_record(
+    // The signal select surrounds the whole event loop, so a reload waiting
+    // for a router/exporter operation cannot postpone a requested shutdown.
+    let event_loop = async {
+        let run_result: Result<(), Box<dyn std::error::Error>> = loop {
+            tokio::select! {
+                result = &mut running => {
+                    router_finished = true;
+                    break result.map_err(|error| Box::new(error) as _);
+                },
+                value = hangup.recv() => {
+                    if value.is_none() {
+                        break Err(Box::new(io::Error::new(io::ErrorKind::BrokenPipe, "SIGHUP signal stream ended")) as _);
+                    }
+                    if let Err(error) = reload_and_record(
                         &config_path,
                         &mut active_config,
                         &handle,
                         &config_tx,
                         &exporter,
                         &metadata,
-                    ).await.map_err(|error| error.to_string());
-                    let _ = reply.send(result);
+                    ).await {
+                        warn!(%error, "configuration reload rejected; old configuration remains active");
+                    }
                 }
-                Some(DaemonCommand::Shutdown { accepted, response_flushed }) => {
-                    let _ = accepted.send(());
-                    let _ = tokio::time::timeout(Duration::from_secs(1), response_flushed).await;
-                    break Ok(());
+                command = command_rx.recv(), if control_enabled => match command {
+                    Some(DaemonCommand::Reload { reply }) => {
+                        let result = reload_and_record(
+                            &config_path,
+                            &mut active_config,
+                            &handle,
+                            &config_tx,
+                            &exporter,
+                            &metadata,
+                        ).await.map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    Some(DaemonCommand::Shutdown { accepted, response_flushed }) => {
+                        let _ = accepted.send(());
+                        return (Ok(()), Some(response_flushed));
+                    }
+                    None => break Err(Box::new(io::Error::new(io::ErrorKind::BrokenPipe, "control command channel closed")) as _),
+                },
+                service = services.join_next(), if !services.is_empty() => {
+                    let message = match service {
+                        Some(Ok(ServiceExit::Interfaces(Ok(())))) => "interface manager stopped unexpectedly".into(),
+                        Some(Ok(ServiceExit::Interfaces(Err(error)))) => format!("interface manager failed: {error}"),
+                        Some(Ok(ServiceExit::Exporter)) => "route exporter reconciler stopped unexpectedly".into(),
+                        Some(Ok(ServiceExit::Control(Ok(())))) => "control server stopped unexpectedly".into(),
+                        Some(Ok(ServiceExit::Control(Err(error)))) => format!("control server failed: {error}"),
+                        Some(Err(error)) => format!("critical task panicked: {error}"),
+                        None => "all critical tasks stopped unexpectedly".into(),
+                    };
+                    break Err(Box::new(io::Error::other(message)) as _);
                 }
-                None => break Err(Box::new(io::Error::new(io::ErrorKind::BrokenPipe, "control command channel closed")) as _),
-            },
-            service = services.join_next(), if !services.is_empty() => {
-                let message = match service {
-                    Some(Ok(ServiceExit::Interfaces(Ok(())))) => "interface manager stopped unexpectedly".into(),
-                    Some(Ok(ServiceExit::Interfaces(Err(error)))) => format!("interface manager failed: {error}"),
-                    Some(Ok(ServiceExit::Exporter)) => "route exporter reconciler stopped unexpectedly".into(),
-                    Some(Ok(ServiceExit::Control(Ok(())))) => "control server stopped unexpectedly".into(),
-                    Some(Ok(ServiceExit::Control(Err(error)))) => format!("control server failed: {error}"),
-                    Some(Err(error)) => format!("critical task panicked: {error}"),
-                    None => "all critical tasks stopped unexpectedly".into(),
-                };
-                break Err(Box::new(io::Error::other(message)) as _);
             }
-        }
+        };
+        (run_result, None)
+    };
+    let (mut run_result, response_flushed) = tokio::select! {
+        biased;
+        _ = interrupt.recv() => (Ok(()), None),
+        _ = terminate.recv() => (Ok(()), None),
+        result = event_loop => result,
     };
 
-    let _ = services_shutdown.send(true);
-    handle.shutdown();
-    if !router_finished {
-        running.await?;
+    let deadline = shutdown::Deadline::new(active_config.shutdown_timeout_ms);
+    if let Err(error) = &run_result {
+        warn!(%error, "daemon stopping after failure");
     }
-    while let Some(result) = services.join_next().await {
-        if let Err(error) = result {
-            warn!(%error, "critical task join failed during shutdown");
+    let cleanup: Result<(), shutdown::TimedOut> = async {
+        if let Some(response_flushed) = response_flushed {
+            let _ = deadline
+                .wait(
+                    "control response flush",
+                    tokio::time::timeout(Duration::from_secs(1), response_flushed),
+                )
+                .await?;
         }
+        let _ = services_shutdown.send(true);
+        handle.shutdown();
+        if !router_finished
+            && let Err(error) = deadline
+                .wait(
+                    "router cleanup (retractions, checkpoint, routes/rules)",
+                    &mut running,
+                )
+                .await?
+        {
+            warn!(%error, "router failed during shutdown; attempting route export cleanup");
+            router_finished = true;
+            if run_result.is_ok() {
+                run_result = Err(Box::new(error));
+            }
+        }
+        // If the engine failed before its orderly shutdown path, still try to
+        // remove owned Linux state using the remainder of the same deadline.
+        if router_finished
+            && let Err(error) = deadline
+                .wait(
+                    "route export cleanup after router exit",
+                    exporter.shutdown(RouteSnapshot::default()),
+                )
+                .await?
+        {
+            warn!(%error, "final route export cleanup failed");
+            if run_result.is_ok() {
+                run_result = Err(io::Error::other(error.to_string()).into());
+            }
+        }
+        deadline
+            .wait("background task completion", async {
+                while let Some(result) = services.join_next().await {
+                    if let Err(error) = result {
+                        warn!(%error, "critical task join failed during shutdown");
+                    }
+                }
+            })
+            .await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = cleanup {
+        warn!(
+            phase = error.phase,
+            timeout_ms = error.timeout_ms,
+            "shutdown deadline exceeded; cleanup may be incomplete"
+        );
+        let _ = services_shutdown.send(true);
+        handle.shutdown();
+        router_abort.abort();
+        services.abort_all();
+        return Err(Box::new(error));
     }
     run_result
 }
@@ -327,6 +399,7 @@ async fn reload_and_record(
     match reload(path, active, router, config_tx, exporter).await {
         Ok(digest) => {
             let mut state = metadata.write().await;
+            state.shutdown_timeout_ms = active.shutdown_timeout_ms;
             state.config_generation = state.config_generation.wrapping_add(1);
             state.active_config_sha256 = digest.clone();
             state.last_reload_error = None;

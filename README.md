@@ -216,6 +216,12 @@ reannounce, orderly-exit checkpoints, crash and lost-state recovery, stale-route
 propagation, link failure and recovery, plus live-MTU packetisation under a
 large route announcement.
 
+The `shutdown-recovery` mode checks the total cleanup deadline and startup
+removal of leftover routes/rules. It builds a test-only netlink fault preload
+with `${CC:-cc}` locally and copies that fixture to the VM; the `all` suite
+includes this mode. Configure the deadline with the top-level, reloadable
+`shutdown_timeout_ms` (default 5000); see [CONFIGURATION.md](docs/CONFIGURATION.md).
+
 ## License
 
 Licensed under the MIT License. See [LICENSE](LICENSE).
