@@ -189,8 +189,9 @@ originate and withdraw operations, dynamic interface changes, status, route
 subscription, and graceful shutdown. The exporter receives a generation-tagged
 full desired-state snapshot rather than an unrecoverable stream of deltas.
 
-See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the protocol, runtime, and
-exporter boundaries.
+See [EMBEDDING.md](docs/EMBEDDING.md) for validation, command completion,
+exporter and shutdown contracts, and [ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for the protocol, runtime, and exporter boundaries.
 
 ## Development and testing
 
@@ -198,6 +199,8 @@ exporter boundaries.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
+cargo test --workspace --doc
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
 The root-only black-box suite builds locally, copies only the binary and test
@@ -221,6 +224,11 @@ removal of leftover routes/rules. It builds a test-only netlink fault preload
 with `${CC:-cc}` locally and copies that fixture to the VM; the `all` suite
 includes this mode. Configure the deadline with the top-level, reloadable
 `shutdown_timeout_ms` (default 5000); see [CONFIGURATION.md](docs/CONFIGURATION.md).
+
+The `control-clients` mode verifies actual 30-second client deadlines and
+connection-slot reuse with 64 simultaneous Unix clients, including blocked
+response readers; `all` includes it. Deterministic source-history churn across
+multiple GC windows is part of `cargo test --workspace --all-targets`.
 
 ## License
 

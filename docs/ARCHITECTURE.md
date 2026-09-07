@@ -207,3 +207,21 @@ failure domain: an unexpected return or panic exits nonzero rather than trying
 to reconstruct a possibly inconsistent subset in process. Transient external
 I/O failures stay inside their task and retry. A failed orderly-exit sequence
 checkpoint is nonfatal; it may make the next restart converge more slowly.
+
+## Internal module map
+
+The three-crate boundary and public module paths stay stable. Private modules
+split implementation responsibilities while the engine retains sole ownership
+of protocol state; the split introduces no new tasks, locks or queues.
+
+| Area | Private implementation responsibilities |
+| --- | --- |
+| `babel-proto::engine` | Root owns state and event dispatch; `api` defines public inputs/results; `interfaces` applies lifecycle/policy changes; `neighbors` handles observations and received packets; `rib` admits candidates and selects routes; `sources` maintains feasibility history and sequence requests; `timers` handles expiry/periodic work; `output` constructs semantic advertisements |
+| `babel-proto::wire` | Root retains public types/constants; `decode` validates and resolves inbound context; `encode` writes outbound TLVs; `packetizer` owns datagram boundaries and timestamp stamping; `prefix` holds shared address/prefix wire primitives |
+| `babel-proto::validation` | Shared side-effect-free configuration and local-event validation, reexported through public types and `ConfigError` |
+| `babel-router::router` | Root exposes builder/handle/status; `runtime` serializes engine commands and shutdown; `io` runs independent receiver, sender and exporter workers |
+| `babel-rs::linux` | Root owns exporter lifecycle, locking and the shutdown latch; `projection` maps the RIB to policy views; `identity` parses kernel identities; `netlink` performs owned route/rule reconciliation |
+
+Unit tests live beside these modules in `tests.rs`; public API and protocol
+integration tests remain in the crate-level `tests/` directories. Configuration
+validation and embedding contracts are described in [EMBEDDING.md](EMBEDDING.md).

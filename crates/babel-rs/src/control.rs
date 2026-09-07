@@ -627,4 +627,87 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         writer.await.unwrap();
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_client_read_times_out_after_thirty_seconds() {
+        let (_client, server) = tokio::io::duplex(64);
+        let reader =
+            tokio::spawn(async move { io_timeout(read_frame(&mut BufReader::new(server))).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(!reader.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            reader.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_request_bytes_do_not_extend_the_frame_deadline() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let reader =
+            tokio::spawn(async move { io_timeout(read_frame(&mut BufReader::new(server))).await });
+        tokio::task::yield_now().await;
+        for _ in 0..6 {
+            assert!(!reader.is_finished());
+            client.write_all(b" ").await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(5)).await;
+        }
+        assert_eq!(
+            reader.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_response_reader_does_not_extend_the_write_deadline() {
+        let (mut client, mut server) = tokio::io::duplex(32);
+        let writer = tokio::spawn(async move {
+            io_timeout(write_json(
+                &mut server,
+                &json!({"payload": "x".repeat(4096)}),
+            ))
+            .await
+        });
+        tokio::task::yield_now().await;
+        // Real backpressure: the response is larger than the duplex capacity.
+        // A client that occasionally drains a byte still has a fixed deadline.
+        for _ in 0..6 {
+            assert!(!writer.is_finished());
+            let mut byte = [0];
+            client.read_exact(&mut byte).await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(5)).await;
+        }
+        assert_eq!(
+            writer.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_frames_get_a_new_read_budget() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let (first_done, receive) = oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            let first = io_timeout(read_frame(&mut server)).await.unwrap().unwrap();
+            first_done.send(()).unwrap();
+            let second = io_timeout(read_frame(&mut server)).await.unwrap().unwrap();
+            (first, second)
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(25)).await;
+        client.write_all(b"first\n").await.unwrap();
+        receive.await.unwrap();
+        tokio::time::advance(Duration::from_secs(25)).await;
+        assert!(!reader.is_finished());
+        client.write_all(b"second\n").await.unwrap();
+        assert_eq!(
+            reader.await.unwrap(),
+            (b"first".to_vec(), b"second".to_vec())
+        );
+    }
 }

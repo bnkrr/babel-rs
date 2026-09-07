@@ -36,11 +36,16 @@ scp "${ssh_args[@]}" \
   "${repo_root}/tests/e2e/netns-capacity.py" \
   "${repo_root}/tests/e2e/netns-state-restart.py" \
   "${repo_root}/tests/e2e/netns-shutdown-recovery.py" \
+  "${repo_root}/tests/e2e/netns-control-clients.py" \
   "${test_assets[@]}" \
   "${ssh_host}:${remote_root}/"
 case ${1:-all} in
   all)
     remote_tests="'${remote_root}/netns-babeld.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-bird.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-three-node.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-rtt.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-rtt-multipath.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-lifecycle.sh' '${remote_root}/babel-rs' && '${remote_root}/netns-mtu-output.sh' '${remote_root}/babel-rs' && python3 '${remote_root}/netns-capacity.py' '${remote_root}/babel-rs' && python3 '${remote_root}/netns-state-restart.py' '${remote_root}/babel-rs' && python3 '${remote_root}/netns-shutdown-recovery.py' '${remote_root}/babel-rs' '${remote_root}/netlink-stall.so'"
+    remote_tests+=" && python3 '${remote_root}/netns-control-clients.py' '${remote_root}/babel-rs'"
+    ;;
+  control-clients)
+    remote_tests="python3 '${remote_root}/netns-control-clients.py' '${remote_root}/babel-rs'"
     ;;
   shutdown-recovery)
     remote_tests="python3 '${remote_root}/netns-shutdown-recovery.py' '${remote_root}/babel-rs' '${remote_root}/netlink-stall.so'"
@@ -72,7 +77,7 @@ case ${1:-all} in
   mtu-output)
     remote_tests="'${remote_root}/netns-mtu-output.sh' '${remote_root}/babel-rs'"
     ;;
-  *) echo "usage: $0 [all|babeld|bird|three-node|rtt|rtt-multipath|lifecycle|mtu-output|capacity|state-restart|shutdown-recovery]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|babeld|bird|three-node|rtt|rtt-multipath|lifecycle|mtu-output|capacity|state-restart|shutdown-recovery|control-clients]" >&2; exit 2 ;;
 esac
 ssh "${ssh_args[@]}" "${ssh_host}" \
   "chmod 0700 '${remote_root}/babel-rs' '${remote_root}/netns-babeld.sh' '${remote_root}/netns-bird.sh' '${remote_root}/netns-three-node.sh' '${remote_root}/netns-rtt.sh' '${remote_root}/netns-rtt-multipath.sh' '${remote_root}/netns-lifecycle.sh' '${remote_root}/netns-mtu-output.sh' && ${remote_tests}"

@@ -4,8 +4,11 @@ The daemon exposes a local, versioned control protocol over a Unix stream
 socket. The socket and a newly-created parent directory are mode `0600` and
 `0700`, respectively. Each frame is one UTF-8 JSON object followed by LF and
 is limited to one MiB before allocation can grow past that boundary. The
-server accepts at most 64 concurrent clients and applies a 30-second idle I/O
-timeout.
+server accepts at most 64 concurrent clients. Each frame read and greeting or
+response write has its own 30-second deadline. Partial progress does not extend
+that deadline; a completed operation gets a new budget for the next operation.
+An idle, incomplete-request or blocked-response connection is closed on timeout
+and releases its client slot. This bounds client I/O, not command execution.
 
 Immediately after accept, the server sends:
 
@@ -90,3 +93,12 @@ babel-rs shutdown --socket /run/babel-rs/babel-rs.ctl
 
 The protocol is local administration, not a Babel wire extension. File-system
 permissions are its authorization boundary.
+
+`cargo test -p babel-rs control::tests` covers idle reads, trickled requests,
+blocked response writes and fresh budgets after complete frames with a
+controlled clock and bounded duplex transport. The VM runner's `control-clients`
+mode exercises the real daemon with one active client plus 21 idle, 21 slow
+request writers and 21 blocked response readers. It fills all 64 slots, checks
+that extra clients are refused, and reuses all 63 timed-out slots before closing
+the old client sockets. It also checks disconnect reuse and shutdown while
+clients remain connected. The `all` suite includes this mode.

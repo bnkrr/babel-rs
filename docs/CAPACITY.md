@@ -118,6 +118,22 @@ rejected/withdrawn TLVs, garbage collection, and interface recreation:
 cargo test -p babel-proto --test capacity
 ```
 
+Sustained source churn is covered separately with public engine events:
+
+```sh
+cargo test -p babel-proto --test source_churn
+```
+
+The test rotates 28,800 Router-ID/source-key pairs through 32 candidate slots
+over 15 minutes of simulated time, spanning five source-GC windows. IPv4/IPv6
+ordinary and source-specific routes share destinations; an independent healthy
+route stays selected throughout. Expected history is derived from finite
+outbound advertisements. The test checks retained feasibility against stale
+sources, bounded history at this fixed churn rate, full reclamation after a
+five-minute drain, and reuse of an expired identity with an older sequence.
+This validates history lifetime and selection, not a hard source-table or RSS
+limit under arbitrary churn rates.
+
 The release-mode engine workload takes the candidate count per neighbor. It
 creates four neighbors, learns routes in batches of 32 Updates, repeats a
 stable refresh, sends 1,000 rejected batches, retracts one whole neighbor's

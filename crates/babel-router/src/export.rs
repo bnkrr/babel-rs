@@ -4,26 +4,38 @@ use async_trait::async_trait;
 use babel_proto::{RouteKey, SelectedRoute};
 use tokio::sync::RwLock;
 
+/// Complete desired learned RIB and unreachable hold state for one generation.
+/// Local origins are advertised separately and are not installed by this snapshot.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RouteSnapshot {
+    /// Generation identifies a replacement, not an export-completion acknowledgement.
     pub generation: u64,
+    /// Selected learned routes.
     pub routes: Vec<SelectedRoute>,
     /// Exact destinations that must not fall through to a less-specific route
     /// while a withdrawn Babel route is retained as an unreachable tombstone.
     pub unreachable: Vec<RouteKey>,
 }
 
+/// Desired-state sink with coalesced snapshots and retries after failure.
+///
+/// Reconciliation must be idempotent, yield during I/O and converge to the newest
+/// complete snapshot. The runtime may skip intermediate generations. Serialize
+/// external writes and make shutdown terminal: a pending reconciliation can
+/// overlap [`Self::shutdown`] and must not reinstall state after final cleanup.
+/// The runtime logs exporter failures; successful router commands do not imply
+/// successful export. The embedding host owns the overall cleanup deadline.
 #[async_trait]
 pub trait RouteExporter: Send + Sync + 'static {
+    /// Reconcile the complete desired state; errors are logged and retried.
     async fn reconcile(
         &self,
         snapshot: RouteSnapshot,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-    // An empty running RIB may still require persistent policy state.  The
-    // separate shutdown hook lets exporters remove that state when ownership
-    // of the external data plane is ending.  Simple exporters can treat it as
-    // one final reconciliation.
+    /// Release externally owned state on shutdown. An empty running RIB may
+    /// still need policy rules; this hook distinguishes final cleanup from an
+    /// ordinary empty snapshot. The default performs one final reconciliation.
     async fn shutdown(
         &self,
         snapshot: RouteSnapshot,
@@ -48,6 +60,7 @@ pub trait SequenceStore: Send + Sync + 'static {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
+/// Default checkpoint sink: retains no sequence state across restarts.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopSequenceStore;
 
@@ -61,12 +74,14 @@ impl SequenceStore for NoopSequenceStore {
     }
 }
 
+/// In-memory snapshot sink for applications that do not need a kernel exporter.
 #[derive(Clone, Default)]
 pub struct MemoryExporter {
     snapshot: Arc<RwLock<RouteSnapshot>>,
 }
 
 impl MemoryExporter {
+    /// Clone the most recently reconciled snapshot.
     pub async fn snapshot(&self) -> RouteSnapshot {
         self.snapshot.read().await.clone()
     }

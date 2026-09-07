@@ -79,8 +79,12 @@ impl HelloHistory {
         }
     }
 
+    /// Count received Hellos in the most recent `window` positions.
+    ///
+    /// # Panics
+    /// Panics unless `window` is in 1..=16.
     pub fn received(self, window: u8) -> u8 {
-        debug_assert!((1..=16).contains(&window));
+        assert!((1..=16).contains(&window), "Hello window must be in 1..=16");
         let mask = if window == 16 {
             u16::MAX
         } else {
@@ -122,6 +126,10 @@ pub trait NeighborMetric: Send + 'static {
 }
 
 /// Factory for independent per-neighbour metric state.
+/// Methods run synchronously in the engine: they must not block or perform I/O.
+/// Return independent state for each neighbor. If RTT probing is enabled,
+/// return a nonzero millisecond interval and enable timestamps. The built-in
+/// [`RttMetric`] enforces its own probe and smoothing parameter constraints.
 pub trait MetricProfile: Send + Sync + 'static {
     fn name(&self) -> String;
     fn new_neighbor(&self, interface: &str) -> Box<dyn NeighborMetric>;
@@ -134,7 +142,8 @@ pub trait MetricProfile: Send + Sync + 'static {
 }
 
 /// Metric algebra is separate from link-quality estimation so embedders can
-/// replace either policy independently.
+/// replace either policy independently. A finite result must be strictly greater
+/// than the advertised metric; invalid or saturated results are treated as infinity.
 pub trait MetricAlgebra: Send + Sync + 'static {
     fn extend(&self, advertised_metric: u16, link_cost: u16) -> u16;
 }
@@ -169,6 +178,7 @@ impl WiredMetric {
     pub const DEFAULT_RECEIVED: u8 = 2;
     pub const DEFAULT_WINDOW: u8 = 3;
 
+    /// Return `None` unless cost is in 1..65535 and 1 <= received <= window <= 16.
     pub fn new(nominal_cost: u16, received: u8, window: u8) -> Option<Self> {
         (nominal_cost > 0
             && nominal_cost < INFINITY
@@ -279,6 +289,7 @@ impl EtxMetric {
     pub const NOMINAL_COST: u16 = 256;
     pub const DEFAULT_WINDOW: u8 = 6;
 
+    /// Return `None` unless the observation window is in 1..=16.
     pub fn new(window: u8) -> Option<Self> {
         (window > 0 && window <= 16).then_some(Self { window })
     }
@@ -383,6 +394,9 @@ impl RttMetric {
     pub const DEFAULT_MAX_RTT_US: u32 = 120_000;
     pub const DEFAULT_MAX_PENALTY: u16 = 150;
 
+    /// Return `None` for probes below 100 ms, zero half-life, unordered RTT
+    /// thresholds (`min_rtt_us >= max_rtt_us`), or an infinite maximum penalty.
+    /// RTT thresholds are microseconds; probe interval and half-life are milliseconds.
     pub fn new(
         base: Arc<dyn MetricProfile>,
         probe_interval_ms: u64,
@@ -405,6 +419,7 @@ impl RttMetric {
             })
     }
 
+    /// Compose the base with 2 s probes, 6 s half-life, 10..120 ms RTT and penalty 150.
     pub fn recommended(base: Arc<dyn MetricProfile>) -> Self {
         Self::new(
             base,

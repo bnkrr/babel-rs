@@ -3,12 +3,15 @@ use std::net::IpAddr;
 
 use ipnet::IpNet;
 
+/// Babel unreachable metric and saturation value (65535).
 pub const INFINITY: u16 = 0xffff;
 
+/// An eight-octet origin identity, excluding all-zero and all-one values.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RouterId([u8; 8]);
 
 impl RouterId {
+    /// Return `None` for either reserved identity.
     pub fn new(value: [u8; 8]) -> Option<Self> {
         if value == [0; 8] || value == [0xff; 8] {
             None
@@ -17,6 +20,7 @@ impl RouterId {
         }
     }
 
+    /// Return the wire-order octets.
     pub const fn octets(self) -> [u8; 8] {
         self.0
     }
@@ -34,6 +38,8 @@ impl fmt::Display for RouterId {
     }
 }
 
+/// A destination and optional source prefix of the same address family.
+/// Use [`Self::new`] to normalize host bits and omit a zero-length source.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RouteKey {
     pub destination: IpNet,
@@ -41,6 +47,7 @@ pub struct RouteKey {
 }
 
 impl RouteKey {
+    /// Normalize both prefixes; return `None` if their address families differ.
     pub fn new(destination: IpNet, source: Option<IpNet>) -> Option<Self> {
         if source.is_some_and(|value| value.addr().is_ipv4() != destination.addr().is_ipv4()) {
             return None;
@@ -55,6 +62,7 @@ impl RouteKey {
     }
 }
 
+/// Advertised sequence number and metric used for feasibility comparison.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Distance {
     pub seqno: u16,
@@ -62,19 +70,22 @@ pub struct Distance {
 }
 
 impl Distance {
+    /// Whether this advertisement is strictly feasible against recorded history.
     pub fn feasible_against(self, feasible: Self) -> bool {
         seqno_gt(self.seqno, feasible.seqno)
             || (self.seqno == feasible.seqno && self.metric < feasible.metric)
     }
 }
 
-// RFC 8966 sequence-number comparison modulo 2^16. Values exactly half a
-// sequence space apart are deliberately incomparable.
+/// RFC 8966 sequence-number comparison modulo 2^16. Values exactly half a
+/// sequence space apart are deliberately incomparable.
 pub fn seqno_gt(a: u16, b: u16) -> bool {
     let delta = a.wrapping_sub(b);
     delta != 0 && delta < 0x8000
 }
 
+/// Selected learned route, including an independent next-hop address family.
+/// IPv4 destinations can use IPv6 link-local next hops (RFC 9229).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SelectedRoute {
     pub key: RouteKey,
