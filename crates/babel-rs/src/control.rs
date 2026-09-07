@@ -316,10 +316,23 @@ async fn status(shared: &Shared) -> Result<Value, (&'static str, String)> {
         "active_config_sha256": metadata.active_config_sha256,
         "last_reload_error": metadata.last_reload_error,
         "metric": router.metric,
+        "sequence_number": router.sequence_number,
         "attached_interfaces": router.interfaces.len(),
         "neighbors": router.neighbours,
         "route_generation": router.route_generation,
         "selected_routes": router.selected_routes,
+        "limits": {
+            "max_neighbors": router.resources.limits.max_neighbors,
+            "max_candidates": router.resources.limits.max_candidates,
+            "max_candidates_per_neighbor": router.resources.limits.max_candidates_per_neighbor,
+        },
+        "candidates": router.resources.candidates,
+        "sources": router.resources.sources,
+        "pending_requests": router.resources.pending_requests,
+        "unreachable_routes": router.resources.unreachable,
+        "rejected_neighbors": router.resources.rejected_neighbors,
+        "rejected_candidates_global": router.resources.rejected_candidates_global,
+        "rejected_candidates_per_neighbor": router.resources.rejected_candidates_per_neighbor,
         "dropped_outbound_datagrams": router.dropped_outbound_datagrams,
         "missed_outbound_deadlines": router.missed_outbound_deadlines,
         "export": {
@@ -350,6 +363,7 @@ async fn interfaces(shared: &Shared) -> Result<Value, (&'static str, String)> {
                     "hello_interval_ms": item.hello_interval_ms,
                     "update_interval_ms": item.update_interval_ms,
                     "split_horizon": item.split_horizon,
+                    "output": item.output,
                     "attached": true,
                 })
             })
@@ -371,6 +385,8 @@ async fn neighbors(shared: &Shared) -> Result<Value, (&'static str, String)> {
                 json!({
                     "interface": item.interface,
                     "address": item.address.to_string(),
+                    "candidates": item.candidates,
+                    "rejected_candidates": item.rejected_candidates,
                     "algorithm": item.algorithm,
                     "reachable": item.link_cost != INFINITY,
                     "hello_received": item.hello_received,

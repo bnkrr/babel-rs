@@ -25,8 +25,13 @@ pub struct ConformanceHarness {
 
 impl ConformanceHarness {
     pub fn new(router_id: RouterId) -> Self {
+        Self::with_limits(router_id, babel_proto::ResourceLimits::default())
+    }
+
+    pub fn with_limits(router_id: RouterId, limits: babel_proto::ResourceLimits) -> Self {
         Self {
             engine: Engine::new(EngineConfig {
+                limits,
                 router_id,
                 metric: Arc::new(WiredMetric::new(96, 1, 1).unwrap()),
                 metric_algebra: Arc::new(AdditiveMetric),

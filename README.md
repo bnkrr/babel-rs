@@ -132,6 +132,12 @@ ETX uses `type = "etx"` and an optional `window` in `1..=16` (default 6).
 
 ## Daemon behaviour
 
+Learned state has default global neighbor/candidate limits and a per-neighbor
+candidate limit. Excess new entries are ignored while existing routes continue
+to update, retract and expire; freed capacity is reused automatically. Optional
+`[limits]` overrides require a restart. See [CAPACITY.md](docs/CAPACITY.md) for
+defaults, status counters, and overload-isolation tests.
+
 Selected-route generations are complete desired-state snapshots. A dedicated
 worker coalesces intermediate generations and the two-second safety pass
 reconciles the newest snapshot. Out-of-band deletion and stale owned state are
@@ -206,7 +212,7 @@ Set `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN`, or
 `BABEL_RS_E2E_REMOTE_ROOT` when their defaults do not fit the local setup. The
 suite covers `babeld`, BIRD, IPv4-over-IPv6, IPv6, source-specific routes,
 RFC 9616 RTT sampling, delayed multipath selection and hysteresis, withdraw and
-reannounce, persisted restart state, stale-route cleanup, three-node
+reannounce, orderly-exit checkpoints, crash and lost-state recovery, stale-route cleanup, three-node
 propagation, link failure and recovery, plus live-MTU packetisation under a
 large route announcement.
 

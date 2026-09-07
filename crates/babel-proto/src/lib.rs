@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod engine;
+mod limits;
 pub mod metric;
 pub mod model;
 pub mod wire;
@@ -9,6 +10,7 @@ pub use engine::{
     Action, Engine, EngineConfig, Event, InterfacePolicy, NeighborStatus, RouteSelectionConfig,
     SendTiming,
 };
+pub use limits::{ResourceLimits, ResourceStatus};
 pub use metric::{
     AdditiveMetric, EtxMetric, HelloHistories, HelloHistory, HelloHistoryUpdate, MetricAlgebra,
     MetricProfile, MetricStatus, NeighborMetric, RttMetric, WiredMetric,

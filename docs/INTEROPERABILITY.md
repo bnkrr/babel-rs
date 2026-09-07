@@ -12,6 +12,7 @@ namespaces. The reference versions currently installed there are babeld
 | three babel-rs nodes, line | pass | n/a | n/a | two-hop, failure, recovery |
 | two babel-rs nodes, RFC 9616 | pass | n/a | n/a | Timestamp exchange and non-null RTT status |
 | babel-rs lifecycle | pass | n/a | n/a | glob attach, rebind, reload, FIB repair |
+| three babel-rs nodes, restart | pass | n/a | n/a | graceful checkpoint, SIGKILL, missing state, stale seqno |
 
 The babeld test also injects a stale route in the owned table/protocol and
 requires startup reconciliation to remove it. Restart must preserve Router-ID,
@@ -19,6 +20,14 @@ advance sequence state, remove routes on SIGTERM and reconverge. The BIRD test
 uses separate IPv4 and IPv6 SADR channels. The three-node test requires a
 triggered withdrawal to cross the remaining adjacency before the advertised
 route hold time expires.
+
+`netns-state-restart.py` uses default 4-second Hellos and 16-second Updates on
+an A–B–C line. It verifies that runtime origin changes leave the identity file
+untouched, orderly exit saves the final sequence, and startup consumes it.
+Crash and lost-state recovery must propagate the new instance's sequence and
+a new origin to C before forwarding counts as restored. A deliberately old
+checkpoint also tests recovery after peer feasibility history expires; this
+case takes about three minutes and has a 240-second test deadline.
 
 The RFC 9616 test enables `rtt(wired)` on both nodes and requires both route
 convergence and non-null raw and smoothed RTT observations from the control

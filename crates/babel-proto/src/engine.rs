@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
+use crate::{ResourceLimits, ResourceStatus};
+
 use crate::metric::{
     AdditiveMetric, HelloHistories, HelloHistoryUpdate, MetricAlgebra, MetricProfile,
     NeighborMetric, WiredMetric,
@@ -85,6 +87,8 @@ impl Default for RouteSelectionConfig {
 pub struct NeighborStatus {
     pub interface: String,
     pub address: IpAddr,
+    pub candidates: usize,
+    pub rejected_candidates: u64,
     pub algorithm: String,
     pub hello_received: u16,
     pub hello_expected: u16,
@@ -101,6 +105,7 @@ pub struct NeighborStatus {
 
 #[derive(Clone)]
 pub struct EngineConfig {
+    pub limits: ResourceLimits,
     pub router_id: RouterId,
     pub metric: Arc<dyn MetricProfile>,
     pub metric_algebra: Arc<dyn MetricAlgebra>,
@@ -135,6 +140,7 @@ impl EngineConfig {
     pub fn recommended(router_id: RouterId) -> Self {
         Self {
             router_id,
+            limits: ResourceLimits::default(),
             metric: Arc::new(WiredMetric::default()),
             metric_algebra: Arc::new(AdditiveMetric),
             sequence_number: 0,
@@ -226,6 +232,8 @@ struct NeighborKey {
 }
 
 struct Neighbor {
+    candidates: usize,
+    rejected_candidates: u64,
     last_hello_ms: u64,
     histories: HelloHistories,
     multicast_timer: Option<HelloTimer>,
@@ -302,6 +310,7 @@ struct PendingSwitch {
 }
 
 pub struct Engine {
+    resources: ResourceStatus,
     config: EngineConfig,
     interfaces: BTreeMap<String, InterfaceState>,
     neighbours: HashMap<NeighborKey, Neighbor>,
@@ -322,6 +331,10 @@ pub struct Engine {
 impl Engine {
     pub fn new(config: EngineConfig) -> Self {
         Self {
+            resources: ResourceStatus {
+                limits: config.limits,
+                ..ResourceStatus::default()
+            },
             sequence_number: config.sequence_number,
             config,
             interfaces: BTreeMap::new(),
@@ -338,6 +351,11 @@ impl Engine {
             settled_routes: HashSet::new(),
             generation: 0,
         }
+    }
+
+    /// Current local sequence number, including changes made by the last event.
+    pub fn sequence_number(&self) -> u16 {
+        self.sequence_number
     }
 
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
@@ -531,6 +549,16 @@ impl Engine {
         self.neighbours.len()
     }
 
+    pub fn resource_status(&self) -> ResourceStatus {
+        ResourceStatus {
+            candidates: self.candidates.len(),
+            sources: self.feasible.len(),
+            pending_requests: self.pending_seqno.len(),
+            unreachable: self.tombstones.len(),
+            ..self.resources.clone()
+        }
+    }
+
     pub fn metric_name(&self) -> String {
         self.config.metric.name()
     }
@@ -544,6 +572,8 @@ impl Engine {
                 NeighborStatus {
                     interface: key.interface.clone(),
                     address: key.address,
+                    candidates: neighbour.candidates,
+                    rejected_candidates: neighbour.rejected_candidates,
                     algorithm: metric.algorithm,
                     hello_received: u16::from(
                         neighbour.histories.multicast.received(16)
@@ -588,6 +618,20 @@ impl Engine {
             interface: interface.clone(),
             address: source,
         };
+        if !self.neighbours.contains_key(&neighbour_key)
+            && self.neighbours.len() >= self.config.limits.max_neighbors
+            && packet
+                .tlvs
+                .iter()
+                .any(|tlv| matches!(tlv, Tlv::Hello { .. }))
+        {
+            self.resources.rejected_neighbors = self.resources.rejected_neighbors.saturating_add(1);
+            return Vec::new();
+        }
+        let previous_link_cost = self
+            .neighbours
+            .get(&neighbour_key)
+            .map(|n| n.metric.link_cost());
         let mut actions = Vec::new();
         let mut changed_router_ids = HashSet::new();
         let receive_timestamp = timestamp_us(now_ms);
@@ -620,6 +664,8 @@ impl Engine {
                     .neighbours
                     .entry(neighbour_key.clone())
                     .or_insert_with(|| Neighbor {
+                        candidates: 0,
+                        rejected_candidates: 0,
                         last_hello_ms: now_ms,
                         histories: HelloHistories::default(),
                         multicast_timer: None,
@@ -716,7 +762,15 @@ impl Engine {
                 neighbour.ihu_interval_cs = *interval_cs;
             }
         }
-        self.recompute_candidate_metrics(Some(&neighbour_key));
+        let mut routes_changed = false;
+        if previous_link_cost
+            != self
+                .neighbours
+                .get(&neighbour_key)
+                .map(|n| n.metric.link_cost())
+        {
+            routes_changed = self.recompute_candidate_metrics(Some(&neighbour_key));
+        }
         if send_ihu && let Some(action) = self.ihu_action(&neighbour_key, now_ms, None) {
             actions.push(action);
         }
@@ -745,9 +799,13 @@ impl Engine {
                     {
                         changed_router_ids.insert(key);
                     }
-                    actions.extend(self.receive_update(&neighbour_key, update, now_ms))
+                    let (changed, updates) = self.receive_update(&neighbour_key, update, now_ms);
+                    routes_changed |= changed;
+                    actions.extend(updates);
                 }
                 Tlv::RouteRequest { key, .. } => {
+                    // Replies can update feasibility history through send_updates.
+                    routes_changed = true;
                     if key.is_some() || self.full_update_request_allowed(&interface, now_ms) {
                         let updates = self.send_updates(
                             now_ms,
@@ -774,6 +832,7 @@ impl Engine {
                     router_id,
                     ..
                 } => {
+                    routes_changed = true;
                     actions.extend(self.handle_seqno_request(
                         neighbour_key.clone(),
                         key,
@@ -786,7 +845,9 @@ impl Engine {
                 _ => {}
             }
         }
-        actions.extend(self.reselect(now_ms));
+        if routes_changed {
+            actions.extend(self.reselect(now_ms));
+        }
         // RFC 8966 section 3.5.3 requires a timely triggered update whenever
         // an existing route entry changes Router-ID, even when that entry is
         // not selected and route selection itself therefore did not change.
@@ -865,53 +926,79 @@ impl Engine {
         })
     }
 
+    /// Return whether route-selection inputs changed, alongside protocol output.
+    /// Timer refreshes and rejected admissions alone do not require reselection.
     fn receive_update(
         &mut self,
         neighbour_key: &NeighborKey,
         update: ResolvedUpdate,
         now_ms: u64,
-    ) -> Vec<Action> {
+    ) -> (bool, Vec<Action>) {
         let Some(key) = update.key else {
+            let mut changed = false;
             if update.metric == INFINITY {
                 for ((_, neighbour), candidate) in &mut self.candidates {
                     if neighbour == neighbour_key {
+                        changed |=
+                            candidate.advertised_metric != INFINITY || candidate.metric != INFINITY;
                         candidate.advertised_metric = INFINITY;
                         candidate.metric = INFINITY;
                     }
                 }
             }
-            return Vec::new();
+            return (changed, Vec::new());
         };
         if forbidden_destination(key.destination) {
-            return Vec::new();
+            return (false, Vec::new());
         }
         let candidate_key = (key, neighbour_key.clone());
         if update.metric == INFINITY {
+            let mut changed = false;
             if let Some(candidate) = self.candidates.get_mut(&candidate_key) {
+                changed = candidate.advertised_metric != INFINITY || candidate.metric != INFINITY;
                 candidate.advertised_metric = INFINITY;
                 candidate.metric = INFINITY;
             }
-            return Vec::new();
+            return (changed, Vec::new());
         }
         let Some(router_id) = update.router_id else {
-            return Vec::new();
+            return (false, Vec::new());
         };
         // Multicast loopback varies across kernels and network namespaces.
         // A Router-ID identifies an originating Babel speaker, so accepting our
         // own Update can only manufacture a route back through ourselves.
         if router_id == self.config.router_id {
-            return Vec::new();
+            return (false, Vec::new());
         }
         let Some(next_hop) = update.next_hop else {
-            return Vec::new();
+            return (false, Vec::new());
         };
         let Some(neighbour) = self.neighbours.get(neighbour_key) else {
-            return Vec::new();
+            return (false, Vec::new());
         };
+        let is_new = !self.candidates.contains_key(&candidate_key);
+        if is_new {
+            let per_neighbor =
+                neighbour.candidates >= self.config.limits.max_candidates_per_neighbor;
+            if per_neighbor || self.candidates.len() >= self.config.limits.max_candidates {
+                let rejected = if per_neighbor {
+                    &mut self.resources.rejected_candidates_per_neighbor
+                } else {
+                    &mut self.resources.rejected_candidates_global
+                };
+                *rejected = rejected.saturating_add(1);
+                let neighbour = self
+                    .neighbours
+                    .get_mut(neighbour_key)
+                    .expect("known neighbor");
+                neighbour.rejected_candidates = neighbour.rejected_candidates.saturating_add(1);
+                return (false, Vec::new());
+            }
+        }
         let cost = neighbour.metric.link_cost();
         let metric = self.config.metric_algebra.extend(update.metric, cost);
         if metric != INFINITY && metric <= update.metric {
-            return Vec::new();
+            return (false, Vec::new());
         }
         let distance = Distance {
             seqno: update.seqno,
@@ -929,19 +1016,22 @@ impl Engine {
                     && selected.next_hop == next_hop
             })
         {
-            return feasible.map_or_else(Vec::new, |fd| {
-                self.originate_seqno_request(
-                    SeqnoRequestSpec {
-                        key,
-                        router_id,
-                        seqno: fd.seqno.wrapping_add(1),
-                        hop_count: REQUEST_HOP_COUNT,
-                        next_hop: neighbour_key.clone(),
-                        requester: None,
-                    },
-                    now_ms,
-                )
-            });
+            return (
+                false,
+                feasible.map_or_else(Vec::new, |fd| {
+                    self.originate_seqno_request(
+                        SeqnoRequestSpec {
+                            key,
+                            router_id,
+                            seqno: fd.seqno.wrapping_add(1),
+                            hop_count: REQUEST_HOP_COUNT,
+                            next_hop: neighbour_key.clone(),
+                            requester: None,
+                        },
+                        now_ms,
+                    )
+                }),
+            );
         }
         let mut actions = Vec::new();
         if is_feasible {
@@ -989,6 +1079,19 @@ impl Engine {
                 now_ms,
             ));
         }
+        if is_new {
+            self.neighbours
+                .get_mut(neighbour_key)
+                .expect("known neighbor")
+                .candidates += 1;
+        }
+        let changed = self.candidates.get(&candidate_key).is_none_or(|old| {
+            old.router_id != router_id
+                || old.seqno != update.seqno
+                || old.metric != metric
+                || old.advertised_metric != update.metric
+                || old.next_hop != next_hop
+        });
         self.candidates.insert(
             candidate_key,
             Candidate {
@@ -1004,7 +1107,7 @@ impl Engine {
                 refresh_requested: false,
             },
         );
-        actions
+        (changed, actions)
     }
 
     fn handle_seqno_request(
@@ -1255,6 +1358,9 @@ impl Engine {
         for (key, was_retracted) in expired_candidates {
             if was_retracted {
                 self.candidates.remove(&key);
+                if let Some(neighbour) = self.neighbours.get_mut(&key.1) {
+                    neighbour.candidates -= 1;
+                }
             } else if let Some(route) = self.candidates.get_mut(&key) {
                 route.advertised_metric = INFINITY;
                 route.metric = INFINITY;
@@ -1305,8 +1411,12 @@ impl Engine {
         let expired_tombstones = self.tombstones.len();
         self.tombstones.retain(|_, expires| *expires >= now_ms);
         routes_may_have_changed |= expired_tombstones != self.tombstones.len();
+        let previous_sources = self.feasible.len();
         self.feasible
             .retain(|_, source| source.expires_ms >= now_ms);
+        // Source GC can make an unchanged candidate feasible. It is a route
+        // selection input even when no route or neighbor expires this tick.
+        routes_may_have_changed |= self.feasible.len() != previous_sources;
         self.recent_seqno
             .retain(|_, (_, expires_ms)| *expires_ms >= now_ms);
         for key in &changed_neighbours {
@@ -1737,23 +1847,38 @@ impl Engine {
         for key in self.selected.keys() {
             self.tombstones.remove(key);
         }
-        for key in before.keys().filter(|key| !self.selected.contains_key(key)) {
-            let expires_ms = self
-                .candidates
-                .iter()
-                .filter(|((candidate_key, _), _)| *candidate_key == *key)
-                .map(|(_, candidate)| candidate.expires_ms)
+        let removed: HashSet<_> = before
+            .keys()
+            .filter(|key| !self.selected.contains_key(key))
+            .copied()
+            .collect();
+        if !removed.is_empty() {
+            // Batch withdrawals must not scan the complete candidate table for
+            // every lost prefix. Collect each hold deadline in one pass.
+            let mut expiries: HashMap<RouteKey, u64> = HashMap::new();
+            for candidate in self.candidates.values() {
+                if removed.contains(&candidate.key) {
+                    expiries
+                        .entry(candidate.key)
+                        .and_modify(|expiry| *expiry = (*expiry).max(candidate.expires_ms))
+                        .or_insert(candidate.expires_ms);
+                }
+            }
+            let longest = self
+                .interfaces
+                .values()
+                .map(|state| state.policy.update_interval_cs)
                 .max()
-                .unwrap_or_else(|| {
-                    let longest = self
-                        .interfaces
-                        .values()
-                        .map(|state| state.policy.update_interval_cs)
-                        .max()
-                        .unwrap_or(self.config.update_interval_cs);
-                    now_ms.saturating_add(u64::from(longest) * 35)
-                });
-            self.tombstones.insert(*key, expires_ms);
+                .unwrap_or(self.config.update_interval_cs);
+            for key in removed {
+                self.tombstones.insert(
+                    key,
+                    expiries
+                        .get(&key)
+                        .copied()
+                        .unwrap_or_else(|| now_ms.saturating_add(u64::from(longest) * 35)),
+                );
+            }
         }
         self.pending_switches
             .retain(|key, _| self.selected.contains_key(key));
@@ -1783,6 +1908,20 @@ impl Engine {
         now_ms: u64,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
+        let mut request_targets = HashMap::new();
+        if before.keys().any(|key| !self.selected.contains_key(key)) {
+            for ((key, neighbor), candidate) in &self.candidates {
+                if before.contains_key(key)
+                    && !self.selected.contains_key(key)
+                    && candidate.metric < INFINITY
+                    && !self.candidate_is_feasible(candidate)
+                {
+                    request_targets
+                        .entry(*key)
+                        .or_insert_with(|| neighbor.clone());
+                }
+            }
+        }
         for (key, previous) in before {
             if !self.selected.contains_key(key) {
                 actions.extend(self.advertise_learned(previous, INFINITY, None, now_ms));
@@ -1793,16 +1932,7 @@ impl Engine {
                     .map_or(previous.seqno.wrapping_add(1), |source| {
                         source.distance.seqno.wrapping_add(1)
                     });
-                let next_hop = self
-                    .candidates
-                    .iter()
-                    .filter(|((candidate_key, _), candidate)| {
-                        candidate_key == key
-                            && candidate.metric < INFINITY
-                            && !self.candidate_is_feasible(candidate)
-                    })
-                    .map(|((_, neighbour), _)| neighbour.clone())
-                    .next();
+                let next_hop = request_targets.remove(key);
                 if !self.pending_seqno.contains_key(&pending_key)
                     && let Some(next_hop) = next_hop
                 {
@@ -2303,6 +2433,7 @@ mod tests {
     #[test]
     fn unfeasible_alternate_is_not_acquired() {
         let mut engine = Engine::new(EngineConfig {
+            limits: crate::ResourceLimits::default(),
             router_id: id(1),
             metric: Arc::new(WiredMetric::new(96, 1, 1).unwrap()),
             metric_algebra: Arc::new(AdditiveMetric),

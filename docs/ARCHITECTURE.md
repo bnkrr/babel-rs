@@ -4,7 +4,7 @@
 
 `babel-proto` is the single protocol state owner. Calls provide an explicit
 event and monotonic time; results are `Action`s for packet transmission,
-selected-route replacement, or sequence persistence. It performs no I/O,
+selected-route replacement, or local sequence-number changes. It performs no I/O,
 spawns no tasks, reads no clock, and contains no async or operating-system
 types.
 
@@ -25,12 +25,21 @@ receiver and bounded sender tasks. Every engine Send action includes an
 absolute deadline and permitted jitter. Each sender keeps semantic TLVs
 unencoded during that jitter window, aggregates work for the same destination,
 then reads the current Linux MTU and packetises at release time. Datagrams are
-paced by default, while an earlier deadline preempts the pacing gap. Queue
-backpressure is explicit; encode/send failures and deadline misses are exposed
-as status counters. Interfaces bind UDP/6696 with
+paced by default, while an earlier deadline preempts the pacing gap. Output admission
+never waits: each interface has a 256-batch channel and a shared 16 MiB
+accounted-byte budget across channel, scheduler and in-flight send. New work
+is dropped at capacity. Socket sends wait at most 100 ms; work expires one
+second after the later of its scheduling deadline and admission time. Removal
+cancels an in-flight wait. Per-interface loss, usage and deadline counters
+expose degradation; warnings are rate-limited. See [CAPACITY.md](CAPACITY.md). Interfaces bind UDP/6696 with
 `SO_BINDTODEVICE`, join
 `ff02::1:6`, use hop limit 1, and accept only non-local unicast link-local
-sources. Bounded command, receive, and output queues isolate the engine. Route
+sources. Bounded command, receive, and output queues isolate the engine. Each
+interface may hold at most four receive slots, including the event currently
+being processed, so one burst cannot occupy the whole common input queue.
+Same-destination Sends with identical timing are batched within an engine
+action run; sequence-change and route-snapshot actions remain ordering barriers.
+This avoids consuming an output-channel slot for every changed prefix. Route
 export is an independent capacity-one desired-state worker: a slow exporter
 may skip obsolete generations but must converge to the newest snapshot. The
 public runtime boundary is:
@@ -75,6 +84,11 @@ the daemon rejects overlapping nonzero source views; within that admitted
 subset, source-first and RFC 9079 destination-first lookup are equivalent.
 
 ## Route model
+
+Global neighbor/candidate and per-neighbor candidate admission limits reject
+new state before allocation. Existing candidates still update and expire;
+normal garbage collection and interface removal release their slots. Limits
+and rejection counters are described in [CAPACITY.md](CAPACITY.md).
 
 The route key is `(destination prefix, optional source prefix)`. Destination
 and source must share an address family. Next hop is independent, so an IPv4
@@ -130,9 +144,28 @@ engine tick.
 
 ## Persistence and failure
 
-Router-ID and local sequence number share a versioned TOML state file. Startup
-increments the stored sequence before advertising. Each change is written to a
-new file, fsynced, renamed, and followed by a parent-directory fsync.
+The version 2 TOML state file retains a stable Router-ID. An optional local
+sequence-number checkpoint is saved only on orderly shutdown; running sequence
+changes remain in memory. Startup consumes a checkpoint belonging to the same
+Router-ID and starts at its value plus one (modulo 65536). Without a matching
+checkpoint it starts at a random sequence number. Version 1 checkpoints and
+legacy single-line Router-IDs are migrated automatically.
+
+Before advertising, startup durably replaces the file with identity-only state.
+This prevents a crash from reusing a previous shutdown's checkpoint. Startup
+fails if this write cannot complete. Writes use a temporary file, file fsync,
+rename and parent-directory fsync. Orderly shutdown withdraws all origins in one
+engine event, then checkpoints the final sequence number once, before exporter
+cleanup. This save is best effort: errors or a one-second timeout produce a
+warning and cleanup continues. The daemon uses one dedicated thread for this
+save so stalled storage cannot hold Tokio runtime destruction open; the thread
+retains protocol ownership until it finishes or the process exits.
+
+After an unclean exit, a random sequence number can be older than neighbours'
+retained feasibility history. Recovery can then take several minutes. No RIB or
+neighbour state is written to disk. The embeddable runtime's `SequenceStore`
+hook has the same once-per-orderly-shutdown policy; the host owns loading the
+initial identity/sequence and handling any detached I/O it creates.
 
 Malformed datagrams are dropped without affecting protocol state. Export
 failure leaves the selected RIB intact and is reported; the periodic reconciler
@@ -154,5 +187,5 @@ initial empty reconciliation on the next local start.
 Long-running protocol, interface, exporter, and control tasks are a single
 failure domain: an unexpected return or panic exits nonzero rather than trying
 to reconstruct a possibly inconsistent subset in process. Transient external
-I/O failures stay inside their task and retry. Sequence-state persistence is a
-protocol invariant and failure is fatal.
+I/O failures stay inside their task and retry. A failed orderly-exit sequence
+checkpoint is nonfatal; it may make the next restart converge more slowly.

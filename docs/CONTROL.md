@@ -34,11 +34,38 @@ initiating the same graceful path used by SIGINT and SIGTERM.
 
 `status.metric` identifies the common active metric profile, or is
 `per-interface` when attached interfaces differ.
-`dropped_outbound_datagrams` counts encode and socket-send failures, while
+`status.sequence_number` is the current in-memory sequence number for local
+origins (not an interface's Hello sequence). It is checkpointed only on orderly
+shutdown; the running state file contains no sequence number.
+`status` also reports effective admission `limits`, current `candidates`,
+`sources`, `pending_requests`, `unreachable_routes`, and cumulative rejection
+counters. Each neighbor reports its candidate occupancy and rejected Update
+count. See [CAPACITY.md](CAPACITY.md) for exact counting and recovery semantics.
+`dropped_outbound_datagrams` counts encoding failures and datagrams discarded
+on send error, timeout or expiry, while
 `missed_outbound_deadlines` detects runtime stalls that violate a protocol
 deadline. Each `interfaces` result includes its resolved metric, Hello and
 Update intervals, split-horizon setting, live MTU, and derived UDP payload
-budget. Each `neighbors`
+budget. Its `output` object reports:
+
+- `budget_bytes`, `used_bytes`: per-interface accounted output budget and
+  occupancy, including channel, scheduler and in-flight work; not RSS.
+- `rejected_batches`, `rejected_tlvs`: new work refused by channel or byte
+  admission (including an oversized batch or a stopped sender).
+- `expired_batches`: admitted semantic batches discarded before encoding;
+  several original batches may have been merged by the scheduler.
+- `dropped_datagrams`: encoding failures or datagrams dropped on error,
+  expiry or timeout. An encoding failure counts once for the failing batch
+  because its eventual datagram count is unknown.
+- `expired_datagrams`, `send_timeouts`: subsets of dropped datagrams; a send
+  can count in both if it times out at the work's expiry.
+- `missed_deadlines`: send attempts started after their scheduling deadline.
+
+Output counters in `interfaces` reset on detach/reattach; the top-level drop
+and deadline counters remain cumulative for the running router. Refused and
+expired semantic batches are separate from the datagram counter.
+
+Each `neighbors`
 entry reports its concrete algorithm, separate `receive_cost`, `transmit_cost`,
 and `link_cost`, both 16-bit Hello histories, and (when RFC 9616 is active) the
 last and smoothed RTT in microseconds plus the current RTT penalty. `reachable`

@@ -11,6 +11,7 @@ const LOCK_DIRECTORY: &str = "/run/babel-rs";
 /// The network-namespace inode is part of the key, so identical protocol
 /// numbers remain usable in independent namespaces. `flock` is released by
 /// the kernel on process exit; the harmless lock file may remain in /run.
+#[derive(Debug)]
 pub struct ProtocolOwnership {
     _file: File,
 }

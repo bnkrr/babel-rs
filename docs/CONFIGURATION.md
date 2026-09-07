@@ -1,5 +1,9 @@
 # Configuration
 
+Optional `[limits]` controls global neighbors, global candidates, and candidates
+per neighbor. It uses built-in defaults when omitted and requires a restart to
+change. See [CAPACITY.md](CAPACITY.md) for all defaults and overload behavior.
+
 Interface rules are evaluated in file order and the first matching rule owns
 the interface. Exact names, `*`, and `?` patterns are supported. An unmatched
 interface is not enabled; a rule with no current matches remains valid so that
@@ -47,3 +51,22 @@ interval and is not separately configurable.
 The `interfaces` control command reports the resolved metric, Hello and Update
 intervals, and split-horizon value for every attached interface, in addition to
 its live MTU and payload budget.
+
+## Router identity and restart state
+
+`state_file` stores the stable Router-ID and, after orderly shutdown, an
+optional sequence-number checkpoint. An explicit `router_id` overrides the
+stored identity; a checkpoint for a different identity is discarded. Both
+settings require a restart to change. Give each daemon its own state file.
+
+Startup must be able to write the file and its parent directory: it consumes
+any checkpoint before advertising. While running, sequence changes cause no
+disk writes. SIGINT, SIGTERM and the control `shutdown` command attempt one
+final checkpoint, waiting at most one second. Save failures are logged and do
+not prevent cleanup. There is no persistence interval or timeout configuration.
+
+The daemon migrates old state files automatically. After a crash or a missing
+checkpoint it uses a random sequence number, so recovery may take several
+minutes while peers expire older feasibility history. If the entire file is
+lost, a configured `router_id` still preserves identity; otherwise a new ID is
+generated. See [ARCHITECTURE.md](ARCHITECTURE.md#persistence-and-failure).

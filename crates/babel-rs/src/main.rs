@@ -181,7 +181,9 @@ async fn run_daemon(
     control_socket: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut active_config, digest) = load_config(&config_path)?;
-    let _protocol_ownership = ownership::ProtocolOwnership::acquire(active_config.export.protocol)?;
+    let protocol_ownership = Arc::new(ownership::ProtocolOwnership::acquire(
+        active_config.export.protocol,
+    )?);
     let state = state::load_or_create(
         active_config.router_id.as_deref(),
         PathBuf::from(&active_config.state_file).as_path(),
@@ -190,8 +192,9 @@ async fn run_daemon(
     let mut builder = BabelRouter::builder()
         .router_id(state.router_id)
         .sequence_number(state.sequence_number)
-        .sequence_store(state.store)
+        .sequence_store(state.store.with_ownership(Arc::clone(&protocol_ownership)))
         .route_selection(active_config.route_selection.into())
+        .limits(active_config.limits.effective())
         .exporter(exporter.clone());
     for origin in &active_config.origins {
         builder = builder.originate(origin.key()?, origin.metric);
@@ -354,14 +357,14 @@ async fn reload(
     if !active.reload_identity_matches(&candidate) {
         return Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "router_id, state_file, route_selection, and export.protocol cannot change during reload",
+            "router_id, state_file, route_selection, limits, and export.protocol cannot change during reload",
         )));
     }
 
     let new_origins = origin_map(&candidate)?;
     // Commit the protocol-owned origins in one serialized engine event.  No
     // observer sees the candidate configuration before all validation has
-    // completed, and removed origins share one durable sequence transition.
+    // completed, and removed origins share one sequence transition.
     router
         .replace_origins(new_origins.into_iter().collect())
         .await?;

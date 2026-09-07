@@ -21,8 +21,32 @@ pub struct Config {
     #[serde(default)]
     pub route_selection: RouteSelection,
     #[serde(default)]
+    pub limits: Limits,
+    #[serde(default)]
     pub origins: Vec<Origin>,
     pub export: Export,
+}
+
+/// Optional overrides keep the protocol crate's defaults authoritative.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    pub max_neighbors: Option<usize>,
+    pub max_candidates: Option<usize>,
+    pub max_candidates_per_neighbor: Option<usize>,
+}
+
+impl Limits {
+    pub fn effective(&self) -> babel_proto::ResourceLimits {
+        let defaults = babel_proto::ResourceLimits::default();
+        babel_proto::ResourceLimits {
+            max_neighbors: self.max_neighbors.unwrap_or(defaults.max_neighbors),
+            max_candidates: self.max_candidates.unwrap_or(defaults.max_candidates),
+            max_candidates_per_neighbor: self
+                .max_candidates_per_neighbor
+                .unwrap_or(defaults.max_candidates_per_neighbor),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -465,6 +489,7 @@ impl Config {
         self.router_id == candidate.router_id
             && self.state_file == candidate.state_file
             && self.route_selection == candidate.route_selection
+            && self.limits.effective() == candidate.limits.effective()
             && self.export.protocol == candidate.export.protocol
     }
 }
@@ -581,6 +606,34 @@ fn default_better_for_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limits_default_override_zero_and_reload_identity() {
+        let base = "[[interfaces]]\nmatch = [\"wg0\"]\n[export]\n[[export.views]]\ntable = 20001\n";
+        let original = Config::parse(base).unwrap();
+        assert_eq!(
+            original.limits.effective(),
+            babel_proto::ResourceLimits::default()
+        );
+        let explicit = Config::parse(&format!("{base}[limits]\nmax_candidates = 16384\n")).unwrap();
+        assert!(original.reload_identity_matches(&explicit));
+        for field in [
+            "max_neighbors",
+            "max_candidates",
+            "max_candidates_per_neighbor",
+        ] {
+            let changed = Config::parse(&format!("{base}[limits]\n{field} = 0\n")).unwrap();
+            assert!(!original.reload_identity_matches(&changed));
+            assert!(Config::parse(&format!("{base}[limits]\n{field} = -1\n")).is_err());
+        }
+        let partial = Config::parse(&format!(
+            "{base}[limits]\nmax_candidates_per_neighbor = 20\n"
+        ))
+        .unwrap();
+        assert_eq!(partial.limits.effective().max_candidates_per_neighbor, 20);
+        assert_eq!(partial.limits.effective().max_candidates, 16384);
+        assert!(Config::parse(&format!("{base}[limits]\nmax_routes = 20\n")).is_err());
+    }
 
     #[test]
     fn strict_config_supports_policy_views() {

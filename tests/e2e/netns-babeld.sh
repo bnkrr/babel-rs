@@ -143,13 +143,15 @@ while ! ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto
   sleep 1
 done
 
-# SIGTERM is graceful: owned routes are removed. Restart preserves Router-ID and
-# advances the persisted sequence number before advertising again.
+# SIGTERM is graceful: owned routes are removed and the final sequence number
+# is checkpointed. A running daemon keeps only the Router-ID on disk.
 router_before=$(awk -F'"' '/^router_id/ { print $2 }' "${runtime}/rs.router-id")
-seq_before=$(awk '/^sequence_number/ { print $3 }' "${runtime}/rs.router-id")
+test -z "$(awk '/^sequence_number/ { print $3 }' "${runtime}/rs.router-id")" || { echo "running daemon retained a sequence checkpoint" >&2; exit 1; }
 kill -TERM "${pid_rs}"
 wait "${pid_rs}" || true
 pid_rs=
+seq_before=$(awk '/^sequence_number/ { print $3 }' "${runtime}/rs.router-id")
+test -n "${seq_before}" || { echo "graceful shutdown did not checkpoint its sequence number" >&2; exit 1; }
 attempt=0
 while ip -n "${ns_rs}" -6 route show table 20000 proto 203 2>/dev/null | grep -q .; do
   attempt=$((attempt + 1))
@@ -160,14 +162,22 @@ test -z "$(ip -n "${ns_rs}" -6 -details rule show | grep 'proto 203' || true)"
 ip netns exec "${ns_rs}" env RUST_LOG=debug "${daemon}" --config "${runtime}/rs.toml" >"${runtime}/rs.log" 2>&1 &
 pid_rs=$!
 attempt=0
-while ! ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null | grep -q .; do
+while :; do
+  rs_v6=$(ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null || true)
+  c_v6=$(ip -n "${ns_c}" -6 route show table 201 exact 2001:db8:100::/64 2>/dev/null || true)
+  test -z "${rs_v6}" || test -z "${c_v6}" || break
   attempt=$((attempt + 1))
   test "${attempt}" -lt 45 || { echo "restart did not converge" >&2; exit 1; }
   sleep 1
 done
 router_after=$(awk -F'"' '/^router_id/ { print $2 }' "${runtime}/rs.router-id")
-seq_after=$(awk '/^sequence_number/ { print $3 }' "${runtime}/rs.router-id")
 test "${router_before}" = "${router_after}" || { echo "Router-ID changed across restart" >&2; exit 1; }
+test -z "$(awk '/^sequence_number/ { print $3 }' "${runtime}/rs.router-id")" || { echo "restart did not consume the sequence checkpoint" >&2; exit 1; }
+kill -TERM "${pid_rs}"
+wait "${pid_rs}" || true
+pid_rs=
+seq_after=$(awk '/^sequence_number/ { print $3 }' "${runtime}/rs.router-id")
+test -n "${seq_after}" || { echo "second shutdown did not checkpoint its sequence number" >&2; exit 1; }
 test "${seq_before}" != "${seq_after}" || { echo "sequence number did not advance across restart" >&2; exit 1; }
 
 echo "babel-rs <-> babeld exchange/retract/restart E2E: PASS"

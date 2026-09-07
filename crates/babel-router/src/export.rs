@@ -32,6 +32,14 @@ pub trait RouteExporter: Send + Sync + 'static {
     }
 }
 
+/// Best-effort checkpoint of the local sequence number on orderly shutdown.
+///
+/// The router calls this once after withdrawing its origins, never for runtime
+/// sequence changes. Errors are logged and a pending future is dropped after
+/// one second so route cleanup can continue. Implementations must yield while
+/// waiting for I/O; dropping this future does not stop detached tasks or an
+/// already running blocking operation. Applications own their runtime shutdown
+/// policy for any such work.
 #[async_trait]
 pub trait SequenceStore: Send + Sync + 'static {
     async fn persist(

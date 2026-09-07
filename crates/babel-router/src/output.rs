@@ -1,4 +1,8 @@
 use std::net::Ipv6Addr;
+use std::sync::Arc;
+use tokio::sync::OwnedSemaphorePermit;
+
+use crate::output_queue::QueuedIntent;
 
 use babel_proto::{OutboundPacket, OutboundTlv, SendTiming, WireError, encode_packets};
 
@@ -15,6 +19,8 @@ pub(crate) struct ScheduledDatagram {
     pub destination: Ipv6Addr,
     pub bytes: Vec<u8>,
     pub deadline_ms: u64,
+    pub expires_ms: u64,
+    _reservations: Arc<Vec<OwnedSemaphorePermit>>,
 }
 
 struct PendingBatch {
@@ -22,12 +28,16 @@ struct PendingBatch {
     tlvs: Vec<OutboundTlv>,
     release_ms: u64,
     deadline_ms: u64,
+    expires_ms: u64,
+    reservations: Vec<OwnedSemaphorePermit>,
 }
 
 struct ReadyDatagram {
     destination: Ipv6Addr,
     bytes: Vec<u8>,
     deadline_ms: u64,
+    expires_ms: u64,
+    reservations: Arc<Vec<OwnedSemaphorePermit>>,
 }
 
 /// Per-interface Babel output scheduler.
@@ -58,7 +68,12 @@ impl OutputScheduler {
         }
     }
 
-    pub(crate) fn enqueue(&mut self, intent: OutboundIntent, now_ms: u64) {
+    pub(crate) fn enqueue(&mut self, queued: QueuedIntent, now_ms: u64) {
+        let QueuedIntent {
+            intent,
+            expires_ms,
+            reservation,
+        } = queued;
         let remaining = intent.timing.deadline_ms.saturating_sub(now_ms);
         let latest_delay = remaining
             .saturating_sub(DEADLINE_MARGIN_MS.min(remaining))
@@ -71,6 +86,8 @@ impl OutputScheduler {
         {
             batch.release_ms = batch.release_ms.min(release_ms);
             batch.deadline_ms = batch.deadline_ms.min(intent.timing.deadline_ms);
+            batch.expires_ms = batch.expires_ms.min(expires_ms);
+            batch.reservations.push(reservation);
             batch.tlvs.extend(intent.packet.tlvs);
             return;
         }
@@ -79,7 +96,26 @@ impl OutputScheduler {
             tlvs: intent.packet.tlvs,
             release_ms,
             deadline_ms: intent.timing.deadline_ms,
+            expires_ms,
+            reservations: vec![reservation],
         });
+    }
+
+    /// Purge even when MTU lookup or socket transmission is failing. Fresh
+    /// work merged with an older batch never extends the older batch's life.
+    pub(crate) fn expire(&mut self, now_ms: u64) -> (u64, u64) {
+        let mut batches = 0;
+        self.pending.retain(|batch| {
+            if now_ms >= batch.expires_ms {
+                batches += batch.reservations.len() as u64;
+                false
+            } else {
+                true
+            }
+        });
+        let before = self.ready.len();
+        self.ready.retain(|datagram| now_ms < datagram.expires_ms);
+        (batches, (before - self.ready.len()) as u64)
     }
 
     pub(crate) fn next_wake_ms(&self) -> Option<u64> {
@@ -127,6 +163,8 @@ impl OutputScheduler {
             destination: datagram.destination,
             bytes: datagram.bytes,
             deadline_ms: datagram.deadline_ms,
+            expires_ms: datagram.expires_ms,
+            _reservations: datagram.reservations,
         }))
     }
 
@@ -141,11 +179,14 @@ impl OutputScheduler {
             }
             let batch = self.pending.remove(index);
             let packets = encode_packets(&OutboundPacket { tlvs: batch.tlvs }, payload_budget)?;
+            let reservations = Arc::new(batch.reservations);
             self.ready
                 .extend(packets.into_iter().map(|bytes| ReadyDatagram {
                     destination: batch.destination,
                     bytes,
                     deadline_ms: batch.deadline_ms,
+                    expires_ms: batch.expires_ms,
+                    reservations: Arc::clone(&reservations),
                 }));
         }
         Ok(())
@@ -186,14 +227,25 @@ mod tests {
 
     use super::*;
 
-    fn intent(destination: Ipv6Addr, nonce: u16, timing: SendTiming) -> OutboundIntent {
-        OutboundIntent {
+    fn queued(intent: OutboundIntent) -> QueuedIntent {
+        let (queue, mut receive) = crate::output_queue::OutputQueue::new(
+            256,
+            crate::output_queue::OUTPUT_BUDGET_BYTES,
+            Arc::new(crate::output_queue::OutputCounters::default()),
+            Arc::new(tokio::time::Instant::now()),
+        );
+        queue.submit(intent);
+        receive.try_recv().unwrap()
+    }
+
+    fn intent(destination: Ipv6Addr, nonce: u16, timing: SendTiming) -> QueuedIntent {
+        queued(OutboundIntent {
             destination,
             packet: OutboundPacket {
                 tlvs: vec![OutboundTlv::Ack { nonce }],
             },
             timing,
-        }
+        })
     }
 
     #[test]
@@ -259,14 +311,14 @@ mod tests {
             tlvs: (0..20).map(|nonce| OutboundTlv::Ack { nonce }).collect(),
         };
         scheduler.enqueue(
-            OutboundIntent {
+            queued(OutboundIntent {
                 destination: Ipv6Addr::LOCALHOST,
                 packet,
                 timing: SendTiming {
                     deadline_ms: 103,
                     max_jitter_ms: 0,
                 },
-            },
+            }),
             now,
         );
         let mut sent = Vec::new();
@@ -279,5 +331,158 @@ mod tests {
         assert!(sent.len() > 1);
         assert_eq!(sent[0], 100);
         assert_eq!(sent[1], 103, "deadline overrides the 5ms pacing gap");
+    }
+
+    #[test]
+    fn budget_covers_channel_pending_ready_and_in_flight_until_release() {
+        use crate::output_queue::{OutputCounters, OutputQueue, packet_charge};
+        let packet = OutboundPacket {
+            tlvs: (0..20).map(|nonce| OutboundTlv::Ack { nonce }).collect(),
+        };
+        let charge = packet_charge(&packet);
+        let (queue, mut receive) = OutputQueue::new(
+            2,
+            charge,
+            Arc::new(OutputCounters::default()),
+            Arc::new(tokio::time::Instant::now()),
+        );
+        let make = || OutboundIntent {
+            destination: Ipv6Addr::LOCALHOST,
+            packet: packet.clone(),
+            timing: SendTiming::immediate(0),
+        };
+        queue.submit(make());
+        assert_eq!(queue.status().used_bytes, charge);
+        let mut scheduler = OutputScheduler::new(1);
+        scheduler.enqueue(receive.try_recv().unwrap(), 0);
+        // The channel is empty, but the scheduler still owns the entire budget.
+        queue.submit(make());
+        assert_eq!(queue.status().rejected_batches, 1);
+        let in_flight = scheduler.pop_due(0, 24).unwrap().unwrap();
+        assert_eq!(queue.status().used_bytes, charge);
+        assert!(scheduler.expire(1_000).1 > 0);
+        // Even after pending/ready data is purged, an in-flight packet holds it.
+        assert_eq!(queue.status().used_bytes, charge);
+        drop(in_flight);
+        assert_eq!(queue.status().used_bytes, 0);
+        queue.submit(make());
+        assert!(receive.try_recv().is_ok());
+        assert_eq!(queue.status().used_bytes, 0);
+    }
+
+    #[test]
+    fn expiry_does_not_slide_when_new_work_merges_and_encode_error_releases_budget() {
+        use crate::output_queue::{OUTPUT_BUDGET_BYTES, OutputCounters, OutputQueue};
+        let (queue, mut receive) = OutputQueue::new(
+            2,
+            OUTPUT_BUDGET_BYTES,
+            Arc::new(OutputCounters::default()),
+            Arc::new(tokio::time::Instant::now()),
+        );
+        let mut scheduler = OutputScheduler::new(1);
+        for now in [0, 900] {
+            queue.submit(OutboundIntent {
+                destination: Ipv6Addr::LOCALHOST,
+                packet: OutboundPacket {
+                    tlvs: vec![OutboundTlv::Ack { nonce: 1 }],
+                },
+                timing: SendTiming::immediate(now),
+            });
+            scheduler.enqueue(receive.try_recv().unwrap(), now);
+        }
+        assert_eq!(scheduler.expire(1_000), (2, 0));
+        assert_eq!(queue.status().used_bytes, 0);
+        queue.submit(OutboundIntent {
+            destination: Ipv6Addr::LOCALHOST,
+            packet: OutboundPacket {
+                tlvs: vec![OutboundTlv::Ack { nonce: 2 }],
+            },
+            timing: SendTiming::immediate(1_000),
+        });
+        scheduler.enqueue(receive.try_recv().unwrap(), 1_000);
+        assert!(scheduler.pop_due(1_000, 1).is_err());
+        assert_eq!(queue.status().used_bytes, 0);
+    }
+
+    #[test]
+    fn default_budget_delivers_a_complete_default_size_rib_at_minimum_mtu() {
+        use crate::output_queue::{OUTPUT_BUDGET_BYTES, OutputCounters, OutputQueue};
+        use babel_proto::{
+            DecodeContext, OutboundUpdate, ResourceLimits, RouteKey, RouterId, Tlv, decode_packet,
+        };
+        let count = ResourceLimits::default().max_candidates;
+        let router_id = RouterId::new([1; 8]).unwrap();
+        let packet = OutboundPacket {
+            tlvs: (0..count)
+                .map(|i| {
+                    let destination = ipnet::IpNet::new(
+                        Ipv6Addr::from((0xfd00u128 << 112) | i as u128).into(),
+                        128,
+                    )
+                    .unwrap();
+                    OutboundTlv::Update(OutboundUpdate {
+                        key: Some(
+                            RouteKey::new(
+                                destination,
+                                (i % 2 == 0).then(|| "fdff::/64".parse().unwrap()),
+                            )
+                            .unwrap(),
+                        ),
+                        router_id: Some(router_id),
+                        next_hop: None,
+                        interval_cs: 1600,
+                        seqno: 1,
+                        metric: 96,
+                        v4_via_v6: false,
+                        sub_tlvs: vec![],
+                    })
+                })
+                .collect(),
+        };
+        let expected: std::collections::HashSet<_> = packet
+            .tlvs
+            .iter()
+            .map(|tlv| match tlv {
+                OutboundTlv::Update(update) => update.key.unwrap(),
+                _ => unreachable!(),
+            })
+            .collect();
+        let (queue, mut receive) = OutputQueue::new(
+            256,
+            OUTPUT_BUDGET_BYTES,
+            Arc::new(OutputCounters::default()),
+            Arc::new(tokio::time::Instant::now()),
+        );
+        let mut scheduler = OutputScheduler::new(1);
+        let mut seen = std::collections::HashSet::new();
+        // Repeat to detect a budget that only allows an initial partial dump.
+        for _ in 0..2 {
+            queue.submit(OutboundIntent {
+                destination: Ipv6Addr::LOCALHOST,
+                packet: packet.clone(),
+                timing: SendTiming::immediate(0),
+            });
+            scheduler.enqueue(receive.try_recv().expect("full RIB fits budget"), 0);
+            seen.clear();
+            while let Some(datagram) = scheduler.pop_due(0, 1232).unwrap() {
+                assert!(datagram.bytes.len() <= 1232);
+                let decoded = decode_packet(
+                    &datagram.bytes,
+                    DecodeContext {
+                        source: "fe80::1".parse().unwrap(),
+                    },
+                )
+                .unwrap();
+                for tlv in decoded.tlvs {
+                    if let Tlv::Update(update) = tlv {
+                        assert_eq!(update.router_id, Some(router_id));
+                        seen.insert(update.key.unwrap());
+                    }
+                }
+            }
+            assert_eq!(seen, expected);
+            assert_eq!(queue.status().used_bytes, 0);
+        }
+        assert_eq!(queue.status().rejected_batches, 0);
     }
 }

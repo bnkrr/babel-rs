@@ -1,16 +1,17 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::time::Instant;
 
 use babel_proto::{
     Action, AdditiveMetric, DecodeContext, Engine, EngineConfig, Event, InterfacePolicy,
-    MetricAlgebra, MetricProfile, NeighborStatus, RouteKey, RouteSelectionConfig, RouterId,
-    WiredMetric, decode_packet, stamp_hello_timestamps,
+    MetricAlgebra, MetricProfile, NeighborStatus, ResourceLimits, ResourceStatus, RouteKey,
+    RouteSelectionConfig, RouterId, WiredMetric, decode_packet, stamp_hello_timestamps,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
@@ -18,6 +19,10 @@ use crate::export::{
     MemoryExporter, NoopSequenceStore, RouteExporter, RouteSnapshot, SequenceStore,
 };
 use crate::output::{OutboundIntent, OutputScheduler};
+use crate::output_queue::{
+    OUTPUT_BUDGET_BYTES, OUTPUT_QUEUE_CAPACITY, OutputCounters, OutputQueue, OutputStatus,
+    QueuedIntent, SEND_TIMEOUT_MS,
+};
 use crate::transport::{InterfaceSocket, payload_budget_for_mtu};
 
 #[derive(Debug, Error)]
@@ -41,6 +46,7 @@ pub enum RouterError {
     Stopped,
     #[error("router task failed: {0}")]
     Task(String),
+    /// Retained for compatibility; shutdown checkpoint failures are now logged.
     #[error("persist Babel sequence number: {0}")]
     SequenceStore(String),
 }
@@ -56,10 +62,14 @@ pub struct RouterInterfaceStatus {
     pub hello_interval_ms: u64,
     pub update_interval_ms: u64,
     pub split_horizon: bool,
+    pub output: OutputStatus,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RouterStatus {
+    /// Current in-memory sequence number for locally originated routes.
+    pub sequence_number: u16,
+    pub resources: ResourceStatus,
     pub metric: String,
     pub interfaces: Vec<String>,
     pub interface_details: Vec<RouterInterfaceStatus>,
@@ -97,6 +107,7 @@ enum Command {
 
 enum Received {
     Packet {
+        _permit: OwnedSemaphorePermit,
         interface: String,
         index: u32,
         source: IpAddr,
@@ -115,7 +126,7 @@ struct Runtime {
     interfaces: Vec<(String, Option<InterfacePolicy>)>,
     origins: Vec<(RouteKey, u16)>,
     sockets: HashMap<String, Arc<InterfaceSocket>>,
-    outbound: HashMap<String, mpsc::Sender<OutboundIntent>>,
+    outbound: HashMap<String, OutputQueue>,
     output_counters: Arc<OutputCounters>,
     interface_stops: HashMap<String, watch::Sender<bool>>,
     exporter: Arc<dyn RouteExporter>,
@@ -128,18 +139,18 @@ struct Runtime {
     metric: Arc<dyn MetricProfile>,
     metric_algebra: Arc<dyn MetricAlgebra>,
     route_selection: RouteSelectionConfig,
+    limits: ResourceLimits,
     sequence_number: u16,
     sequence_store: Arc<dyn SequenceStore>,
     started: Arc<Instant>,
 }
 
-#[derive(Default)]
-struct OutputCounters {
-    dropped: AtomicU64,
-    missed_deadlines: AtomicU64,
-}
+// Bound each interface's share of the common input queue so a route burst
+// cannot put hundreds of expensive updates ahead of another link's Hello.
+const RECEIVED_PER_INTERFACE: usize = 4;
 
-const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+// A checkpoint improves orderly restart recovery but must not prevent shutdown.
+const SEQUENCE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn elapsed_ms(started: &Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
@@ -289,6 +300,7 @@ pub struct BabelRouterBuilder {
     metric: Option<Arc<dyn MetricProfile>>,
     metric_algebra: Option<Arc<dyn MetricAlgebra>>,
     route_selection: Option<RouteSelectionConfig>,
+    limits: ResourceLimits,
     sequence_number: u16,
     sequence_store: Option<Arc<dyn SequenceStore>>,
 }
@@ -334,10 +346,19 @@ impl BabelRouterBuilder {
         self.route_selection = Some(value);
         self
     }
+    /// Bound admission of learned neighbors and candidates. Existing entries
+    /// continue to update and expire; released capacity is immediately reusable.
+    pub fn limits(mut self, value: ResourceLimits) -> Self {
+        self.limits = value;
+        self
+    }
     pub fn sequence_number(mut self, value: u16) -> Self {
         self.sequence_number = value;
         self
     }
+    /// Save the final sequence number once during orderly shutdown. Runtime
+    /// changes remain in memory. Checkpoint errors/timeouts are logged, and the
+    /// router continues cleanup; see [`SequenceStore`] for cancellation details.
     pub fn sequence_store(mut self, value: impl SequenceStore) -> Self {
         self.sequence_store = Some(Arc::new(value));
         self
@@ -412,6 +433,7 @@ impl BabelRouterBuilder {
                 .metric_algebra
                 .unwrap_or_else(|| Arc::new(AdditiveMetric)),
             route_selection: self.route_selection.unwrap_or_default(),
+            limits: self.limits,
             sequence_number: self.sequence_number,
             sequence_store: self
                 .sequence_store
@@ -446,7 +468,13 @@ fn spawn_receiver(
 ) {
     tokio::spawn(async move {
         let mut buffer = vec![0u8; 65535];
+        let slots = Arc::new(Semaphore::new(RECEIVED_PER_INTERFACE));
         loop {
+            let permit = tokio::select! {
+                _ = shutdown.changed() => return,
+                _ = stop.changed() => return,
+                permit = Arc::clone(&slots).acquire_owned() => permit.expect("receiver owns semaphore"),
+            };
             tokio::select! {
                 changed = shutdown.changed() => if changed.is_err() || *shutdown.borrow() { return; },
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
@@ -454,7 +482,7 @@ fn spawn_receiver(
                     Ok((length, SocketAddr::V6(source)))
                         if valid_babel_source(&source, &socket.local_addresses) => {
                         let now_ms = elapsed_ms(&started);
-                        let item = Received::Packet { interface: socket.name.clone(), index: socket.index, source: IpAddr::V6(*source.ip()), bytes: buffer[..length].to_vec(), now_ms };
+                        let item = Received::Packet { _permit: permit, interface: socket.name.clone(), index: socket.index, source: IpAddr::V6(*source.ip()), bytes: buffer[..length].to_vec(), now_ms };
                         if received.send(item).await.is_err() { return; }
                     }
                     Ok(_) => {}
@@ -479,78 +507,156 @@ fn valid_babel_source(source: &std::net::SocketAddrV6, local: &[Ipv6Addr]) -> bo
         && !local.contains(source.ip())
 }
 
+#[async_trait::async_trait]
+trait OutputTransport: Send + Sync + 'static {
+    fn payload_budget(&self) -> std::io::Result<usize>;
+    async fn send(&self, bytes: &[u8], destination: Ipv6Addr) -> std::io::Result<usize>;
+}
+
+#[async_trait::async_trait]
+impl OutputTransport for InterfaceSocket {
+    fn payload_budget(&self) -> std::io::Result<usize> {
+        InterfaceSocket::payload_budget(self)
+    }
+
+    async fn send(&self, bytes: &[u8], destination: Ipv6Addr) -> std::io::Result<usize> {
+        self.socket
+            .send_to(bytes, self.destination(destination))
+            .await
+    }
+}
+
 fn spawn_sender(
     socket: Arc<InterfaceSocket>,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
     started: Arc<Instant>,
     counters: Arc<OutputCounters>,
-) -> mpsc::Sender<OutboundIntent> {
-    let (send, mut receive) = mpsc::channel::<OutboundIntent>(OUTBOUND_QUEUE_CAPACITY);
-    tokio::spawn(async move {
-        let mut scheduler = OutputScheduler::new(output_seed(&socket));
-        loop {
-            let now_ms = elapsed_ms(&started);
-            if scheduler.next_wake_ms().is_some_and(|wake| wake <= now_ms) {
-                let payload_budget = match socket.payload_budget() {
-                    Ok(value) => value,
-                    Err(error) => {
-                        warn!(interface = %socket.name, %error, "cannot determine safe Babel packet budget");
+) -> OutputQueue {
+    let (queue, receive) = OutputQueue::new(
+        OUTPUT_QUEUE_CAPACITY,
+        OUTPUT_BUDGET_BYTES,
+        counters,
+        Arc::clone(&started),
+    );
+    tokio::spawn(run_sender(
+        socket.clone(),
+        stop,
+        started,
+        queue.clone(),
+        receive,
+        output_seed(&socket),
+    ));
+    queue
+}
+
+async fn run_sender(
+    transport: Arc<impl OutputTransport>,
+    mut stop: watch::Receiver<bool>,
+    started: Arc<Instant>,
+    queue: OutputQueue,
+    mut receive: mpsc::Receiver<QueuedIntent>,
+    seed: u64,
+) {
+    let mut scheduler = OutputScheduler::new(seed);
+    loop {
+        if *stop.borrow() {
+            return;
+        }
+        let now_ms = elapsed_ms(&started);
+        let (expired_batches, expired_datagrams) = scheduler.expire(now_ms);
+        queue.expired_batches(expired_batches);
+        for _ in 0..expired_datagrams {
+            queue.drop_datagram(true, false);
+        }
+        if scheduler.next_wake_ms().is_some_and(|wake| wake <= now_ms) {
+            let payload_budget = match transport.payload_budget() {
+                Ok(value) => value,
+                Err(_) => {
+                    // Retry locally, but continue expiry and observe interface removal.
+                    tokio::select! {
+                        _ = stop.changed() => return,
+                        _ = tokio::time::sleep(Duration::from_millis(SEND_TIMEOUT_MS)) => {}
+                    }
+                    continue;
+                }
+            };
+            match scheduler.pop_due(now_ms, payload_budget) {
+                Ok(Some(mut datagram)) => {
+                    let send_ms = elapsed_ms(&started);
+                    if send_ms >= datagram.expires_ms {
+                        queue.drop_datagram(true, false);
+                        continue;
+                    }
+                    if send_ms > datagram.deadline_ms {
+                        queue.missed_deadline();
+                    }
+                    if stamp_hello_timestamps(
+                        &mut datagram.bytes,
+                        send_ms.wrapping_mul(1_000) as u32,
+                    )
+                    .is_err()
+                    {
+                        queue.drop_datagram(false, false);
+                        continue;
+                    }
+                    let wait_ms = SEND_TIMEOUT_MS.min(datagram.expires_ms - send_ms);
+                    let send_deadline =
+                        *started + Duration::from_millis(send_ms.saturating_add(wait_ms));
+                    let result = {
+                        let send = transport.send(&datagram.bytes, datagram.destination);
+                        tokio::pin!(send);
+                        // Check the clock before every socket poll as well as
+                        // arming a timer. A ready socket may otherwise run
+                        // before the timer driver notices a runtime stall.
+                        let fresh_send = std::future::poll_fn(|cx| {
+                            if Instant::now() >= send_deadline {
+                                std::task::Poll::Ready(None)
+                            } else {
+                                send.as_mut().poll(cx).map(Some)
+                            }
+                        });
                         tokio::select! {
-                            changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
-                            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                            biased;
+                            _ = stop.changed() => return,
+                            _ = tokio::time::sleep_until(send_deadline) => None,
+                            result = fresh_send => result,
                         }
-                        continue;
+                    };
+                    match result {
+                        Some(Ok(_)) => {}
+                        Some(Err(_)) => queue.drop_datagram(false, false),
+                        None => {
+                            queue.drop_datagram(elapsed_ms(&started) >= datagram.expires_ms, true)
+                        }
                     }
-                };
-                match scheduler.pop_due(now_ms, payload_budget) {
-                    Ok(Some(mut datagram)) => {
-                        let send_ms = elapsed_ms(&started);
-                        if send_ms > datagram.deadline_ms {
-                            counters.missed_deadlines.fetch_add(1, Ordering::Relaxed);
-                            warn!(
-                                interface = %socket.name,
-                                late_by_ms = send_ms.saturating_sub(datagram.deadline_ms),
-                                "Babel output missed its deadline"
-                            );
-                        }
-                        if let Err(error) = stamp_hello_timestamps(
-                            &mut datagram.bytes,
-                            send_ms.wrapping_mul(1_000) as u32,
-                        ) {
-                            counters.dropped.fetch_add(1, Ordering::Relaxed);
-                            warn!(interface = %socket.name, %error, "Babel timestamp patch failed");
-                            continue;
-                        }
-                        if let Err(error) = socket
-                            .socket
-                            .send_to(&datagram.bytes, socket.destination(datagram.destination))
-                            .await
-                        {
-                            counters.dropped.fetch_add(1, Ordering::Relaxed);
-                            warn!(interface = %socket.name, %error, "Babel send failed");
-                        }
-                        continue;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        counters.dropped.fetch_add(1, Ordering::Relaxed);
-                        warn!(interface = %socket.name, %error, "Babel packet encode failed");
-                        continue;
-                    }
+                    // Keep the reservation alive until the socket operation ends.
+                    drop(datagram);
+                    // A ready full-table dump must not monopolise a runtime worker.
+                    tokio::task::yield_now().await;
+                    continue;
                 }
-            }
-            let wake_ms = scheduler.next_wake_ms();
-            tokio::select! {
-                changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
-                item = receive.recv() => {
-                    let Some(item) = item else { return; };
-                    scheduler.enqueue(item, elapsed_ms(&started));
+                Ok(None) => {}
+                Err(_) => {
+                    queue.drop_datagram(false, false);
+                    continue;
                 }
-                _ = sleep_until_ms(&started, wake_ms), if wake_ms.is_some() => {}
             }
         }
-    });
-    send
+        let wake_ms = scheduler.next_wake_ms();
+        tokio::select! {
+            _ = stop.changed() => return,
+            item = receive.recv() => {
+                let Some(item) = item else { return; };
+                let now_ms = elapsed_ms(&started);
+                if now_ms >= item.expires_ms {
+                    queue.expired_batches(1);
+                } else {
+                    scheduler.enqueue(item, now_ms);
+                }
+            }
+            _ = sleep_until_ms(&started, wake_ms), if wake_ms.is_some() => {}
+        }
+    }
 }
 
 async fn sleep_until_ms(started: &Instant, wake_ms: Option<u64>) {
@@ -614,6 +720,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         metric,
         metric_algebra,
         route_selection,
+        limits,
         sequence_number,
         sequence_store,
         started,
@@ -626,6 +733,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         split_horizon: true,
     };
     let mut engine = Engine::new(EngineConfig {
+        limits,
         router_id,
         metric: Arc::clone(&metric),
         metric_algebra,
@@ -646,7 +754,6 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         apply_actions(
             &outbound,
             &export_updates,
-            &sequence_store,
             engine.handle(Event::InterfaceUpWithPolicy {
                 interface: interface.clone(),
                 local_addresses: sockets
@@ -658,26 +765,24 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 policy,
                 now_ms: now(),
             }),
-        )
-        .await?;
+        );
     }
-    let mut origin_keys = std::collections::HashSet::new();
     for (key, metric) in origins {
-        origin_keys.insert(key);
         apply_actions(
             &outbound,
             &export_updates,
-            &sequence_store,
             engine.handle(Event::Originate {
                 key,
                 metric,
                 now_ms: now(),
             }),
-        )
-        .await?;
+        );
     }
+    let mut last_rejections = (0, 0, 0);
+    let mut next_limit_log_ms = 0;
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     let mut status = RouterStatus {
+        sequence_number: engine.sequence_number(),
         metric: effective_metric_name(&interface_policies, &metric),
         interfaces: sorted_interface_names(&sockets),
         interface_details: interface_status(&sockets, &interface_policies, &default_policy),
@@ -692,33 +797,45 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 // them immediately during an orderly shutdown/restart.  Repeat
                 // the datagrams because UDP provides no delivery acknowledgement
                 // and the process cannot rely on a later periodic update.
-                let mut retractions = Vec::new();
-                for key in &origin_keys {
-                    let actions = engine.handle(Event::Withdraw { key: *key, now_ms: now() });
-                    retractions.extend(actions.iter().filter(|action| matches!(action, Action::Send { .. })).cloned());
-                    apply_actions(&outbound, &export_updates, &sequence_store, actions).await?;
-                }
+                let actions = engine.handle(Event::ReplaceOrigins {
+                    origins: BTreeMap::new(),
+                    now_ms: now(),
+                });
+                let retractions = actions.iter()
+                    .filter(|action| matches!(action, Action::Send { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                apply_actions(&outbound, &export_updates, actions);
                 for _ in 0..2 {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    apply_actions(&outbound, &export_updates, &sequence_store, retractions.clone()).await?;
+                    apply_actions(&outbound, &export_updates, retractions.clone());
                 }
                 let empty = RouteSnapshot {
                     generation: status.route_generation.wrapping_add(1),
                     routes: vec![],
                     unreachable: vec![],
                 };
+                checkpoint_sequence_number(&sequence_store, engine.sequence_number()).await;
                 if let Err(error) = exporter.shutdown(empty.clone()).await { warn!(%error, "final route export cleanup failed"); }
                 route_updates.send_replace(empty);
                 return Ok(());
             },
             _ = ticker.tick() => {
-                apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::Tick { now_ms: now() })).await?;
+                for (interface, queue) in &outbound { queue.log_losses(interface); }
+                let resources = engine.resource_status();
+                let rejections = (resources.rejected_neighbors, resources.rejected_candidates_global, resources.rejected_candidates_per_neighbor);
+                if rejections != last_rejections && now() >= next_limit_log_ms {
+                    warn!(rejected_neighbors = rejections.0, rejected_candidates_global = rejections.1, rejected_candidates_per_neighbor = rejections.2, "Babel admission limits rejected new state");
+                    last_rejections = rejections;
+                    next_limit_log_ms = now().saturating_add(30_000);
+                }
+                apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::Tick { now_ms: now() }));
                 status.neighbours = engine.neighbour_count();
                 status.neighbour_details = engine.neighbour_status(now());
                 update_output_status(&mut status, &output_counters);
             },
             Some(item) = received.recv() => match item {
-                Received::Packet { interface, index, source, bytes, now_ms } => {
+                Received::Packet { _permit, interface, index, source, bytes, now_ms } => {
                     if sockets
                         .get(&interface)
                         .is_none_or(|socket| socket.index != index)
@@ -727,7 +844,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     }
                     match decode_packet(&bytes, DecodeContext { source }) {
                         Ok(packet) => {
-                            apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms })).await?;
+                            apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms }));
                             status.neighbours = engine.neighbour_count();
                             status.neighbour_details = engine.neighbour_status(now());
                         },
@@ -744,7 +861,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                             let _ = stop.send(true);
                         }
                         interface_policies.remove(&interface);
-                        apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await?;
+                        apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() }));
                         status.interfaces = sorted_interface_names(&sockets);
                         status.metric = effective_metric_name(&interface_policies, &metric);
                         status.interface_details = interface_status(&sockets, &interface_policies, &default_policy);
@@ -755,31 +872,20 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
             },
             Some(command) = commands.recv() => match command {
                 Command::ReplaceOrigins(origins, reply) => {
-                    origin_keys = origins.keys().copied().collect();
-                    let result = apply_actions_with_status(
+                    apply_actions_with_status(
                         &outbound,
                         &export_updates,
-                        &sequence_store,
                         &route_updates,
                         &mut status,
                         engine.handle(Event::ReplaceOrigins { origins, now_ms: now() }),
-                    ).await;
-                    match result {
-                        Ok(()) => { let _ = reply.send(Ok(())); }
-                        Err(error) => {
-                            let message = error.to_string();
-                            let _ = reply.send(Err(RouterError::Task(message.clone())));
-                            return Err(RouterError::Task(message));
-                        }
-                    }
+                    );
+                    let _ = reply.send(Ok(()));
                 },
                 Command::Originate(key, metric) => {
-                    origin_keys.insert(key);
-                    apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::Originate { key, metric, now_ms: now() })).await?
+                    apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::Originate { key, metric, now_ms: now() }))
                 },
                 Command::Withdraw(key) => {
-                    origin_keys.remove(&key);
-                    apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() })).await?
+                    apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() }))
                 },
                 Command::AddInterface(interface, configured_policy, reply) => {
                     let result = if sockets.contains_key(&interface) {
@@ -806,7 +912,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                                     .flat_map(|socket| socket.local_addresses.iter().copied())
                                     .map(IpAddr::V6)
                                     .collect();
-                                apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceUpWithPolicy { interface, local_addresses, policy, now_ms: now() })).await?;
+                                apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::InterfaceUpWithPolicy { interface, local_addresses, policy, now_ms: now() }));
                                 status.interfaces = sorted_interface_names(&sockets);
                                 status.metric = effective_metric_name(&interface_policies, &metric);
                                 status.interface_details = interface_status(&sockets, &interface_policies, &default_policy);
@@ -822,8 +928,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                         apply_actions_with_status(
                             &outbound,
                             &export_updates,
-                            &sequence_store,
-                            &route_updates,
+                                            &route_updates,
                             &mut status,
                             engine.handle(Event::InterfacePolicyChanged {
                                 interface: interface.clone(),
@@ -831,7 +936,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                                 reset_metric,
                                 now_ms: now(),
                             }),
-                        ).await?;
+                        );
                         interface_policies.insert(interface, policy);
                         status.metric = effective_metric_name(&interface_policies, &metric);
                         status.interface_details = interface_status(&sockets, &interface_policies, &default_policy);
@@ -848,7 +953,7 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                             let _ = stop.send(true);
                         }
                         interface_policies.remove(&interface);
-                        apply_actions_with_status(&outbound, &export_updates, &sequence_store, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() })).await?;
+                        apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::InterfaceDown { interface, now_ms: now() }));
                         status.interfaces = sorted_interface_names(&sockets);
                         status.metric = effective_metric_name(&interface_policies, &metric);
                         status.interface_details = interface_status(&sockets, &interface_policies, &default_policy);
@@ -862,7 +967,14 @@ async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     status.neighbours = engine.neighbour_count();
                     status.neighbour_details = engine.neighbour_status(now());
                     status.interface_details = interface_status(&sockets, &interface_policies, &default_policy);
+                    for interface in &mut status.interface_details {
+                        if let Some(queue) = outbound.get(&interface.name) {
+                            interface.output = queue.status();
+                        }
+                    }
                     update_output_status(&mut status, &output_counters);
+                    status.resources = engine.resource_status();
+                    status.sequence_number = engine.sequence_number();
                     let _ = reply.send(status.clone());
                 }
             }
@@ -913,6 +1025,7 @@ fn interface_status(
                 hello_interval_ms: u64::from(policy.hello_interval_cs) * 10,
                 update_interval_ms: u64::from(policy.update_interval_cs) * 10,
                 split_horizon: policy.split_horizon,
+                output: OutputStatus::default(),
             }
         })
         .collect();
@@ -925,34 +1038,32 @@ fn update_output_status(status: &mut RouterStatus, counters: &OutputCounters) {
     status.missed_outbound_deadlines = counters.missed_deadlines.load(Ordering::Relaxed);
 }
 
-async fn apply_actions(
-    outbound: &HashMap<String, mpsc::Sender<OutboundIntent>>,
-    export_updates: &watch::Sender<RouteSnapshot>,
-    sequence_store: &Arc<dyn SequenceStore>,
-    actions: Vec<Action>,
-) -> Result<(), RouterError> {
-    let mut ignored = RouterStatus::default();
-    let (updates, _) = watch::channel(RouteSnapshot::default());
-    apply_actions_with_status(
-        outbound,
-        export_updates,
-        sequence_store,
-        &updates,
-        &mut ignored,
-        actions,
-    )
-    .await
+async fn checkpoint_sequence_number(store: &Arc<dyn SequenceStore>, sequence_number: u16) {
+    match tokio::time::timeout(SEQUENCE_CHECKPOINT_TIMEOUT, store.persist(sequence_number)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(%error, "final Babel sequence checkpoint failed"),
+        Err(_) => warn!("final Babel sequence checkpoint timed out"),
+    }
 }
 
-async fn apply_actions_with_status(
-    outbound: &HashMap<String, mpsc::Sender<OutboundIntent>>,
+fn apply_actions(
+    outbound: &HashMap<String, OutputQueue>,
     export_updates: &watch::Sender<RouteSnapshot>,
-    sequence_store: &Arc<dyn SequenceStore>,
+    actions: Vec<Action>,
+) {
+    let mut ignored = RouterStatus::default();
+    let (updates, _) = watch::channel(RouteSnapshot::default());
+    apply_actions_with_status(outbound, export_updates, &updates, &mut ignored, actions)
+}
+
+fn apply_actions_with_status(
+    outbound: &HashMap<String, OutputQueue>,
+    export_updates: &watch::Sender<RouteSnapshot>,
     route_updates: &watch::Sender<RouteSnapshot>,
     status: &mut RouterStatus,
     actions: Vec<Action>,
-) -> Result<(), RouterError> {
-    for action in actions {
+) {
+    for action in batch_send_actions(actions) {
         match action {
             Action::Send {
                 interface,
@@ -963,17 +1074,11 @@ async fn apply_actions_with_status(
                 let Some(sender) = outbound.get(&interface) else {
                     continue;
                 };
-                if sender
-                    .send(OutboundIntent {
-                        destination,
-                        packet,
-                        timing,
-                    })
-                    .await
-                    .is_err()
-                {
-                    warn!(%interface, "Babel output task stopped");
-                }
+                sender.submit(OutboundIntent {
+                    destination,
+                    packet,
+                    timing,
+                });
             }
             Action::Send { .. } => {}
             Action::RoutesChanged {
@@ -991,15 +1096,53 @@ async fn apply_actions_with_status(
                 route_updates.send_replace(snapshot.clone());
                 export_updates.send_replace(snapshot);
             }
-            Action::SequenceNumberChanged(value) => {
-                sequence_store
-                    .persist(value)
-                    .await
-                    .map_err(|error| RouterError::SequenceStore(error.to_string()))?;
-            }
+            Action::SequenceNumberChanged(value) => status.sequence_number = value,
         }
     }
-    Ok(())
+}
+
+/// Batch same-destination, same-timing Sends within one uninterrupted run.
+/// Preserve TLV order and sequence/snapshot action boundaries. This avoids waiting
+/// for one channel slot per prefix during large triggered announcements.
+fn batch_send_actions(actions: Vec<Action>) -> Vec<Action> {
+    let mut result: Vec<Action> = Vec::new();
+    let mut positions = HashMap::new();
+    for action in actions {
+        if let Action::Send {
+            interface,
+            destination,
+            packet,
+            timing,
+        } = action
+        {
+            let key = (
+                interface.clone(),
+                destination,
+                timing.deadline_ms,
+                timing.max_jitter_ms,
+            );
+            if let Some(&index) = positions.get(&key) {
+                if let Action::Send {
+                    packet: previous, ..
+                } = &mut result[index]
+                {
+                    previous.tlvs.extend(packet.tlvs);
+                }
+            } else {
+                positions.insert(key, result.len());
+                result.push(Action::Send {
+                    interface,
+                    destination,
+                    packet,
+                    timing,
+                });
+            }
+        } else {
+            positions.clear();
+            result.push(action);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1009,6 +1152,349 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    fn send_action(interface: &str, nonce: u16, timing: babel_proto::SendTiming) -> Action {
+        Action::Send {
+            interface: interface.into(),
+            destination: "ff02::1:6".parse().unwrap(),
+            packet: babel_proto::OutboundPacket {
+                tlvs: vec![babel_proto::OutboundTlv::Ack { nonce }],
+            },
+            timing,
+        }
+    }
+
+    #[derive(Default)]
+    struct TestTransport {
+        blocked: std::sync::atomic::AtomicBool,
+        missing_mtu: std::sync::atomic::AtomicBool,
+        attempts: AtomicU64,
+        sent: std::sync::Mutex<Vec<Vec<u8>>>,
+        wake: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl OutputTransport for TestTransport {
+        fn payload_budget(&self) -> std::io::Result<usize> {
+            if self.missing_mtu.load(Ordering::Relaxed) {
+                Err(std::io::Error::other("injected MTU failure"))
+            } else {
+                Ok(1232)
+            }
+        }
+
+        async fn send(&self, bytes: &[u8], _: Ipv6Addr) -> std::io::Result<usize> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            loop {
+                let wake = self.wake.notified();
+                if !self.blocked.load(Ordering::Relaxed) {
+                    break;
+                }
+                wake.await;
+            }
+            self.sent.lock().unwrap().push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+    }
+
+    fn queue_test_ack(queue: &OutputQueue, now: u64) {
+        queue.submit(OutboundIntent {
+            destination: Ipv6Addr::LOCALHOST,
+            packet: babel_proto::OutboundPacket {
+                tlvs: vec![babel_proto::OutboundTlv::Ack { nonce: 1 }],
+            },
+            timing: babel_proto::SendTiming::immediate(now),
+        });
+    }
+
+    async fn settle_tasks() {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_send_times_out_recovers_and_cancels_on_interface_removal() {
+        let started = Arc::new(Instant::now());
+        let (queue, receive) = OutputQueue::new(
+            2,
+            OUTPUT_BUDGET_BYTES,
+            Arc::new(OutputCounters::default()),
+            started.clone(),
+        );
+        let transport = Arc::new(TestTransport::default());
+        transport.blocked.store(true, Ordering::Relaxed);
+        let (stop, stop_rx) = watch::channel(false);
+        let task = tokio::spawn(run_sender(
+            transport.clone(),
+            stop_rx,
+            started.clone(),
+            queue.clone(),
+            receive,
+            1,
+        ));
+        queue_test_ack(&queue, 0);
+        settle_tasks().await;
+        assert_eq!(transport.attempts.load(Ordering::Relaxed), 1);
+        assert!(queue.status().used_bytes > 0);
+        // Simulate writability returning while the runtime is stalled. Both
+        // the send and its timer will be ready at the next poll: timeout wins.
+        transport.blocked.store(false, Ordering::Relaxed);
+        transport.wake.notify_waiters();
+        tokio::time::advance(Duration::from_millis(SEND_TIMEOUT_MS + 1)).await;
+        settle_tasks().await;
+        assert!(transport.sent.lock().unwrap().is_empty());
+        assert_eq!(queue.status().send_timeouts, 1);
+        assert_eq!(queue.status().used_bytes, 0);
+        transport.blocked.store(false, Ordering::Relaxed);
+        queue_test_ack(&queue, elapsed_ms(&started));
+        settle_tasks().await;
+        assert_eq!(transport.sent.lock().unwrap().len(), 1);
+        assert_eq!(queue.status().used_bytes, 0);
+        transport.blocked.store(true, Ordering::Relaxed);
+        queue_test_ack(&queue, elapsed_ms(&started));
+        settle_tasks().await;
+        assert!(queue.status().used_bytes > 0);
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_millis(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(queue.status().used_bytes, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_mtu_lookup_expires_pending_and_channel_work_then_recovers() {
+        let started = Arc::new(Instant::now());
+        let (queue, receive) = OutputQueue::new(
+            2,
+            OUTPUT_BUDGET_BYTES,
+            Arc::new(OutputCounters::default()),
+            started.clone(),
+        );
+        let transport = Arc::new(TestTransport::default());
+        transport.missing_mtu.store(true, Ordering::Relaxed);
+        let (stop, stop_rx) = watch::channel(false);
+        let task = tokio::spawn(run_sender(
+            transport.clone(),
+            stop_rx,
+            started.clone(),
+            queue.clone(),
+            receive,
+            1,
+        ));
+        queue_test_ack(&queue, 0);
+        settle_tasks().await;
+        queue_test_ack(&queue, 0);
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        settle_tasks().await;
+        assert_eq!(queue.status().expired_batches, 2);
+        assert_eq!(queue.status().used_bytes, 0);
+        assert_eq!(transport.attempts.load(Ordering::Relaxed), 0);
+        transport.missing_mtu.store(false, Ordering::Relaxed);
+        queue_test_ack(&queue, elapsed_ms(&started));
+        settle_tasks().await;
+        assert_eq!(transport.sent.lock().unwrap().len(), 1);
+        stop.send(true).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
+        let started = Arc::new(Instant::now());
+        let totals = Arc::new(OutputCounters::default());
+        let (bad, bad_receive) = OutputQueue::new(2, 64 * 1024, totals.clone(), started.clone());
+        let (good, good_receive) =
+            OutputQueue::new(256, OUTPUT_BUDGET_BYTES, totals.clone(), started.clone());
+        let bad_transport = Arc::new(TestTransport::default());
+        bad_transport.blocked.store(true, Ordering::Relaxed);
+        let good_transport = Arc::new(TestTransport::default());
+        let (bad_stop, bad_stop_rx) = watch::channel(false);
+        let (good_stop, good_stop_rx) = watch::channel(false);
+        let bad_task = tokio::spawn(run_sender(
+            bad_transport.clone(),
+            bad_stop_rx,
+            started.clone(),
+            bad.clone(),
+            bad_receive,
+            1,
+        ));
+        let good_task = tokio::spawn(run_sender(
+            good_transport.clone(),
+            good_stop_rx,
+            started.clone(),
+            good.clone(),
+            good_receive,
+            2,
+        ));
+        let (commands_tx, commands) = mpsc::channel(64);
+        let (received_tx, received) = mpsc::channel(256);
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let (route_updates, routes) = watch::channel(RouteSnapshot::default());
+        let (export_updates, _) = watch::channel(RouteSnapshot::default());
+        let handle = RouterHandle {
+            commands: commands_tx,
+            shutdown: shutdown_tx,
+            routes,
+        };
+        // No privileged sockets: the real engine and command loop run against
+        // independently controlled sender transports, on one runtime thread.
+        let router = tokio::spawn(run_loop(Runtime {
+            router_id: RouterId::new([1; 8]).unwrap(),
+            interfaces: vec![("bad".into(), None), ("good".into(), None)],
+            origins: vec![],
+            sockets: HashMap::new(),
+            outbound: HashMap::from([("bad".into(), bad.clone()), ("good".into(), good.clone())]),
+            output_counters: totals,
+            interface_stops: HashMap::from([("bad".into(), bad_stop), ("good".into(), good_stop)]),
+            exporter: Arc::new(MemoryExporter::default()),
+            export_updates,
+            commands,
+            received,
+            received_tx,
+            shutdown,
+            route_updates,
+            metric: Arc::new(WiredMetric::default()),
+            metric_algebra: Arc::new(AdditiveMetric),
+            route_selection: RouteSelectionConfig::default(),
+            limits: ResourceLimits::default(),
+            sequence_number: 0,
+            sequence_store: Arc::new(NoopSequenceStore),
+            started: started.clone(),
+        }));
+        let mut keys = Vec::new();
+        for i in 0..32 {
+            let key = RouteKey::new(format!("fd00::{i:x}/128").parse().unwrap(), None).unwrap();
+            keys.push(key);
+            handle.originate(key, 0).await.unwrap();
+            settle_tasks().await;
+        }
+        tokio::time::timeout(Duration::from_millis(10), handle.status())
+            .await
+            .unwrap()
+            .unwrap();
+        // Advance beyond triggered jitter but remain inside the first send timeout.
+        tokio::time::advance(Duration::from_millis(99)).await;
+        settle_tasks().await;
+        assert!(bad.status().rejected_batches > 0);
+        assert!(bad.status().used_bytes <= bad.status().budget_bytes);
+        assert_eq!(bad.status().send_timeouts, 0);
+        assert!(!good_transport.sent.lock().unwrap().is_empty());
+        assert_eq!(good.status().rejected_batches, 0);
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            handle.replace_origins(vec![(keys[31], 0)]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(Duration::from_millis(10), handle.status())
+            .await
+            .unwrap()
+            .unwrap();
+        // Let old output expire, then recover the transport and wait for the
+        // ordinary protocol timer to advertise current state on both links.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle_tasks().await;
+        assert!(bad.status().expired_datagrams > 0);
+        assert!(bad.status().used_bytes <= bad.status().budget_bytes);
+        assert!(bad_transport.sent.lock().unwrap().is_empty());
+        assert!(good_transport.sent.lock().unwrap().iter().any(|bytes| {
+            decode_packet(
+                bytes,
+                DecodeContext {
+                    source: "fe80::1".parse().unwrap(),
+                },
+            )
+            .unwrap()
+            .tlvs
+            .into_iter()
+            .any(|tlv| {
+                matches!(tlv,
+                    babel_proto::Tlv::Update(update)
+                        if update.key == Some(keys[0]) && update.metric == babel_proto::INFINITY)
+            })
+        }));
+        bad_transport.blocked.store(false, Ordering::Relaxed);
+        bad_transport.wake.notify_waiters();
+        tokio::time::advance(Duration::from_secs(16)).await;
+        settle_tasks().await;
+        for transport in [&bad_transport, &good_transport] {
+            assert!(transport.sent.lock().unwrap().iter().any(|bytes| {
+                decode_packet(
+                    bytes,
+                    DecodeContext {
+                        source: "fe80::1".parse().unwrap(),
+                    },
+                )
+                .unwrap()
+                .tlvs
+                .into_iter()
+                .any(|tlv| {
+                    matches!(tlv,
+                        babel_proto::Tlv::Update(update)
+                            if update.key == Some(keys[31]) && update.metric == 0)
+                })
+            }));
+        }
+        handle.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), router)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        bad_task.await.unwrap();
+        good_task.await.unwrap();
+        assert_eq!(bad.status().used_bytes, 0);
+        assert_eq!(good.status().used_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn large_output_batch_progresses_with_one_available_channel_slot() {
+        let (send, mut receive) = OutputQueue::new(
+            1,
+            OUTPUT_BUDGET_BYTES,
+            Arc::new(OutputCounters::default()),
+            Arc::new(Instant::now()),
+        );
+        let outbound = HashMap::from([("eth0".into(), send)]);
+        let (exports, _) = watch::channel(RouteSnapshot::default());
+        let timing = babel_proto::SendTiming::urgent(100);
+        let actions = (0..1024).map(|n| send_action("eth0", n, timing)).collect();
+        // No consumer runs until apply_actions returns. Per-prefix sends would
+        // deadlock here after filling the single channel slot.
+        apply_actions(&outbound, &exports, actions);
+        let intent = receive.recv().await.unwrap().intent;
+        assert_eq!(intent.timing, timing);
+        assert_eq!(
+            intent.packet.tlvs,
+            (0..1024)
+                .map(|nonce| babel_proto::OutboundTlv::Ack { nonce })
+                .collect::<Vec<_>>()
+        );
+        assert!(receive.try_recv().is_err());
+    }
+
+    #[test]
+    fn output_batch_preserves_destinations_deadlines_and_sequence_order() {
+        let urgent = babel_proto::SendTiming::urgent(100);
+        let later = babel_proto::SendTiming::urgent(200);
+        let actions = batch_send_actions(vec![
+            send_action("eth0", 1, urgent),
+            send_action("eth1", 2, urgent),
+            send_action("eth0", 3, urgent),
+            Action::SequenceNumberChanged(4),
+            send_action("eth0", 5, urgent),
+            send_action("eth0", 6, later),
+        ]);
+        assert_eq!(actions.len(), 5);
+        assert!(matches!(&actions[0], Action::Send { packet, timing, .. }
+            if packet.tlvs == vec![babel_proto::OutboundTlv::Ack { nonce: 1 }, babel_proto::OutboundTlv::Ack { nonce: 3 }] && *timing == urgent));
+        assert!(matches!(&actions[1], Action::Send { interface, .. } if interface == "eth1"));
+        assert_eq!(actions[2], Action::SequenceNumberChanged(4));
+        assert_eq!(actions[3], send_action("eth0", 5, urgent));
+        assert_eq!(actions[4], send_action("eth0", 6, later));
+    }
 
     #[test]
     fn rfc8966_transport_accepts_only_link_local_port_6696_sources() {
@@ -1029,6 +1515,156 @@ mod tests {
             &"[fe80::1]:6696".parse().unwrap(),
             &local
         ));
+    }
+
+    #[derive(Clone, Copy)]
+    enum CheckpointOutcome {
+        Success,
+        Failure,
+        Pending,
+    }
+
+    #[derive(Clone)]
+    struct TestSequenceStore {
+        saved: Arc<std::sync::Mutex<Vec<u16>>>,
+        outcome: CheckpointOutcome,
+    }
+
+    impl TestSequenceStore {
+        fn new(outcome: CheckpointOutcome) -> Self {
+            Self {
+                saved: Arc::new(std::sync::Mutex::new(Vec::new())),
+                outcome,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SequenceStore for TestSequenceStore {
+        async fn persist(
+            &self,
+            sequence_number: u16,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.saved.lock().unwrap().push(sequence_number);
+            match self.outcome {
+                CheckpointOutcome::Success => Ok(()),
+                CheckpointOutcome::Failure => Err(std::io::Error::other("disk unavailable").into()),
+                CheckpointOutcome::Pending => std::future::pending().await,
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CleanupExporter {
+        cleanups: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl RouteExporter for CleanupExporter {
+        async fn reconcile(
+            &self,
+            _snapshot: RouteSnapshot,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn shutdown(
+            &self,
+            snapshot: RouteSnapshot,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            assert!(snapshot.routes.is_empty());
+            assert!(snapshot.unreachable.is_empty());
+            self.cleanups.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequence_changes_stay_in_memory_and_shutdown_checkpoints_all_origins_once() {
+        let store = TestSequenceStore::new(CheckpointOutcome::Success);
+        let exporter = CleanupExporter::default();
+        let keys: Vec<_> = (1..=3)
+            .map(|i| RouteKey::new(format!("fd00::{i}/128").parse().unwrap(), None).unwrap())
+            .collect();
+        let mut builder = BabelRouterBuilder::default()
+            .router_id(RouterId::new([1; 8]).unwrap())
+            .sequence_number(u16::MAX - 1)
+            .sequence_store(store.clone())
+            .exporter(exporter.clone());
+        for key in &keys {
+            builder = builder.originate(*key, 0);
+        }
+        let router = builder.build().await.unwrap();
+        let handle = router.handle();
+        assert_eq!(handle.status().await.unwrap().sequence_number, u16::MAX - 1);
+        assert!(store.saved.lock().unwrap().is_empty());
+
+        // Changing all existing origin metrics causes one sequence increment.
+        // A status round trip confirms the change has been applied without I/O.
+        handle
+            .replace_origins(keys.iter().map(|key| (*key, 1)).collect())
+            .await
+            .unwrap();
+        assert_eq!(handle.status().await.unwrap().sequence_number, u16::MAX);
+        assert!(store.saved.lock().unwrap().is_empty());
+        handle.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), router.run())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The final batch withdrawal increments once for all three origins,
+        // wraps normally, and only that final sequence is checkpointed.
+        assert_eq!(*store.saved.lock().unwrap(), vec![0]);
+        assert_eq!(exporter.cleanups.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_sequence_checkpoint_does_not_fail_or_skip_shutdown_cleanup() {
+        let store = TestSequenceStore::new(CheckpointOutcome::Failure);
+        let exporter = CleanupExporter::default();
+        let router = BabelRouterBuilder::default()
+            .router_id(RouterId::new([1; 8]).unwrap())
+            .sequence_number(17)
+            .sequence_store(store.clone())
+            .exporter(exporter.clone())
+            .build()
+            .await
+            .unwrap();
+        let handle = router.handle();
+        handle.status().await.unwrap();
+        handle.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), router.run())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*store.saved.lock().unwrap(), vec![17]);
+        assert_eq!(exporter.cleanups.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_sequence_checkpoint_times_out_and_continues_shutdown_cleanup() {
+        let store = TestSequenceStore::new(CheckpointOutcome::Pending);
+        let exporter = CleanupExporter::default();
+        let router = BabelRouterBuilder::default()
+            .router_id(RouterId::new([1; 8]).unwrap())
+            .sequence_number(23)
+            .sequence_store(store.clone())
+            .exporter(exporter.clone())
+            .build()
+            .await
+            .unwrap();
+        let handle = router.handle();
+        handle.status().await.unwrap();
+        let started = Instant::now();
+        handle.shutdown();
+        tokio::time::timeout(Duration::from_secs(2), router.run())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() >= SEQUENCE_CHECKPOINT_TIMEOUT);
+        assert_eq!(*store.saved.lock().unwrap(), vec![23]);
+        assert_eq!(exporter.cleanups.load(Ordering::SeqCst), 1);
     }
 
     #[derive(Clone, Default)]
