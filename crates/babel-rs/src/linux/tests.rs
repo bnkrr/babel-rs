@@ -109,3 +109,48 @@ fn unreachable_tombstone_is_projected_into_matching_views() {
     assert_eq!(routes.len(), 2);
     assert!(routes.iter().all(|route| route.selected.is_none()));
 }
+
+#[test]
+fn export_progress_preserves_attempted_revision_across_reload_and_failure() {
+    let mut state = ExportState {
+        export: Export {
+            protocol: 203,
+            device_only: false,
+            manage_rules: false,
+            views: vec![],
+        },
+        snapshot: RouteSnapshot::default(),
+        retain_rules: true,
+        stopping: false,
+        retired: vec![],
+        config_generation: 0,
+        last_success_revision: None,
+        last_success: None,
+        last_error: None,
+    };
+    let error = Err(LinuxError::Interface("missing0".into()));
+    state.record_reconcile(state.revision(), &error);
+    assert!(state.last_success_revision.is_none());
+    assert!(state.last_success.is_none());
+
+    state.snapshot.generation = 7;
+    let attempted = state.revision();
+    // Reload changes only export settings while netlink applies the old input.
+    // Equal RIB generations alone must not acknowledge this reload.
+    state.config_generation = 1;
+    state.record_reconcile(attempted, &Ok(()));
+    assert_eq!(state.last_success_revision, Some(attempted));
+    assert_ne!(state.last_success_revision, Some(state.revision()));
+    assert!(state.last_error.is_none());
+
+    state.snapshot.generation = 8;
+    let last_success = state.last_success;
+    state.record_reconcile(state.revision(), &error);
+    assert_eq!(state.last_success_revision, Some(attempted));
+    assert_eq!(state.last_success, last_success);
+    assert!(state.last_error.as_ref().unwrap().contains("missing0"));
+
+    state.record_reconcile(state.revision(), &Ok(()));
+    assert_eq!(state.last_success_revision, Some(state.revision()));
+    assert!(state.last_error.is_none());
+}

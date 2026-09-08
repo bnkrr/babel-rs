@@ -8,13 +8,14 @@ disposable Linux namespaces; the daemon uses production protocol defaults.
 ## Network CI
 
 Every push and pull request runs the seven interoperability/lifecycle/RTT/MTU
-regressions and four independent robustness jobs:
+regressions and five independent robustness jobs:
 
 | Job | Checks |
 | --- | --- |
 | `capacity` | Excess announcements remain bounded while healthy neighbors, forwarding and route changes continue; capacity is reusable |
 | `state-restart` | Orderly checkpoints, SIGKILL, missing state and a deliberately stale checkpoint recover through a three-node network |
 | `shutdown-recovery` | Real stalled netlink/fsync obey cleanup deadlines and startup removes only owned stale state |
+| `combined-failures` | Partition/merge with origin replacement, simultaneous primary-link loss and standby-relay crash, third-path recovery, and export revision/table migration |
 | `control-clients` | Idle, trickled-request and blocked-response clients expire; their slots can be reused without disrupting a healthy client |
 
 Each robustness job retains its stdout/stderr as a GitHub Actions artifact,
@@ -26,6 +27,40 @@ The state-restart job allows 20 minutes including build time because random
 restart sequences can fall behind surviving feasibility history. An individual
 unclean restart has a 240-second recovery deadline. Ordinary CI does not impose
 machine-specific performance thresholds on the capacity benchmark.
+
+## Combined failures
+
+`tests/e2e/netns-combined-failures.py` uses three paths between A and D:
+A--B--D (preferred), A--C--D (standby), and A--E--F--D (fallback). All daemons
+use production Hello/Update intervals; the standby links have a higher wired
+cost so path expectations are deterministic. Before faults begin, the fixture
+waits for the intended A/E/F paths to be selected and exported; merely having
+a route through some path is not sufficient.
+
+- Isolate D by cutting all three incident links. Require the old routes to
+  disappear from the other nodes' selected RIBs and active kernel routes.
+  Replace an origin on D while partitioned, then reconnect. The new origin must
+  propagate and forward; the withdrawn origin must not return.
+- SIGKILL standby relay C and cut primary A--B without a convergence wait
+  between faults. A must recover through E/F. Restart C with its existing
+  identity and restore A--B; the preferred path must return.
+
+Every recovery poll checks that A/E/F remain alive, their healthy adjacencies
+remain reachable, exports remain healthy, and A<->F forwarding still works.
+After recovery, the test traces selected next hops to reject a forwarding
+cycle, checks the expected path and real bidirectional pings. It allows
+transient A<->D loss while topology changes converge. Partition/merge phases
+have a 90-second budget; combined crash recovery has 240 seconds. These are
+regression deadlines, not an operational convergence SLA.
+
+The same fixture changes B's export table without changing its RIB. It checks
+both successful generation fields, unchanged-config reloads, actual table
+migration and restoration. Shutdown must remove owned routes. Logs include
+phase timings and failure diagnostics. Run with:
+
+```sh
+BABEL_RS_E2E_HOST=router-test-vm tests/e2e/run-on-linux-vm.sh combined-failures
+```
 
 ## Steady-state scenario
 
@@ -105,7 +140,7 @@ BABEL_RS_E2E_HOST=router-test-vm BABEL_RS_STEADY_SECONDS=120 \
   tests/e2e/run-on-linux-vm.sh steady-state
 ```
 
-`all` runs the eleven existing regression groups plus the 120-second
+`all` runs the twelve regression groups plus the 120-second
 steady-state smoke test. The explicitly selected `steady-state` mode defaults
 to one hour. `BABEL_RS_STEADY_SECONDS` accepts
 120..86400 seconds for VM runs. For direct runs, `--rss-growth-kib` adjusts the

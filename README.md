@@ -142,6 +142,8 @@ Selected-route generations are complete desired-state snapshots. A dedicated
 worker coalesces intermediate generations and the two-second safety pass
 reconciles the newest snapshot. Out-of-band deletion and stale owned state are
 repaired while routes and rules owned by other protocols remain untouched.
+Control status exposes the last successfully applied route and export-config
+generations, together with the last success age and export error.
 Export views project ordinary and source-specific routes into complete Linux
 tables. Standalone mode can manage one source rule per view; an external
 manager can set `manage_rules = false`. Nonzero source-view prefixes must not
@@ -231,7 +233,9 @@ response readers; `all` includes it. Deterministic source-history churn across
 multiple GC windows is part of `cargo test --workspace --all-targets`.
 
 Network CI also runs capacity isolation, restart recovery, shutdown deadlines
-and slow-client regressions as independent jobs. A separate steady-state job
+and slow-client regressions as independent jobs. Combined-failure coverage
+checks partition/merge and simultaneous primary-link loss with a standby-relay
+crash, while an unaffected path continues forwarding. A separate steady-state job
 checks a healthy three-node forwarding path while a fourth leaf repeatedly
 fails and recovers: two minutes on pushes/PRs and one hour weekly or on demand.
 Run it explicitly with `tests/e2e/run-on-linux-vm.sh steady-state`; see

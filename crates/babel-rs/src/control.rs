@@ -338,6 +338,9 @@ async fn status(shared: &Shared) -> Result<Value, (&'static str, String)> {
         "dropped_outbound_datagrams": router.dropped_outbound_datagrams,
         "missed_outbound_deadlines": router.missed_outbound_deadlines,
         "export": {
+            "config_generation": export.config_generation,
+            "last_success_route_generation": export.last_success_route_generation,
+            "last_success_config_generation": export.last_success_config_generation,
             "last_success_age_seconds": export.last_success_age.map(|value| value.as_secs()),
             "last_error": export.last_error,
         }

@@ -35,6 +35,37 @@ prior active configuration on rejection, and returns its committed generation
 and SHA-256 digest. `shutdown` acknowledges and flushes its response before
 initiating the same graceful path used by SIGINT and SIGTERM.
 
+`status.route_generation` identifies the currently selected RIB snapshot. The
+`status.export` object reports Linux export progress:
+
+| Field | Meaning |
+| --- | --- |
+| `config_generation` | Exporter-local configuration revision, initially 0; advances only when the effective `Export` configuration changes |
+| `last_success_route_generation` | RIB generation captured by the last fully successful reconciliation; null before the first success |
+| `last_success_config_generation` | Export configuration revision captured by that same reconciliation; null before the first success |
+| `last_success_age_seconds` | Time since that successful reconciliation; null before the first success |
+| `last_error` | Most recent reconciliation failure; cleared by a subsequent successful reconciliation |
+
+The two successful generations describe the same completed attempt. A config
+reload during netlink I/O cannot make an old attempt acknowledge the new
+configuration. Failures, including partial application, preserve both previous
+successful generations and the success timestamp. Periodic successful checks
+refresh the timestamp even if neither generation changes. Reloading identical
+export settings does not advance the export revision; changing unrelated daemon
+settings does not advance it either. This revision is separate from the
+top-level daemon `config_generation`.
+
+Compare the successful route generation with `status.route_generation` and the
+successful export config generation with `export.config_generation`, alongside
+`last_error` and success age. A lag indicates work has not yet been confirmed,
+not necessarily failure. These are diagnostic observations, not an atomic
+completion barrier: router and exporter status are sampled separately. Matching
+generations mean those inputs were successfully applied previously; they do not
+prove the kernel has remained unchanged or end-to-end forwarding is working.
+An external deletion is still repaired by periodic reconciliation. Counters
+restart with the daemon and are not persistent identifiers. `ready` indicates
+control availability, not successful export of the current RIB.
+
 `status.metric` identifies the common active metric profile, or is
 `per-interface` when attached interfaces differ.
 `status.shutdown_timeout_ms` reports the currently committed daemon-wide

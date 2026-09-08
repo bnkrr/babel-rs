@@ -38,12 +38,43 @@ struct ExportState {
     retain_rules: bool,
     stopping: bool,
     retired: Vec<Export>,
+    config_generation: u64,
+    last_success_revision: Option<ExportRevision>,
     last_success: Option<Instant>,
     last_error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExportRevision {
+    route_generation: u64,
+    config_generation: u64,
+}
+
+impl ExportState {
+    fn revision(&self) -> ExportRevision {
+        ExportRevision {
+            route_generation: self.snapshot.generation,
+            config_generation: self.config_generation,
+        }
+    }
+
+    fn record_reconcile(&mut self, revision: ExportRevision, result: &Result<(), LinuxError>) {
+        match result {
+            Ok(()) => {
+                self.last_success_revision = Some(revision);
+                self.last_success = Some(Instant::now());
+                self.last_error = None;
+            }
+            Err(error) => self.last_error = Some(error.to_string()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ExportHealth {
+    pub config_generation: u64,
+    pub last_success_route_generation: Option<u64>,
+    pub last_success_config_generation: Option<u64>,
     pub last_success_age: Option<Duration>,
     pub last_error: Option<String>,
 }
@@ -105,6 +136,8 @@ impl LinuxExporter {
                 retain_rules: true,
                 stopping: false,
                 retired: Vec::new(),
+                config_generation: 0,
+                last_success_revision: None,
                 last_success: None,
                 last_error: None,
             })),
@@ -123,7 +156,10 @@ impl LinuxExporter {
             if old_export.protocol != export.protocol && !state.retired.contains(&old_export) {
                 state.retired.push(old_export);
             }
-            state.export = export.clone();
+            if state.export != export {
+                state.config_generation = state.config_generation.wrapping_add(1);
+                state.export = export;
+            }
         }
         self.reconcile_notify.notify_one();
     }
@@ -139,26 +175,29 @@ impl LinuxExporter {
     pub async fn health(&self) -> ExportHealth {
         let state = self.state.read().await;
         ExportHealth {
+            config_generation: state.config_generation,
+            last_success_route_generation: state
+                .last_success_revision
+                .map(|value| value.route_generation),
+            last_success_config_generation: state
+                .last_success_revision
+                .map(|value| value.config_generation),
             last_success_age: state.last_success.map(|value| value.elapsed()),
             last_error: state.last_error.clone(),
         }
     }
 
     async fn reconcile_locked(&self) -> Result<(), LinuxError> {
-        let result = self.reconcile_attempt().await;
-        let mut state = self.state.write().await;
-        match &result {
-            Ok(()) => {
-                state.last_success = Some(Instant::now());
-                state.last_error = None;
-            }
-            Err(error) => state.last_error = Some(error.to_string()),
-        }
+        // Capture both inputs before I/O. A concurrent reload or shutdown may
+        // replace desired state while this attempt is awaiting netlink.
+        let attempted = self.state.read().await.clone();
+        let revision = attempted.revision();
+        let result = self.reconcile_attempt(attempted).await;
+        self.state.write().await.record_reconcile(revision, &result);
         result
     }
 
-    async fn reconcile_attempt(&self) -> Result<(), LinuxError> {
-        let state = self.state.read().await.clone();
+    async fn reconcile_attempt(&self, state: ExportState) -> Result<(), LinuxError> {
         self.apply_locked(&state.export, state.snapshot, state.retain_rules)
             .await?;
         let mut cleaned = Vec::new();
