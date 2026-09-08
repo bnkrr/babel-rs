@@ -22,7 +22,7 @@ static void record_hit(const char *variable) {
     if (!path) return;
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0) {
-        (void)write(fd, "hit", 3);
+        /* The harness observes file existence; no payload is needed. */
         (void)close(fd);
     }
 }
