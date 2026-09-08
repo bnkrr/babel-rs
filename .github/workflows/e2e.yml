@@ -39,3 +39,39 @@ jobs:
         run: sudo sh tests/e2e/netns-lifecycle.sh "$PWD/target/release/babel-rs"
       - name: Test live MTU packetisation and output scheduling
         run: sudo sh tests/e2e/netns-mtu-output.sh "$PWD/target/release/babel-rs"
+
+  robustness:
+    name: Robustness (${{ matrix.scenario }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [capacity, state-restart, shutdown-recovery, control-clients]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install network test tools
+        run: sudo apt-get update && sudo apt-get install --yes iproute2 iputils-ping
+      - name: Build daemon
+        run: cargo build --locked --release --package babel-rs
+      - name: Run regression
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          set -o pipefail
+          mkdir -p .local/experiments/ci
+          if [ "$SCENARIO" = shutdown-recovery ]; then
+            cc -shared -fPIC -Wall -Wextra -Werror -O2 tests/e2e/netlink-stall.c \
+              -o .local/experiments/ci/netlink-stall.so -ldl
+            sudo python3 tests/e2e/netns-shutdown-recovery.py "$PWD/target/release/babel-rs" \
+              "$PWD/.local/experiments/ci/netlink-stall.so" 2>&1 | tee .local/experiments/ci/test.log
+          else
+            sudo python3 "tests/e2e/netns-$SCENARIO.py" "$PWD/target/release/babel-rs" \
+              2>&1 | tee .local/experiments/ci/test.log
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: robustness-${{ matrix.scenario }}
+          path: .local/experiments/ci/test.log
+          include-hidden-files: true

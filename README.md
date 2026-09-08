@@ -230,6 +230,13 @@ connection-slot reuse with 64 simultaneous Unix clients, including blocked
 response readers; `all` includes it. Deterministic source-history churn across
 multiple GC windows is part of `cargo test --workspace --all-targets`.
 
+Network CI also runs capacity isolation, restart recovery, shutdown deadlines
+and slow-client regressions as independent jobs. A separate steady-state job
+checks a healthy three-node forwarding path while a fourth leaf repeatedly
+fails and recovers: two minutes on pushes/PRs and one hour weekly or on demand.
+Run it explicitly with `tests/e2e/run-on-linux-vm.sh steady-state`; see
+[TESTING.md](docs/TESTING.md) for assertions, schedules and reproduction.
+
 ## License
 
 Licensed under the MIT License. See [LICENSE](LICENSE).

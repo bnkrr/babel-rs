@@ -1,0 +1,55 @@
+name: steady-state
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Steady-state duration after convergence
+        type: choice
+        default: '3600'
+        options: ['120', '600', '3600']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: steady-state-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
+jobs:
+  linux-netns:
+    name: Default-timer forwarding and recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install network test tools
+        run: sudo apt-get update && sudo apt-get install --yes iproute2 iputils-ping
+      - name: Build daemon
+        run: cargo build --locked --release --package babel-rs
+      - name: Run steady-state scenario
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_SECONDS: ${{ inputs.seconds }}
+        run: |
+          set -o pipefail
+          seconds=120
+          if [ "$EVENT_NAME" = schedule ]; then
+            seconds=3600
+          elif [ "$EVENT_NAME" = workflow_dispatch ]; then
+            seconds=$REQUESTED_SECONDS
+          fi
+          case "$seconds" in 120|600|3600) ;; *) exit 2 ;; esac
+          mkdir -p .local/experiments/ci
+          sudo python3 tests/e2e/netns-steady-state.py "$PWD/target/release/babel-rs" \
+            --seconds "$seconds" 2>&1 | tee .local/experiments/ci/steady-state.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: steady-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .local/experiments/ci/steady-state.log
+          include-hidden-files: true
