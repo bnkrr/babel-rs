@@ -312,7 +312,14 @@ fn rfc8966_3_8_2_1_starvation_keeps_a_seqno_request_active() {
     h.establish_neighbour("b", "fe80::3");
     let route = key("2001:db8:56::/64");
     h.update("a", "fe80::2", route, id(2), 7, 10, 1600);
-    let request = h.update("b", "fe80::3", route, id(2), 7, 120, 1600);
+    let alternate = h.update("b", "fe80::3", route, id(2), 7, 120, 1600);
+    assert!(!common::sent_tlv(&alternate, |tlv| matches!(
+        tlv,
+        OutboundTlv::SeqnoRequest { .. }
+    )));
+    // A worse alternate needs no request while the selected route is healthy.
+    // Retraction must initiate starvation recovery, then keep retrying it.
+    let request = h.update("a", "fe80::2", route, id(2), 7, INFINITY, 1600);
     assert!(request.iter().any(|action| matches!(
         action,
         Action::Send { destination, packet, .. }
@@ -320,7 +327,6 @@ fn rfc8966_3_8_2_1_starvation_keeps_a_seqno_request_active() {
                 && matches!(packet.tlvs.as_slice(), [OutboundTlv::SeqnoRequest { seqno: 8, .. }])
     )));
 
-    h.update("a", "fe80::2", route, id(2), 7, INFINITY, 1600);
     assert!(h.engine.selected_routes().is_empty());
     let retry = h.tick(2005);
     assert!(retry.iter().any(|action| matches!(

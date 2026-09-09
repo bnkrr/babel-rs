@@ -2,3 +2,5 @@
 /.local/
 /AGENTS.md
 *.pcap
+__pycache__/
+*.py[cod]

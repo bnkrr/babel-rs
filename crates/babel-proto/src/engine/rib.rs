@@ -142,6 +142,10 @@ impl Engine {
                 }
             }
         } else if !self.pending_seqno.contains_key(&(key, router_id))
+            // RFC 8966 3.8.2.2: an unselected infeasible route warrants a
+            // request when it could improve our current path. Requests through
+            // worse alternates can suppress real recovery requests as duplicates.
+            && self.selected.get(&key).is_none_or(|selected| metric < selected.metric)
             && let Some(fd) = feasible
         {
             actions.extend(self.originate_seqno_request(

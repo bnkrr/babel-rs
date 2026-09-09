@@ -5,6 +5,13 @@ examples, Clippy and documentation checks, plus the Rust 1.90 compatibility
 check. The network workflows build the release daemon and exercise it inside
 disposable Linux namespaces; the daemon uses production protocol defaults.
 
+`crates/babel-proto/tests/seqno_recovery.rs` checks that worse/equal infeasible
+alternates do not originate unnecessary sequence requests, while preferable
+alternates, an infeasible current path and route loss still trigger recovery.
+Its three-node triangle delivers encoded packets with virtual time and verifies
+loop-free recovery within 20 seconds of a direct-link failure, without relying
+on source feasibility garbage collection. It runs in the regular Rust suite.
+
 ## Network CI
 
 Every push and pull request runs the seven interoperability/lifecycle/RTT/MTU
@@ -146,3 +153,15 @@ to one hour. `BABEL_RS_STEADY_SECONDS` accepts
 120..86400 seconds for VM runs. For direct runs, `--rss-growth-kib` adjusts the
 RSS tolerance when comparing a different platform; record overrides with the
 result. No fuzz targets are included in this testing scope.
+
+## Optional endless topology testing
+
+A separate [endless netns harness](../tests/endless/README.md) supports bounded
+node pools, configurable average degree, mesh/bottleneck/hub graphs and random
+node/link lifecycle changes. It has an independent reachability/FIB verifier
+and rotating failure records. `--min-nodes` / `--max-nodes` bound the live
+network, and `--mix babel-rs=2,bird=1,babeld=1` assigns implementations to node
+slots with seeded weighted sampling. All implementations receive FIB and
+forwarding checks; babel-rs additionally receives RIB/export-progress checks.
+It is deliberately excluded from ordinary CI,
+Cargo tests and the network runner's `all` mode; invoke it explicitly.
