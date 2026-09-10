@@ -361,7 +361,7 @@ async fn interfaces(shared: &Shared) -> Result<Value, (&'static str, String)> {
                 json!({
                     "name": item.name,
                     "ifindex": item.index,
-                    "local_addresses": item.local_addresses.into_iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+                    "local_addresses": item.local_addresses.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
                     "mtu": item.mtu,
                     "udp_payload_budget": item.udp_payload_budget,
                     "metric": item.metric,
@@ -369,7 +369,8 @@ async fn interfaces(shared: &Shared) -> Result<Value, (&'static str, String)> {
                     "update_interval_ms": item.update_interval_ms,
                     "split_horizon": item.split_horizon,
                     "ipv4_next_hop": item.ipv4_next_hop.as_str(),
-                    "effective_ipv4_next_hop": if item.ipv4_address.is_some() { "ipv4" } else if item.ipv4_next_hop == babel_router::Ipv4NextHop::Ipv4 { "unavailable" } else { "ipv6" },
+                    "control_transport": item.control_transport.as_str(),
+                    "effective_ipv4_next_hop": if item.ipv4_address.is_some() { "ipv4" } else if item.ipv4_next_hop == babel_router::Ipv4NextHop::Ipv4 || (item.control_transport == babel_router::ControlTransport::Ipv4 && !item.local_addresses.iter().any(|a| matches!(a, std::net::IpAddr::V6(ip) if ip.is_unicast_link_local()))) { "unavailable" } else { "ipv6" },
                     "ipv4_next_hop_address": item.ipv4_address.map(|address| address.to_string()),
                     "output": item.output,
                     "attached": true,

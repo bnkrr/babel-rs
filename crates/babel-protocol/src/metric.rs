@@ -381,6 +381,7 @@ pub struct RttMetric {
     base: Arc<dyn MetricProfile>,
     probe_interval_ms: u64,
     half_life_ms: u64,
+    sample_alpha: Option<f64>,
     min_rtt_us: u32,
     max_rtt_us: u32,
     max_penalty: u16,
@@ -413,13 +414,23 @@ impl RttMetric {
                 base,
                 probe_interval_ms,
                 half_life_ms,
+                sample_alpha: None,
                 min_rtt_us,
                 max_rtt_us,
                 max_penalty,
             })
     }
 
-    /// Compose the base with 2 s probes, 6 s half-life, 10..120 ms RTT and penalty 150.
+    /// Use a validated per-sample EMA weight for previous samples (RFC: 0.8..0.9).
+    pub fn with_sample_alpha(mut self, alpha: f64) -> Option<Self> {
+        if !alpha.is_finite() || !(0.0..1.0).contains(&alpha) {
+            return None;
+        }
+        self.sample_alpha = Some(alpha);
+        Some(self)
+    }
+
+    /// Compose 2 s probes, per-sample alpha 0.836, 10..120 ms RTT and penalty 150.
     pub fn recommended(base: Arc<dyn MetricProfile>) -> Self {
         Self::new(
             base,
@@ -430,6 +441,8 @@ impl RttMetric {
             Self::DEFAULT_MAX_PENALTY,
         )
         .expect("RFC defaults are valid")
+        .with_sample_alpha(0.836)
+        .expect("valid EMA weight")
     }
 }
 
@@ -443,6 +456,7 @@ impl MetricProfile for RttMetric {
             base: self.base.new_neighbor(interface),
             algorithm: self.name(),
             half_life_ms: self.half_life_ms,
+            sample_alpha: self.sample_alpha,
             min_rtt_us: self.min_rtt_us,
             max_rtt_us: self.max_rtt_us,
             max_penalty: self.max_penalty,
@@ -465,6 +479,7 @@ struct RttNeighbor {
     base: Box<dyn NeighborMetric>,
     algorithm: String,
     half_life_ms: u64,
+    sample_alpha: Option<f64>,
     min_rtt_us: u32,
     max_rtt_us: u32,
     max_penalty: u16,
@@ -506,7 +521,9 @@ impl NeighborMetric for RttNeighbor {
             f64::from(sample_us),
             |(old, previous_ms)| {
                 let elapsed_ms = now_ms.saturating_sub(previous_ms);
-                let alpha = 2.0_f64.powf(-(elapsed_ms as f64) / self.half_life_ms as f64);
+                let alpha = self.sample_alpha.unwrap_or_else(|| {
+                    2.0_f64.powf(-(elapsed_ms as f64) / self.half_life_ms as f64)
+                });
                 alpha * old + (1.0 - alpha) * f64::from(sample_us)
             },
         ));
@@ -604,7 +621,7 @@ mod tests {
         metric.on_rtt_sample(10_000, 0);
         assert_eq!(metric.link_cost(), 96);
         metric.on_rtt_sample(120_000, 6_000);
-        assert_eq!(metric.status().smoothed_rtt_us, Some(65_000));
+        assert_eq!(metric.status().smoothed_rtt_us, Some(28_040));
         assert!(metric.link_cost() > 96);
         for sample in 2..=65 {
             metric.on_rtt_sample(120_000, sample * 6_000);

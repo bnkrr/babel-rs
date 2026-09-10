@@ -20,7 +20,7 @@ const REQUEST_RETRY_INITIAL_MS: u64 = 2_000;
 const REQUEST_RETRIES: u8 = 3;
 const REQUEST_HOP_COUNT: u8 = 64;
 const RECENT_REQUEST_MS: u64 = 16_000;
-const URGENT_TIMEOUT_MS: u64 = 20;
+const URGENT_TIMEOUT_MS: u64 = 200;
 const MAX_TRIGGERED_JITTER_MS: u64 = 100;
 
 mod api;
@@ -32,7 +32,7 @@ mod sources;
 mod timers;
 
 pub use api::{
-    Action, EngineConfig, Event, InterfacePolicy, Ipv4NextHop, NeighborStatus,
+    Action, ControlTransport, EngineConfig, Event, InterfacePolicy, Ipv4NextHop, NeighborStatus,
     RouteSelectionConfig, SendTiming,
 };
 use sources::seqno_request_action;
@@ -148,6 +148,8 @@ pub struct Engine {
     pending_seqno: HashMap<(RouteKey, RouterId), PendingSeqnoRequest>,
     recent_seqno: HashMap<(RouteKey, RouterId), (u16, u64)>,
     tombstones: BTreeMap<RouteKey, u64>,
+    advertised_until: BTreeMap<RouteKey, u64>,
+    pending_advertisements: BTreeMap<RouteKey, (u64, u8)>,
     pending_switches: HashMap<RouteKey, PendingSwitch>,
     settling_since: HashMap<RouteKey, u64>,
     settled_routes: HashSet<RouteKey>,
@@ -183,6 +185,8 @@ impl Engine {
             pending_seqno: HashMap::new(),
             recent_seqno: HashMap::new(),
             tombstones: BTreeMap::new(),
+            advertised_until: BTreeMap::new(),
+            pending_advertisements: BTreeMap::new(),
             pending_switches: HashMap::new(),
             settling_since: HashMap::new(),
             settled_routes: HashSet::new(),
@@ -208,7 +212,25 @@ impl Engine {
     /// Supply nondecreasing monotonic milliseconds from one clock for all events.
     pub fn try_handle(&mut self, event: Event) -> Result<Vec<Action>, crate::ConfigError> {
         event.validate()?;
-        Ok(self.handle_validated(event))
+        let actions = self.handle_validated(event);
+        // A lost policy-change update must not shorten a neighbor's old lifetime.
+        for action in &actions {
+            if let Action::Send { packet, timing, .. } = action {
+                for tlv in &packet.tlvs {
+                    if let OutboundTlv::Update(update) = tlv
+                        && update.metric != INFINITY
+                        && let Some(key) = update.key
+                    {
+                        let until = timing
+                            .deadline_ms
+                            .saturating_add(u64::from(update.interval_cs) * 35);
+                        let previous = self.advertised_until.entry(key).or_default();
+                        *previous = (*previous).max(until);
+                    }
+                }
+            }
+        }
+        Ok(actions)
     }
 
     fn handle_validated(&mut self, event: Event) -> Vec<Action> {
@@ -264,15 +286,39 @@ impl Engine {
                 source,
                 packet,
                 now_ms,
-            } => self.receive(interface, source, packet, now_ms),
+            } => self.receive(
+                interface,
+                source,
+                packet,
+                now_ms,
+                timers::timestamp_us(now_ms),
+            ),
+            Event::PacketReceivedWithTimestamp {
+                interface,
+                source,
+                packet,
+                now_ms,
+                received_timestamp_us,
+            } => self.receive(interface, source, packet, now_ms, received_timestamp_us),
             Event::Originate {
                 key,
                 metric,
                 now_ms,
             } => {
+                if self
+                    .originated
+                    .get(&key)
+                    .is_some_and(|origin| origin.metric == metric)
+                {
+                    return Vec::new();
+                }
                 let mut actions = Vec::new();
+                if self.tombstones.remove(&key).is_some() {
+                    actions.push(self.route_snapshot());
+                }
+                self.repeat_advertisement(key, now_ms);
                 if let Some(entry) = self.originated.get(&key)
-                    && entry.metric != metric
+                    && metric > entry.metric
                 {
                     self.bump_sequence_number();
                     actions.push(Action::SequenceNumberChanged(self.sequence_number));
@@ -291,10 +337,18 @@ impl Engine {
             Event::Withdraw { key, now_ms } => {
                 let existed = self.originated.remove(&key).is_some();
                 let mut actions = self.reselect(now_ms);
+                if existed && !self.selected.contains_key(&key) {
+                    self.hold_withdrawal(key, now_ms);
+                    actions.push(self.route_snapshot());
+                }
                 if existed {
-                    self.bump_sequence_number();
-                    actions.insert(0, Action::SequenceNumberChanged(self.sequence_number));
-                    actions.extend(self.send_retraction(key, self.sequence_number, now_ms));
+                    self.repeat_advertisement(key, now_ms);
+                    actions.extend(self.send_updates(
+                        now_ms,
+                        Some(key),
+                        None,
+                        Some(SendTiming::urgent(now_ms)),
+                    ));
                 }
                 actions
             }
@@ -329,6 +383,36 @@ impl Engine {
         self.config.metric.name()
     }
 
+    fn repeat_advertisement(&mut self, key: RouteKey, now_ms: u64) {
+        // Initial copy plus two repeats, below RFC 8966's maximum of five.
+        self.pending_advertisements
+            .insert(key, (now_ms.saturating_add(1_000), 2));
+    }
+
+    fn hold_withdrawal(&mut self, key: RouteKey, now_ms: u64) {
+        let longest = self
+            .interfaces
+            .values()
+            .map(|state| state.policy.update_interval_cs)
+            .max()
+            .unwrap_or(self.config.update_interval_cs);
+        self.tombstones.insert(
+            key,
+            now_ms
+                .saturating_add(u64::from(longest) * 35)
+                .max(self.advertised_until.get(&key).copied().unwrap_or(0)),
+        );
+    }
+
+    fn route_snapshot(&mut self) -> Action {
+        self.generation = self.generation.wrapping_add(1);
+        Action::RoutesChanged {
+            generation: self.generation,
+            routes: self.selected_routes(),
+            unreachable: self.unreachable_routes(),
+        }
+    }
+
     fn replace_origins(&mut self, origins: BTreeMap<RouteKey, u16>, now_ms: u64) -> Vec<Action> {
         let unchanged = self.originated.len() == origins.len()
             && origins.iter().all(|(key, metric)| {
@@ -349,7 +433,7 @@ impl Engine {
         let changes_existing = self.originated.iter().any(|(key, origin)| {
             origins
                 .get(key)
-                .is_none_or(|metric| *metric != origin.metric)
+                .is_some_and(|metric| *metric > origin.metric)
         });
         let mut actions = Vec::new();
         if changes_existing {
@@ -368,10 +452,24 @@ impl Engine {
                 )
             })
             .collect();
-        for key in removed {
-            actions.extend(self.send_retraction(key, self.sequence_number, now_ms));
-        }
         actions.extend(self.reselect(now_ms));
+        for key in removed {
+            if !self.selected.contains_key(&key) {
+                self.hold_withdrawal(key, now_ms);
+            }
+            self.repeat_advertisement(key, now_ms);
+            actions.extend(self.send_updates(
+                now_ms,
+                Some(key),
+                None,
+                Some(SendTiming::urgent(now_ms)),
+            ));
+        }
+        for key in self.originated.keys().copied().collect::<Vec<_>>() {
+            self.tombstones.remove(&key);
+            self.repeat_advertisement(key, now_ms);
+        }
+        actions.push(self.route_snapshot());
         actions.extend(self.send_updates(now_ms, None, None, None));
         actions
     }

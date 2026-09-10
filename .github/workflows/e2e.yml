@@ -31,6 +31,8 @@ jobs:
         run: sudo sh tests/e2e/netns-babeld.sh "$PWD/target/release/babel-rs"
       - name: Test BIRD interoperability
         run: sudo sh tests/e2e/netns-bird.sh "$PWD/target/release/babel-rs"
+      - name: Test IPv4 control, independent RTT and unnumbered ICMPv4
+        run: sudo python3 tests/e2e/netns-rfc-boundaries.py "$PWD/target/release/babel-rs"
       - name: Test shared LAN, IPv4 next-hop policies and asymmetric loss
         run: sudo python3 tests/e2e/netns-general.py "$PWD/target/release/babel-rs"
       - name: Test three-node convergence

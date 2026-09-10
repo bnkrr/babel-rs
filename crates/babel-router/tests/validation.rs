@@ -14,6 +14,7 @@ fn key() -> RouteKey {
 
 fn invalid_policy() -> InterfacePolicy {
     InterfacePolicy {
+        control_transport: Default::default(),
         ipv4_next_hop: Default::default(),
         metric: Arc::new(WiredMetric::default()),
         hello_interval_cs: 0,
@@ -132,10 +133,7 @@ async fn dynamic_input_errors_precede_command_submission() {
     ));
     assert_eq!(handle.status().await.unwrap().sequence_number, seq);
     handle.withdraw(key()).await.unwrap();
-    assert_eq!(
-        handle.status().await.unwrap().sequence_number,
-        seq.wrapping_add(1)
-    );
+    assert_eq!(handle.status().await.unwrap().sequence_number, seq);
     handle.shutdown();
     router.run().await.unwrap();
 }

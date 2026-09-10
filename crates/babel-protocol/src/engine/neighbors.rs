@@ -53,10 +53,22 @@ impl Engine {
         source: IpAddr,
         packet: Packet,
         now_ms: u64,
+        receive_timestamp: u32,
     ) -> Vec<Action> {
         let Some(interface_state) = self.interfaces.get(&interface) else {
             return Vec::new();
         };
+        // An old receiver can still have queued packets during a live family
+        // change. They must not recreate an adjacency in the former family.
+        if interface_state
+            .policy
+            .control_transport
+            .multicast()
+            .is_ipv4()
+            != source.is_ipv4()
+        {
+            return Vec::new();
+        }
         let local_addresses = interface_state.local_addresses.clone();
         let metric_profile = Arc::clone(&interface_state.policy.metric);
         let hello_interval_cs = interface_state.policy.hello_interval_cs;
@@ -80,7 +92,6 @@ impl Engine {
             .map(|n| n.metric.link_cost());
         let mut actions = Vec::new();
         let mut changed_router_ids = HashSet::new();
-        let receive_timestamp = timestamp_us(now_ms);
         let hello_timestamp = packet.tlvs.iter().find_map(|tlv| match tlv {
             Tlv::Hello { sub_tlvs, .. } => timestamp_hello(sub_tlvs),
             _ => None,
@@ -180,6 +191,8 @@ impl Engine {
                 }
                 if neighbour.metric.receive_cost() != previous_receive_cost
                     || now_ms >= neighbour.next_ihu_ms
+                    || neighbour.histories.multicast.received(16)
+                        < neighbour.histories.multicast.observed()
                 {
                     send_ihu = true;
                 }
@@ -252,23 +265,19 @@ impl Engine {
                 Tlv::RouteRequest { key, .. } => {
                     // Replies can update feasibility history through send_updates.
                     routes_changed = true;
-                    if key.is_some() || self.full_update_request_allowed(&interface, now_ms) {
-                        let updates = self.send_updates(
+                    if let Some(key) = key {
+                        actions.push(self.reply_to_route_request(
+                            key,
+                            neighbour_key.clone(),
+                            now_ms,
+                        ));
+                    } else if self.full_update_request_allowed(&interface, now_ms) {
+                        actions.extend(self.send_updates(
                             now_ms,
                             key,
                             Some(interface.clone()),
                             Some(SendTiming::urgent(now_ms)),
-                        );
-                        if let Some(key) = key.filter(|_| updates.is_empty()) {
-                            actions.push(self.retraction_action(
-                                key,
-                                self.sequence_number,
-                                neighbour_key.clone(),
-                                now_ms,
-                            ));
-                        } else {
-                            actions.extend(updates);
-                        }
+                        ));
                     }
                 }
                 Tlv::SeqnoRequest {

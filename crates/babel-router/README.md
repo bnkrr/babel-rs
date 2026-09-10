@@ -4,6 +4,13 @@ An embeddable Tokio runtime for the independent `babel-protocol` routing engine.
 The live interface/socket backend currently supports **Linux**. It does not
 depend on the standalone daemon's configuration or Linux netlink exporter.
 
+Most of this project's code was written by **OpenAI Codex**. The project is
+**pre-1.0**: public APIs and behavior may change in breaking ways between 0.x
+minor releases. Pin the version you deploy, review the
+[changelog](https://github.com/bnkrr/babel-rs/blob/main/CHANGELOG.md), and test
+upgrades in your own environment before production use. See the
+[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md#api-compatibility).
+
 ```rust,no_run
 use babel_router::{BabelRouter, RouterId};
 
@@ -36,12 +43,16 @@ orderly-exit checkpoint, not crash-safe runtime persistence. The initial sequenc
 defaults to zero; do not repeatedly reuse it for a persistent identity. Abrupt
 restarts can require minute-scale recovery. See the packaged `embedded` example.
 
-Interfaces need IPv6 link-local addresses and Linux socket privileges. IPv4
+Interfaces need Linux socket privileges and an address for the selected control
+transport (`ControlTransport::Ipv6` by default, or `Ipv4`). IPv4
 announcements use `auto`, `ipv4`, or `ipv6` next-hop policy independently of
-the IPv6 control transport. Authentication is not implemented; use protected links.
+the selected control transport. Custom exporters default to rejecting IPv4-via-IPv6
+routes; opt in with `supports_ipv4_via_ipv6()` only when the backend supports
+that forwarding form and unnumbered ICMPv4. Authentication is not implemented; use protected links.
 
 [API](https://docs.rs/babel-router) ·
 [Embedding contracts](https://github.com/bnkrr/babel-rs/blob/main/docs/EMBEDDING.md) ·
+[RFC audit and open gaps](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFORMANCE.md) ·
 [Support](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md)
 
 MIT licensed; see LICENSE.

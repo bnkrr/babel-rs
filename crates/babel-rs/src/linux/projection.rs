@@ -33,6 +33,14 @@ pub(super) fn project_routes(
             if !route_matches_view(view, *key) {
                 continue;
             }
+            // Apply the same source precedence to unreachable and finite
+            // entries. An ordinary tombstone cannot shadow an exact-source route.
+            if projected
+                .get(&(view.table, key.destination))
+                .is_some_and(|current| current.source_specific && key.source.is_none())
+            {
+                continue;
+            }
             projected.insert(
                 (view.table, key.destination),
                 ProjectedRoute {

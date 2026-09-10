@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 fn policy(mode: Ipv4NextHop) -> InterfacePolicy {
     InterfacePolicy {
+        control_transport: Default::default(),
         ipv4_next_hop: mode,
         metric: Arc::new(WiredMetric::new(96, 1, 1).unwrap()),
         hello_interval_cs: 400,

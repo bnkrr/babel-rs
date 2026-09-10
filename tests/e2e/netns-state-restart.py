@@ -223,7 +223,8 @@ table = 25101
             config("a", origins=False)
             before = sequence()
             command("a", "reload")
-            wait_for(lambda: sequence() != before and not routes("c", PREFIX_A), "origin withdrawal")
+            wait_for(lambda: not routes("c", PREFIX_A), "origin withdrawal")
+            assert sequence() == before, "withdrawal must not advance the origin sequence"
             final_seqno = sequence()
             assert state_path.read_bytes() == initial_bytes
             assert state_path.stat().st_ino == initial_inode

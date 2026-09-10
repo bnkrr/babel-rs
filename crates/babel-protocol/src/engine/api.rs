@@ -93,6 +93,8 @@ pub struct NeighborStatus {
 /// [`Engine::try_new`] to validate overrides before creating state.
 #[derive(Clone)]
 pub struct EngineConfig {
+    /// Host forwarding capability: never select IPv4 routes via IPv6 when false.
+    pub ipv4_via_ipv6: bool,
     /// Admission limits for learned state; zero refuses all new entries of that kind.
     pub limits: ResourceLimits,
     /// Stable origin identity, validated by [`RouterId::new`].
@@ -111,7 +113,31 @@ pub struct EngineConfig {
     pub route_selection: RouteSelectionConfig,
 }
 
-/// IPv4 announcement policy, independent of the IPv6 Babel control transport.
+/// Babel control-packet address family, selected independently per interface.
+/// IPv6 is the RFC 8966 recommended default; IPv4 supports IPv4-only links.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ControlTransport {
+    #[default]
+    Ipv6,
+    Ipv4,
+}
+
+impl ControlTransport {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ipv6 => "ipv6",
+            Self::Ipv4 => "ipv4",
+        }
+    }
+    pub const fn multicast(self) -> IpAddr {
+        match self {
+            Self::Ipv6 => BABEL_MULTICAST_V6,
+            Self::Ipv4 => IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 111)),
+        }
+    }
+}
+
+/// IPv4 announcement policy, independent of the Babel control transport.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Ipv4NextHop {
     /// Prefer an available IPv4 next hop, otherwise use RFC 9229.
@@ -159,6 +185,8 @@ impl Ipv4NextHop {
 /// Behaviour selected independently for one Babel interface.
 #[derive(Clone)]
 pub struct InterfacePolicy {
+    /// Address family used for control packets; defaults to IPv6.
+    pub control_transport: ControlTransport,
     /// IPv4 next-hop preference; normally [`Ipv4NextHop::Auto`].
     pub ipv4_next_hop: Ipv4NextHop,
     /// Creates independent metric state for each neighbor on this interface.
@@ -175,6 +203,7 @@ impl std::fmt::Debug for InterfacePolicy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("InterfacePolicy")
+            .field("control_transport", &self.control_transport)
             .field("ipv4_next_hop", &self.ipv4_next_hop)
             .field("metric", &self.metric.name())
             .field("hello_interval_cs", &self.hello_interval_cs)
@@ -188,6 +217,7 @@ impl EngineConfig {
     /// Wired metric, additive algebra, 4 s Hellos, 16 s Updates and default limits/hysteresis.
     pub fn recommended(router_id: RouterId) -> Self {
         Self {
+            ipv4_via_ipv6: true,
             router_id,
             limits: ResourceLimits::default(),
             metric: Arc::new(WiredMetric::default()),
@@ -239,6 +269,16 @@ pub enum Event {
         source: IpAddr,
         packet: Packet,
         now_ms: u64,
+    },
+
+    /// Receive a packet with its socket-boundary microsecond timestamp, using
+    /// the current processing clock for protocol deadlines and expiration.
+    PacketReceivedWithTimestamp {
+        interface: String,
+        source: IpAddr,
+        packet: Packet,
+        now_ms: u64,
+        received_timestamp_us: u32,
     },
     /// Advertise or replace a canonical local route with a finite metric (zero is valid).
     Originate {

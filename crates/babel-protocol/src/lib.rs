@@ -41,8 +41,8 @@ pub mod model;
 pub mod wire;
 
 pub use engine::{
-    Action, Engine, EngineConfig, Event, InterfacePolicy, Ipv4NextHop, NeighborStatus,
-    RouteSelectionConfig, SendTiming,
+    Action, ControlTransport, Engine, EngineConfig, Event, InterfacePolicy, Ipv4NextHop,
+    NeighborStatus, RouteSelectionConfig, SendTiming,
 };
 pub use limits::{ResourceLimits, ResourceStatus};
 pub use metric::{

@@ -1,11 +1,11 @@
 use std::io;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::Path;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
-use babel_protocol::wire::PORT;
+use babel_protocol::{ControlTransport, wire::PORT};
 
 const IPV6_HEADER_BYTES: u32 = 40;
 const UDP_HEADER_BYTES: u32 = 8;
@@ -14,6 +14,7 @@ const MAX_UDP_PAYLOAD: usize = 65_527;
 
 pub struct InterfaceSocket {
     pub name: String,
+    pub transport: ControlTransport,
     pub index: u32,
     pub addresses: std::sync::RwLock<Vec<IpAddr>>,
     pub mtu: u32,
@@ -21,7 +22,7 @@ pub struct InterfaceSocket {
 }
 
 impl InterfaceSocket {
-    pub fn open(name: &str) -> io::Result<Self> {
+    pub fn open(name: &str, transport: ControlTransport) -> io::Result<Self> {
         if !cfg!(target_os = "linux") {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -30,29 +31,57 @@ impl InterfaceSocket {
         }
         let index = interface_index(name)?;
         let mtu = interface_mtu(name)?;
-        payload_budget_for_mtu(mtu)?;
-        let local_addresses = interface_ipv6_addresses(name)?;
+        payload_budget_for_transport(mtu, transport)?;
         let addresses = interface_addresses(name)?;
-        if !local_addresses.iter().any(Ipv6Addr::is_unicast_link_local) {
+        let available = addresses.iter().any(|address| match (transport, address) {
+            (ControlTransport::Ipv6, IpAddr::V6(ip)) => ip.is_unicast_link_local(),
+            (ControlTransport::Ipv4, IpAddr::V4(ip)) => {
+                !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast()
+            }
+            _ => false,
+        });
+        if !available {
             return Err(io::Error::new(
                 io::ErrorKind::AddrNotAvailable,
-                format!("interface {name} has no IPv6 link-local address"),
+                format!(
+                    "interface {name} has no usable {} control address",
+                    transport.as_str()
+                ),
             ));
         }
-        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.set_only_v6(true)?;
+        let domain = match transport {
+            ControlTransport::Ipv6 => Domain::IPV6,
+            ControlTransport::Ipv4 => Domain::IPV4,
+        };
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         #[cfg(target_os = "linux")]
         socket.bind_device(Some(name.as_bytes()))?;
-        socket.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, PORT, 0, 0).into())?;
-        socket.join_multicast_v6(&Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 6), index)?;
-        socket.set_multicast_if_v6(index)?;
-        socket.set_multicast_hops_v6(1)?;
-        socket.set_unicast_hops_v6(1)?;
+        match transport {
+            ControlTransport::Ipv6 => {
+                socket.set_only_v6(true)?;
+                socket.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, PORT, 0, 0).into())?;
+                socket.join_multicast_v6(&Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 6), index)?;
+                socket.set_multicast_if_v6(index)?;
+                socket.set_multicast_hops_v6(1)?;
+                socket.set_unicast_hops_v6(1)?;
+            }
+            ControlTransport::Ipv4 => {
+                socket.bind(&SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PORT).into())?;
+                #[cfg(target_os = "linux")]
+                socket.join_multicast_v4_n(
+                    &Ipv4Addr::new(224, 0, 0, 111),
+                    &socket2::InterfaceIndexOrAddress::Index(index),
+                )?;
+                socket.set_multicast_ttl_v4(1)?;
+                socket.set_ttl_v4(1)?;
+            }
+        }
         socket.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(socket.into())?;
         Ok(Self {
             name: name.to_owned(),
+            transport,
             index,
             addresses: std::sync::RwLock::new(addresses),
             mtu,
@@ -60,8 +89,11 @@ impl InterfaceSocket {
         })
     }
 
-    pub fn destination(&self, address: Ipv6Addr) -> SocketAddr {
-        SocketAddr::V6(SocketAddrV6::new(address, PORT, 0, self.index))
+    pub fn destination(&self, address: IpAddr) -> SocketAddr {
+        match address {
+            IpAddr::V6(ip) => SocketAddr::V6(SocketAddrV6::new(ip, PORT, 0, self.index)),
+            IpAddr::V4(ip) => SocketAddr::new(ip.into(), PORT),
+        }
     }
 
     /// Return the current interface MTU, not merely the value observed when
@@ -72,7 +104,7 @@ impl InterfaceSocket {
     }
 
     pub fn payload_budget(&self) -> io::Result<usize> {
-        payload_budget_for_mtu(self.current_mtu()?)
+        payload_budget_for_transport(self.current_mtu()?, self.transport)
     }
 }
 
@@ -120,30 +152,44 @@ pub(crate) fn payload_budget_for_mtu(mtu: u32) -> io::Result<usize> {
         .min(MAX_UDP_PAYLOAD))
 }
 
-fn interface_ipv6_addresses(name: &str) -> io::Result<Vec<Ipv6Addr>> {
-    let contents = std::fs::read_to_string("/proc/net/if_inet6")?;
-    let mut addresses = Vec::new();
-    for line in contents.lines() {
-        let fields: Vec<_> = line.split_ascii_whitespace().collect();
-        if fields.len() != 6 || fields[5] != name || fields[0].len() != 32 {
-            continue;
-        }
-        let mut raw = [0u8; 16];
-        let mut valid = true;
-        for (index, byte) in raw.iter_mut().enumerate() {
-            match u8::from_str_radix(&fields[0][index * 2..index * 2 + 2], 16) {
-                Ok(value) => *byte = value,
-                Err(_) => {
-                    valid = false;
-                    break;
-                }
-            }
-        }
-        if valid {
-            addresses.push(Ipv6Addr::from(raw));
-        }
+pub(crate) fn payload_budget_for_transport(
+    mtu: u32,
+    transport: ControlTransport,
+) -> io::Result<usize> {
+    match transport {
+        ControlTransport::Ipv6 => payload_budget_for_mtu(mtu),
+        ControlTransport::Ipv4 => Ok(mtu.saturating_sub(28).clamp(512, 65_507) as usize),
     }
-    Ok(addresses)
+}
+
+/// Check the live receiving-interface subnet (including point-to-point peers).
+/// A failed address lookup rejects the packet; it never broadens admission.
+pub(crate) fn ipv4_on_link(name: &str, source: Ipv4Addr) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(addresses) = nix::ifaddrs::getifaddrs() {
+        return addresses
+            .filter(|item| item.interface_name == name)
+            .any(|item| {
+                let Some(local) = item
+                    .address
+                    .and_then(|a| a.as_sockaddr_in().map(|a| a.ip()))
+                else {
+                    return false;
+                };
+                let peer = item
+                    .destination
+                    .and_then(|a| a.as_sockaddr_in().map(|a| a.ip()));
+                let mask = item
+                    .netmask
+                    .and_then(|a| a.as_sockaddr_in().map(|a| a.ip()));
+                peer == Some(source)
+                    || mask.is_some_and(|mask| {
+                        u32::from(local) & u32::from(mask) == u32::from(source) & u32::from(mask)
+                    })
+            });
+    }
+    let _ = (name, source);
+    false
 }
 
 fn interface_index(name: &str) -> io::Result<u32> {

@@ -17,7 +17,7 @@ mandatory sub-TLV discards only its enclosing TLV.
 
 The outbound packetizer is the sole owner of Router-ID and Next-Hop context.
 It repeats context after packet boundaries and emits independently decodable
-datagrams within the live interface MTU minus IPv6 and UDP headers. This
+datagrams within the live interface MTU minus the selected IP family and UDP headers. This
 applies equally to finite updates and retractions.
 
 `babel-router` currently uses Linux interface discovery and owns one serialized engine plus orthogonal per-interface UDP
@@ -33,8 +33,9 @@ second after the later of its scheduling deadline and admission time. Removal
 cancels an in-flight wait. Per-interface loss, usage and deadline counters
 expose degradation; warnings are rate-limited. See [CAPACITY.md](CAPACITY.md). Interfaces bind UDP/6696 with
 `SO_BINDTODEVICE`, join
-`ff02::1:6`, use hop limit 1, and accept only non-local unicast link-local
-sources. Bounded command, receive, and output queues isolate the engine. Each
+`ff02::1:6` or `224.0.0.111`, and use hop limit/TTL 1. IPv6 admission
+requires a non-local link-local source; IPv4 admission checks the receiving
+interface subnet or point-to-point peer. Both require source UDP port 6696. Bounded command, receive, and output queues isolate the engine. Each
 interface may hold at most four receive slots, including the event currently
 being processed, so one burst cannot occupy the whole common input queue.
 Same-destination Sends with identical timing are batched within an engine
@@ -55,7 +56,7 @@ BabelRouterBuilder -> BabelRouter -> RouterHandle
 `babel-rs` adds strict TOML, signals, versioned state, a versioned Unix control
 socket, an interface supervisor, and a Linux netlink exporter. Ordered
 interface rules are desired state. Netlink events plus periodic snapshots
-reconcile names, ifindex, administrative state, IPv6 link-local addresses and
+reconcile names, ifindex, administrative state, addresses of the selected control family and
 the resolved interface policy. Removing or replacing an interface sends
 `InterfaceDown` to the engine before a new socket is attached. Attachment sends
 an immediate wildcard Route Request so startup and policy reload do not wait
@@ -232,3 +233,11 @@ owned workers. Origin/withdraw commands acknowledge application. The exporter
 worker finishes its in-flight callback before final shutdown; the total runtime
 cleanup budget defaults to five seconds. Independently spawned exporter work must
 remain cancellation-safe and synchronized by its owner.
+
+The runtime separates receive-boundary microsecond timestamps from the current
+monotonic engine clock, so queued packets cannot move protocol timers backwards.
+Timestamped Hello/IHU groups remain in one datagram, and multiple Hellos are
+packetized separately. Important route changes are sent initially and repeated
+twice at one-second intervals; repeats read current route state. Holds include
+the latest possible expiry of previously emitted finite advertisements, including
+old longer intervals, and expiry or local reorigination publishes a new snapshot.

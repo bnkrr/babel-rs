@@ -4,6 +4,13 @@ An independent, sans-I/O Babel routing protocol engine and packet codec.
 No sockets, background tasks, operating-system APIs, or clock reads. The host
 supplies monotonic time and executes ordered actions.
 
+Most of this project's code was written by **OpenAI Codex**. The project is
+**pre-1.0**: public APIs and behavior may change in breaking ways between 0.x
+minor releases. Pin the version you deploy, review the
+[changelog](https://github.com/bnkrr/babel-rs/blob/main/CHANGELOG.md), and test
+upgrades in your own environment before production use. See the
+[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md#api-compatibility).
+
 ```rust
 use babel_protocol::{Engine, EngineConfig, Event, RouteKey, RouterId};
 

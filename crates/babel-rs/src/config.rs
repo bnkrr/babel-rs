@@ -61,9 +61,27 @@ pub struct InterfaceSection {
     pub split_horizon: Option<bool>,
     #[serde(default)]
     pub ipv4_next_hop: Ipv4NextHop,
+    #[serde(default)]
+    pub control_transport: ControlTransport,
     pub hello_interval_ms: Option<u64>,
     pub update_interval_ms: Option<u64>,
     pub metric: Option<MetricConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ControlTransport {
+    #[default]
+    Ipv6,
+    Ipv4,
+}
+impl From<ControlTransport> for babel_protocol::ControlTransport {
+    fn from(value: ControlTransport) -> Self {
+        match value {
+            ControlTransport::Ipv6 => Self::Ipv6,
+            ControlTransport::Ipv4 => Self::Ipv4,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -97,6 +115,7 @@ pub enum LinkType {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectiveInterface {
     pub section: usize,
+    pub control_transport: ControlTransport,
     pub link_type: LinkType,
     pub metric: MetricConfig,
     pub hello_interval_cs: u16,
@@ -108,6 +127,7 @@ pub struct EffectiveInterface {
 impl EffectiveInterface {
     pub fn build_policy(&self) -> Result<babel_protocol::InterfacePolicy, ConfigError> {
         Ok(babel_protocol::InterfacePolicy {
+            control_transport: self.control_transport.into(),
             ipv4_next_hop: self.ipv4_next_hop.into(),
             metric: self.metric.build()?,
             hello_interval_cs: self.hello_interval_cs,
@@ -137,8 +157,8 @@ pub enum MetricConfig {
         base: BaseMetricConfig,
         #[serde(default = "default_rtt_probe_interval_ms")]
         probe_interval_ms: u64,
-        #[serde(default = "default_rtt_half_life_ms")]
-        half_life_ms: u64,
+        #[serde(default)]
+        half_life_ms: Option<u64>,
         #[serde(default = "default_rtt_min_ms")]
         min_rtt_ms: u32,
         #[serde(default = "default_rtt_max_ms")]
@@ -168,7 +188,7 @@ impl MetricConfig {
             LinkType::Tunnel => Self::Rtt {
                 base: BaseMetricConfig::default(),
                 probe_interval_ms: default_rtt_probe_interval_ms(),
-                half_life_ms: default_rtt_half_life_ms(),
+                half_life_ms: None,
                 min_rtt_ms: default_rtt_min_ms(),
                 max_rtt_ms: default_rtt_max_ms(),
                 max_penalty: default_rtt_max_penalty(),
@@ -206,11 +226,18 @@ impl MetricConfig {
                 RttMetric::new(
                     base,
                     *probe_interval_ms,
-                    *half_life_ms,
+                    half_life_ms.unwrap_or(RttMetric::DEFAULT_HALF_LIFE_MS),
                     min_rtt_us,
                     max_rtt_us,
                     *max_penalty,
                 )
+                .and_then(|value| {
+                    if half_life_ms.is_none() {
+                        value.with_sample_alpha(0.836)
+                    } else {
+                        Some(value)
+                    }
+                })
                 .map(|value| Arc::new(value) as Arc<dyn MetricProfile>)
                 .ok_or_else(|| {
                     ConfigError::InvalidMetric(format!(
@@ -493,6 +520,7 @@ impl Config {
                         EffectiveInterface {
                             section: index,
                             ipv4_next_hop: item.ipv4_next_hop,
+                            control_transport: item.control_transport,
                             link_type: item.link_type,
                             metric: item
                                 .metric
@@ -607,9 +635,6 @@ fn default_etx_window() -> u8 {
 }
 fn default_rtt_probe_interval_ms() -> u64 {
     RttMetric::DEFAULT_PROBE_INTERVAL_MS
-}
-fn default_rtt_half_life_ms() -> u64 {
-    RttMetric::DEFAULT_HALF_LIFE_MS
 }
 fn default_rtt_min_ms() -> u32 {
     RttMetric::DEFAULT_MIN_RTT_US / 1_000

@@ -31,6 +31,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     } = runtime;
     let now = || elapsed_ms(&started);
     let default_policy = InterfacePolicy {
+        control_transport: Default::default(),
         ipv4_next_hop: Default::default(),
         metric: Arc::clone(&metric),
         hello_interval_cs: 400,
@@ -38,6 +39,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         split_horizon: true,
     };
     let mut engine = Engine::try_new(EngineConfig {
+        ipv4_via_ipv6: exporter.supports_ipv4_via_ipv6(),
         limits,
         router_id,
         metric: Arc::clone(&metric),
@@ -174,7 +176,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 update_output_status(&mut status, &output_counters);
             },
             Some(item) = received.recv() => match item {
-                Received::Packet { _permit, interface, index, source, bytes, now_ms } => {
+                Received::Packet { _permit, interface, index, source, bytes, received_timestamp_us } => {
                     if sockets
                         .get(&interface)
                         .is_none_or(|socket| socket.index != index)
@@ -183,7 +185,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     }
                     match decode_packet(&bytes, DecodeContext { source }) {
                         Ok(packet) => {
-                            apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::PacketReceived { interface, source, packet, now_ms }));
+                            apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::PacketReceivedWithTimestamp { interface, source, packet, now_ms: now(), received_timestamp_us }));
                             status.neighbours = engine.neighbour_count();
                             status.neighbour_details = engine.neighbour_status(now());
                         },
@@ -237,9 +239,9 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     let result = if sockets.contains_key(&interface) {
                         Ok(())
                     } else {
-                        match InterfaceSocket::open(&interface) {
+                        let policy = configured_policy.unwrap_or_else(|| default_policy.clone());
+                        match InterfaceSocket::open(&interface, policy.control_transport) {
                             Ok(socket) => {
-                                let policy = configured_policy.unwrap_or_else(|| default_policy.clone());
                                 let socket = Arc::new(socket);
                                 let (stop, stop_rx) = watch::channel(false);
                                 let receiver = spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx.clone(), Arc::clone(&started));
@@ -271,7 +273,9 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     let _ = reply.send(result);
                 }
                 Command::UpdateInterfacePolicy(interface, policy, reset_metric, reply) => {
-                    let result = if sockets.contains_key(&interface) {
+                    let result = if sockets.get(&interface).is_some_and(|s| s.transport != policy.control_transport) {
+                        Err(RouterError::TransportChangeRequiresReattach(interface))
+                    } else if sockets.contains_key(&interface) {
                         apply_actions_with_status(
                             &outbound,
                             &export_updates,
@@ -373,13 +377,12 @@ pub(super) fn interface_status(
                     .read()
                     .expect("address lock")
                     .iter()
-                    .filter_map(|address| match address {
-                        IpAddr::V6(address) => Some(*address),
-                        _ => None,
-                    })
+                    .copied()
                     .collect(),
+                control_transport: socket.transport,
                 mtu,
-                udp_payload_budget: payload_budget_for_mtu(mtu).unwrap_or_default(),
+                udp_payload_budget: payload_budget_for_transport(mtu, socket.transport)
+                    .unwrap_or_default(),
                 metric: policy.metric.name(),
                 hello_interval_ms: u64::from(policy.hello_interval_cs) * 10,
                 update_interval_ms: u64::from(policy.update_interval_cs) * 10,
@@ -433,7 +436,7 @@ pub(super) fn apply_actions_with_status(
         match action {
             Action::Send {
                 interface,
-                destination: IpAddr::V6(destination),
+                destination,
                 packet,
                 timing,
             } => {
@@ -446,7 +449,6 @@ pub(super) fn apply_actions_with_status(
                     timing,
                 });
             }
-            Action::Send { .. } => {}
             Action::RoutesChanged {
                 generation,
                 routes,

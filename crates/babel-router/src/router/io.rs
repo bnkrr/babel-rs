@@ -22,10 +22,10 @@ pub(super) fn spawn_receiver(
                 changed = shutdown.changed() => if changed.is_err() || *shutdown.borrow() { return; },
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
                 result = socket.socket.recv_from(&mut buffer) => match result {
-                    Ok((length, SocketAddr::V6(source)))
-                        if valid_babel_source(&source, &socket.addresses.read().expect("address lock")) => {
-                        let now_ms = elapsed_ms(&started);
-                        let item = Received::Packet { _permit: permit, interface: socket.name.clone(), index: socket.index, source: IpAddr::V6(*source.ip()), bytes: buffer[..length].to_vec(), now_ms };
+                    Ok((length, source))
+                        if valid_socket_source(&socket, source) => {
+                        let received_timestamp_us = started.elapsed().as_micros() as u32;
+                        let item = Received::Packet { _permit: permit, interface: socket.name.clone(), index: socket.index, source: source.ip(), bytes: buffer[..length].to_vec(), received_timestamp_us };
                         tokio::select! {
                             _ = shutdown.changed() => return,
                             _ = stop.changed() => return,
@@ -53,6 +53,25 @@ pub(super) fn spawn_receiver(
     }))
 }
 
+fn valid_socket_source(socket: &InterfaceSocket, source: SocketAddr) -> bool {
+    let local = socket.addresses.read().expect("address lock");
+    match (socket.transport, source) {
+        (babel_protocol::ControlTransport::Ipv6, SocketAddr::V6(source)) => {
+            valid_babel_source(&source, &local)
+        }
+        (babel_protocol::ControlTransport::Ipv4, SocketAddr::V4(source)) => {
+            source.port() == babel_protocol::wire::PORT
+                && !source.ip().is_unspecified()
+                && !source.ip().is_multicast()
+                && !source.ip().is_loopback()
+                && !source.ip().is_broadcast()
+                && !local.contains(&IpAddr::V4(*source.ip()))
+                && crate::transport::ipv4_on_link(&socket.name, *source.ip())
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn valid_babel_source(source: &std::net::SocketAddrV6, local: &[IpAddr]) -> bool {
     source.port() == babel_protocol::wire::PORT
         && source.ip().is_unicast_link_local()
@@ -62,7 +81,7 @@ pub(super) fn valid_babel_source(source: &std::net::SocketAddrV6, local: &[IpAdd
 #[async_trait::async_trait]
 pub(super) trait OutputTransport: Send + Sync + 'static {
     fn payload_budget(&self) -> std::io::Result<usize>;
-    async fn send(&self, bytes: &[u8], destination: Ipv6Addr) -> std::io::Result<usize>;
+    async fn send(&self, bytes: &[u8], destination: IpAddr) -> std::io::Result<usize>;
 }
 
 #[async_trait::async_trait]
@@ -71,7 +90,7 @@ impl OutputTransport for InterfaceSocket {
         InterfaceSocket::payload_budget(self)
     }
 
-    async fn send(&self, bytes: &[u8], destination: Ipv6Addr) -> std::io::Result<usize> {
+    async fn send(&self, bytes: &[u8], destination: IpAddr) -> std::io::Result<usize> {
         self.socket
             .send_to(bytes, self.destination(destination))
             .await
@@ -144,7 +163,7 @@ pub(super) async fn run_sender(
                     }
                     if stamp_hello_timestamps(
                         &mut datagram.bytes,
-                        send_ms.wrapping_mul(1_000) as u32,
+                        started.elapsed().as_micros() as u32,
                     )
                     .is_err()
                     {

@@ -50,6 +50,9 @@ impl Engine {
         let Some(next_hop) = update.next_hop else {
             return (false, Vec::new());
         };
+        if key.destination.addr().is_ipv4() && next_hop.is_ipv6() && !self.config.ipv4_via_ipv6 {
+            return (false, Vec::new());
+        }
         let Some(neighbour) = self.neighbours.get(neighbour_key) else {
             return (false, Vec::new());
         };
@@ -73,7 +76,7 @@ impl Engine {
             }
         }
         let cost = neighbour.metric.link_cost();
-        let metric = self.config.metric_algebra.extend(update.metric, cost);
+        let metric = safe_extend(self.config.metric_algebra.as_ref(), update.metric, cost);
         if metric != INFINITY && metric <= update.metric {
             return (false, Vec::new());
         }
@@ -222,15 +225,11 @@ impl Engine {
             let Some(link_cost) = costs.get(neighbour_key) else {
                 continue;
             };
-            let metric = self
-                .config
-                .metric_algebra
-                .extend(candidate.advertised_metric, *link_cost);
-            let metric = if metric == INFINITY || metric <= candidate.advertised_metric {
-                INFINITY
-            } else {
-                metric
-            };
+            let metric = safe_extend(
+                self.config.metric_algebra.as_ref(),
+                candidate.advertised_metric,
+                *link_cost,
+            );
             changed |= candidate.metric != metric;
             candidate.metric = metric;
         }
@@ -366,7 +365,9 @@ impl Engine {
                     expiries
                         .get(&key)
                         .copied()
-                        .unwrap_or_else(|| now_ms.saturating_add(u64::from(longest) * 35)),
+                        .unwrap_or(now_ms)
+                        .max(now_ms.saturating_add(u64::from(longest) * 35))
+                        .max(self.advertised_until.get(&key).copied().unwrap_or(0)),
                 );
             }
         }
@@ -414,7 +415,8 @@ impl Engine {
         }
         for (key, previous) in before {
             if !self.selected.contains_key(key) {
-                actions.extend(self.advertise_learned(previous, INFINITY, None, now_ms));
+                self.repeat_advertisement(*key, now_ms);
+                actions.extend(self.send_retraction(*key, previous.seqno, now_ms));
                 let pending_key = (*key, previous.router_id);
                 let requested_seqno = self
                     .feasible
@@ -443,16 +445,34 @@ impl Engine {
         let changed: Vec<_> = self
             .selected
             .iter()
-            .filter(|(key, selected)| before.get(key) != Some(*selected))
+            .filter(|(key, selected)| {
+                before.get(key).is_none_or(|old| {
+                    old.router_id != selected.router_id
+                        || old.metric.abs_diff(selected.metric) >= 96
+                        || u32::from(old.metric.abs_diff(selected.metric)) * 4
+                            >= u32::from(old.metric.max(1))
+                })
+            })
             .map(|(_, selected)| selected.clone())
             .collect();
         for selected in &changed {
-            let advertisements = self.advertise_learned(
+            self.repeat_advertisement(selected.key, now_ms);
+            let mut advertisements = self.advertise_learned(
                 selected,
                 selected.metric,
                 Some(&selected.interface),
                 now_ms,
             );
+            if before
+                .get(&selected.key)
+                .is_none_or(|previous| previous.router_id != selected.router_id)
+            {
+                for action in &mut advertisements {
+                    if let Action::Send { timing, .. } = action {
+                        *timing = SendTiming::urgent(now_ms);
+                    }
+                }
+            }
             let finite = advertisements.iter().any(|action| match action {
                 Action::Send { packet, .. } => packet.tlvs.iter().any(
                     |tlv| matches!(tlv, OutboundTlv::Update(update) if update.metric != INFINITY),
@@ -536,5 +556,18 @@ pub(super) fn selected_from_candidate(route: &Candidate) -> SelectedRoute {
         metric: route.metric,
         next_hop: route.next_hop,
         interface: route.interface.clone(),
+    }
+}
+
+/// A custom algebra cannot make an infinite link reachable or reduce distance.
+fn safe_extend(algebra: &dyn MetricAlgebra, advertised: u16, link: u16) -> u16 {
+    if advertised == INFINITY || link == INFINITY || link == 0 {
+        return INFINITY;
+    }
+    let result = algebra.extend(advertised, link);
+    if result <= advertised {
+        INFINITY
+    } else {
+        result
     }
 }

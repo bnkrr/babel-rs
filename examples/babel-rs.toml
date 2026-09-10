@@ -10,6 +10,7 @@ shutdown_timeout_ms = 5000
 # Required, ordered desired-state rules. The first matching section wins.
 # Exact names, `*`, and `?` are supported; zero current matches is valid.
 [[interfaces]]
+# control_transport = "ipv6" # Set "ipv4" for IPv4-only control links.
 match = ["test-special-*"]
 link_type = "tunnel"
 hello_interval_ms = 1000
@@ -24,6 +25,7 @@ link_type = "tunnel"
 # [interfaces.metric]
 # type = "rtt"
 # probe_interval_ms = 2000
+# Optional elapsed-time smoothing; default is per-sample alpha 0.836.
 # half_life_ms = 6000
 # min_rtt_ms = 10
 # max_rtt_ms = 120

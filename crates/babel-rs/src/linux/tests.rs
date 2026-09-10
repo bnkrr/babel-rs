@@ -154,3 +154,36 @@ fn export_progress_preserves_attempted_revision_across_reload_and_failure() {
     assert_eq!(state.last_success_revision, Some(state.revision()));
     assert!(state.last_error.is_none());
 }
+
+#[test]
+fn source_specificity_orders_finite_routes_and_tombstones_equally() {
+    for specific_is_unreachable in [false, true] {
+        let source = "2001:db8:99::/64";
+        let finite = selected(
+            "2001:db8:42::/64",
+            (!specific_is_unreachable).then_some(source),
+            96,
+        );
+        let unreachable = RouteKey::new(
+            finite.key.destination,
+            specific_is_unreachable.then(|| source.parse().unwrap()),
+        )
+        .unwrap();
+        let snapshot = RouteSnapshot {
+            generation: 1,
+            routes: vec![finite],
+            unreachable: vec![unreachable],
+        };
+        let routes = project_routes(
+            &[ExportView {
+                table: 100,
+                source: Some(source.parse().unwrap()),
+                rule_priority: None,
+            }],
+            &snapshot,
+        );
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].source_specific);
+        assert_eq!(routes[0].selected.is_none(), specific_is_unreachable);
+    }
+}

@@ -30,6 +30,13 @@ pub struct RouteSnapshot {
 /// successful export. The router enforces its configured overall cleanup deadline.
 #[async_trait]
 pub trait RouteExporter: Send + Sync + 'static {
+    /// Opt in only if the forwarding backend can install IPv4 routes via IPv6
+    /// and originate ICMPv4 on unnumbered links (RFC 9229 §§2.2–3).
+    /// The runtime gates route selection before export; default is unsupported.
+    fn supports_ipv4_via_ipv6(&self) -> bool {
+        false
+    }
+
     /// Reconcile the complete desired state; errors are logged and retried.
     async fn reconcile(
         &self,
@@ -93,6 +100,11 @@ impl MemoryExporter {
 
 #[async_trait]
 impl RouteExporter for MemoryExporter {
+    // This sink represents an abstract RIB, not a packet-forwarding backend.
+    fn supports_ipv4_via_ipv6(&self) -> bool {
+        true
+    }
+
     async fn reconcile(
         &self,
         snapshot: RouteSnapshot,

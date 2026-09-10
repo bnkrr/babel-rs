@@ -5,6 +5,13 @@ examples, Clippy and documentation checks, plus the Rust 1.90 compatibility
 check. The network workflows build the release daemon and exercise it inside
 disposable Linux namespaces; the daemon uses production protocol defaults.
 
+The [2026-09-10 audit follow-up](CONFORMANCE.md) adds maintained regressions in
+`crates/babel-protocol/tests/rfc_audit_regressions.rs`, covering structured prefix
+compression, request replies, timestamp packet boundaries, withdrawal holds,
+backend capability gating and custom-algebra infinity. The original random-byte
+test did not reach the decoder panic. The follow-up's stable and Rust 1.90
+workspace runs each passed 157 tests.
+
 `crates/babel-protocol/tests/seqno_recovery.rs` checks that worse/equal infeasible
 alternates do not originate unnecessary sequence requests, while preferable
 alternates, an infeasible current path and route loss still trigger recovery.
@@ -42,7 +49,7 @@ the babel-rs peer. Ordinary numbered-interface exchange still includes babeld.
 
 ## Network CI
 
-Every branch push and pull request runs the eight interoperability/lifecycle/RTT/MTU
+Every branch push and pull request runs the interoperability/lifecycle/RTT/MTU and RFC boundary
 regressions and five independent robustness jobs. Release tags run the same checks
 through the release workflow before publication:
 
@@ -213,3 +220,12 @@ bug. The 2026-09-10 fresh-state replay (32 slots, minimum 16, degree 4,
 bottleneck, seed 20260908, mix babel-rs=2,bird=1,babeld=1) passed round 170 and
 cleanup. Historical accumulated-state behavior remains unproven; neither run
 is reported as a completed mixed endless pass.
+
+## RFC boundary networks
+
+`tests/e2e/netns-rfc-boundaries.py` verifies pure IPv4 control with IPv6 disabled
+and MTU 576, live control-family changes, RTT exchange with babeld over a 40 ms
+round-trip link, and ICMPv4 TTL/fragmentation errors on unnumbered links. ICMP
+is checked both with and without a usable IPv4 address on the forwarding router.
+PMTU probes bypass the sender's cached PMTU so each phase reaches the router.
+Run the VM wrapper with `rfc-boundaries`; `all` and network CI include it.

@@ -109,6 +109,7 @@ impl Engine {
         let expired_tombstones = self.tombstones.len();
         self.tombstones.retain(|_, expires| *expires >= now_ms);
         routes_may_have_changed |= expired_tombstones != self.tombstones.len();
+        self.advertised_until.retain(|_, until| *until >= now_ms);
         let previous_sources = self.feasible.len();
         self.feasible
             .retain(|_, source| source.expires_ms >= now_ms);
@@ -125,6 +126,13 @@ impl Engine {
         } else {
             Vec::new()
         };
+        if expired_tombstones != self.tombstones.len()
+            && !actions
+                .iter()
+                .any(|a| matches!(a, Action::RoutesChanged { .. }))
+        {
+            actions.push(self.route_snapshot());
+        }
         actions.extend(refresh_actions);
         let due_requests: Vec<_> = self
             .pending_seqno
@@ -155,6 +163,28 @@ impl Engine {
                 value.next_retry_ms = now_ms.saturating_add(
                     REQUEST_RETRY_INITIAL_MS.saturating_mul(1u64 << u32::from(attempt + 1)),
                 );
+            }
+        }
+        let repeat_keys: Vec<_> = self
+            .pending_advertisements
+            .iter()
+            .filter(|(_, (deadline, _))| now_ms >= *deadline)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in repeat_keys {
+            let (_, left) = self
+                .pending_advertisements
+                .remove(&key)
+                .expect("pending repeat");
+            actions.extend(self.send_updates(
+                now_ms,
+                Some(key),
+                None,
+                Some(SendTiming::urgent(now_ms)),
+            ));
+            if left > 1 {
+                self.pending_advertisements
+                    .insert(key, (now_ms.saturating_add(1_000), left - 1));
             }
         }
         let mut ihu_due: Vec<_> = self
@@ -223,7 +253,13 @@ impl Engine {
                 };
                 actions.push(Action::Send {
                     interface: interface.clone(),
-                    destination: BABEL_MULTICAST_V6,
+                    destination: self
+                        .interfaces
+                        .get(&interface)
+                        .expect("interface exists")
+                        .policy
+                        .control_transport
+                        .multicast(),
                     packet: OutboundPacket {
                         tlvs: vec![OutboundTlv::Hello {
                             unicast: false,

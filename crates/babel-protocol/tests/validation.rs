@@ -35,6 +35,7 @@ fn configuration_boundaries_agree_with_engine_construction() {
         config.hello_interval_cs = hello;
         config.update_interval_cs = update;
         let policy = InterfacePolicy {
+            control_transport: Default::default(),
             ipv4_next_hop: Default::default(),
             metric: Arc::clone(&config.metric),
             hello_interval_cs: hello,
@@ -75,6 +76,7 @@ fn invalid_local_events_leave_existing_state_unchanged() {
         );
     }
     let invalid_policy = InterfacePolicy {
+        control_transport: Default::default(),
         ipv4_next_hop: Default::default(),
         metric: Arc::new(WiredMetric::default()),
         hello_interval_cs: 0,

@@ -1,5 +1,15 @@
 # babel-rs
 
+## Development status
+
+Most of this project's code was written by **OpenAI Codex**.
+
+The project is **pre-1.0**: public APIs, configuration, and behavior may change
+in breaking ways between 0.x minor releases. Pin the version you deploy, review
+the [changelog](CHANGELOG.md), and test upgrades in your own environment before
+production use. See the [compatibility policy](docs/SUPPORT.md#api-compatibility)
+for the versioning contract.
+
 ## Purpose
 
 `babel-rs` is an independent Rust implementation of the standard Babel
@@ -11,6 +21,11 @@ routing tables.
 See [SUPPORT.md](docs/SUPPORT.md) for platform and compatibility contracts,
 [CHANGELOG.md](CHANGELOG.md) for migration, and [RELEASING.md](docs/RELEASING.md)
 for archive/consumer verification.
+
+The [current RFC audit](docs/CONFORMANCE.md) records confirmed implementation
+defects, missing capabilities and unverified cases. The current version is not
+claimed to be a complete RFC implementation; successful tests and packaging
+checks do not resolve those findings.
 
 It interoperates on the wire with `babeld` and BIRD; neither is a runtime
 dependency.
@@ -29,7 +44,7 @@ users opt into the Linux backend.
 
 ## Current scope
 
-The v0.5 profile implements RFC 8966 base TLVs, neighbour maintenance,
+The v0.5 implementation includes RFC 8966 base TLVs, neighbour maintenance,
 feasibility, route selection, route and sequence-number requests, retractions,
 and multi-hop propagation. It also implements RFC 9079 source-specific routes
 and RFC 9229 IPv4 routes with IPv6 next hops.
@@ -79,9 +94,13 @@ sudo target/release/babel-rs routes --socket /run/babel-rs/babel-rs.ctl
 ```
 
 Start from [examples/babel-rs.toml](examples/babel-rs.toml). Each participating
-interface must be administratively up and have an IPv6 link-local address.
-`babel-rs` sends standard Babel packets over UDP/6696 to `ff02::1:6`; peers do
-not need matching Linux interface names.
+interface must be administratively up. The default `control_transport = "ipv6"`
+uses an IPv6 link-local address and multicast `ff02::1:6`. Set
+`control_transport = "ipv4"` on a rule to use IPv4 UDP/6696 and `224.0.0.111`;
+that mode requires an IPv4 interface address and works with IPv6 disabled.
+Neither mode requires public IPv6 connectivity. Peers on a link must use the
+same control family; Linux interface names need not match. Control transport
+and the `ipv4_next_hop` route-announcement policy are independent.
 
 Structured interface rules are checked in order and the first matching rule
 wins. `link_type` supplies documented metric and split-horizon presets; timing
@@ -109,7 +128,8 @@ backwards compatible with peers that do not implement the extension:
 [interfaces.metric]
 type = "rtt"
 probe_interval_ms = 2000
-half_life_ms = 6000
+# Optional time-based override; omit for per-sample alpha 0.836.
+# half_life_ms = 6000
 min_rtt_ms = 10
 max_rtt_ms = 120
 max_penalty = 150
@@ -119,8 +139,9 @@ type = "wired"
 ```
 
 RTT is sampled independently on every live adjacency; one link cost is shared
-by every route learned through that neighbour. The time-based half-life keeps
-filter behaviour stable if probe timing varies. Route changes use a separate
+by every route learned through that neighbour. The default filter uses the
+RFC-recommended per-sample weight; an explicit half-life override instead
+smooths by elapsed time. Route changes use a separate
 local policy: after a newly discovered prefix has settled, an alternative must
 clear both margins continuously for the configured dwell time. Initial
 candidate discovery and loss of the current route bypass this delay. A

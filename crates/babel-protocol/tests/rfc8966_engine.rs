@@ -46,7 +46,7 @@ fn rfc8966_3_1_output_actions_preserve_their_deadlines() {
     assert!(request.iter().any(|action| matches!(
         action,
         Action::Send { timing, .. }
-            if timing.deadline_ms == 3922 && timing.max_jitter_ms == 20
+            if timing.deadline_ms == 4102 && timing.max_jitter_ms == 200
     )));
 }
 
@@ -178,6 +178,9 @@ fn rfc8966_3_5_5_expiry_retracts_then_garbage_collects_the_route() {
     )));
 
     h.tick(704);
+    assert_eq!(h.engine.unreachable_routes(), vec![route]);
+    // Incoming lifetime was 350 ms; hold must cover our 16 s outgoing interval.
+    h.tick(56354);
     assert!(h.engine.unreachable_routes().is_empty());
 }
 

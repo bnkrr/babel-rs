@@ -17,6 +17,7 @@ fn config(router_id: RouterId) -> EngineConfig {
 
 fn policy(cost: u16, hello_interval_cs: u16, split_horizon: bool) -> InterfacePolicy {
     InterfacePolicy {
+        control_transport: Default::default(),
         ipv4_next_hop: Default::default(),
         metric: Arc::new(WiredMetric::new(cost, 1, 1).unwrap()),
         hello_interval_cs,
@@ -204,6 +205,7 @@ fn route_requires_neighbour_and_exports_generation() {
 #[test]
 fn unfeasible_alternate_is_not_acquired() {
     let mut engine = Engine::new(EngineConfig {
+        ipv4_via_ipv6: true,
         limits: crate::ResourceLimits::default(),
         router_id: id(1),
         metric: Arc::new(WiredMetric::new(96, 1, 1).unwrap()),
@@ -302,7 +304,7 @@ fn unfeasible_alternate_is_not_acquired() {
 }
 
 #[test]
-fn withdrawal_advances_sequence_and_sends_infinity() {
+fn withdrawal_keeps_sequence_and_sends_infinity() {
     let mut engine = Engine::new(config(id(1)));
     engine.handle(Event::InterfaceUp {
         interface: "wg0".into(),
@@ -319,14 +321,14 @@ fn withdrawal_advances_sequence_and_sends_infinity() {
         now_ms: 2,
     });
     assert!(
-        actions
+        !actions
             .iter()
-            .any(|action| matches!(action, Action::SequenceNumberChanged(1)))
+            .any(|action| matches!(action, Action::SequenceNumberChanged(_)))
     );
     assert!(actions.iter().any(|action| matches!(
         action,
         Action::Send { packet, .. }
-            if packet.tlvs.iter().any(|tlv| matches!(tlv, OutboundTlv::Update(update) if update.metric == INFINITY && update.seqno == 1))
+            if packet.tlvs.iter().any(|tlv| matches!(tlv, OutboundTlv::Update(update) if update.metric == INFINITY && update.seqno == 0))
     )));
 }
 
@@ -873,7 +875,7 @@ fn source_entry_is_maintained_on_advertisement_and_garbage_collected() {
 }
 
 #[test]
-fn replacing_origins_is_a_single_sequence_transition() {
+fn replacing_origins_without_metric_increase_keeps_sequence() {
     let mut engine = Engine::new(config(id(1)));
     engine.handle(Event::InterfaceUp {
         interface: "wg0".into(),
@@ -896,7 +898,7 @@ fn replacing_origins_is_a_single_sequence_transition() {
             .iter()
             .filter(|action| matches!(action, Action::SequenceNumberChanged(_)))
             .count(),
-        1
+        0
     );
     assert!(actions.iter().any(|action| matches!(
         action,

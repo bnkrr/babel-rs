@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -23,7 +23,7 @@ use crate::output_queue::{
     OUTPUT_BUDGET_BYTES, OUTPUT_QUEUE_CAPACITY, OutputCounters, OutputQueue, OutputStatus,
     QueuedIntent, SEND_TIMEOUT_MS,
 };
-use crate::transport::{InterfaceSocket, payload_budget_for_mtu};
+use crate::transport::{InterfaceSocket, payload_budget_for_transport};
 
 /// Configuration, interface activation or runtime command failure.
 #[derive(Debug, Error)]
@@ -42,6 +42,8 @@ pub enum RouterError {
     },
     #[error("Babel interface {0} is not active")]
     InterfaceNotFound(String),
+    #[error("changing control transport on {0} requires removing and reattaching the interface")]
+    TransportChangeRequiresReattach(String),
     #[error("duplicate originated route {0:?}")]
     DuplicateOrigin(RouteKey),
     #[error("originated route metric must be below Babel infinity")]
@@ -67,7 +69,8 @@ pub enum RouterError {
 pub struct RouterInterfaceStatus {
     pub name: String,
     pub index: u32,
-    pub local_addresses: Vec<Ipv6Addr>,
+    pub local_addresses: Vec<IpAddr>,
+    pub control_transport: babel_protocol::ControlTransport,
     pub mtu: u32,
     pub udp_payload_budget: usize,
     pub metric: String,
@@ -131,7 +134,7 @@ enum Received {
         index: u32,
         source: IpAddr,
         bytes: Vec<u8>,
-        now_ms: u64,
+        received_timestamp_us: u32,
     },
     Failed {
         interface: String,
@@ -531,12 +534,17 @@ impl BabelRouterBuilder {
         self.validate()?;
         let router_id = self.router_id.ok_or(RouterError::MissingRouterId)?;
         let mut sockets = HashMap::new();
-        for (name, _) in &self.interfaces {
-            let socket =
-                InterfaceSocket::open(name).map_err(|source| RouterError::OpenInterface {
-                    interface: name.clone(),
-                    source,
-                })?;
+        for (name, policy) in &self.interfaces {
+            let socket = InterfaceSocket::open(
+                name,
+                policy
+                    .as_ref()
+                    .map_or(Default::default(), |p| p.control_transport),
+            )
+            .map_err(|source| RouterError::OpenInterface {
+                interface: name.clone(),
+                source,
+            })?;
             sockets.insert(name.clone(), Arc::new(socket));
         }
         let exporter: Arc<dyn RouteExporter> = self

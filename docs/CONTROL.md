@@ -134,7 +134,9 @@ that extra clients are refused, and reuses all 63 timed-out slots before closing
 the old client sockets. It also checks disconnect reuse and shutdown while
 clients remain connected. The `all` suite includes this mode.
 
-Interface inspection includes `ipv4_next_hop` (configured auto/ipv4/ipv6),
+Interface inspection includes `control_transport` (`ipv4`/`ipv6`), all IPv4/IPv6
+`local_addresses`, and `ipv4_next_hop` (configured auto/ipv4/ipv6),
 `effective_ipv4_next_hop` (ipv4/ipv6/unavailable), and nullable
 `ipv4_next_hop_address`. The effective value reflects the latest address scan;
-`unavailable` means forced IPv4 has no usable address and sends retractions.
+`unavailable` means the configured announcement needs a next-hop address
+that the interface does not have; those announcements are retracted.

@@ -5,6 +5,7 @@ use super::*;
 impl Engine {
     pub(super) fn default_interface_policy(&self) -> InterfacePolicy {
         InterfacePolicy {
+            control_transport: Default::default(),
             ipv4_next_hop: Default::default(),
             metric: Arc::clone(&self.config.metric),
             hello_interval_cs: self.config.hello_interval_cs,
@@ -32,8 +33,15 @@ impl Engine {
             });
         let mut actions = self.tick(now_ms);
         actions.push(Action::Send {
+            destination: self
+                .interfaces
+                .get(&interface)
+                .expect("interface exists")
+                .policy
+                .control_transport
+                .multicast(),
+
             interface,
-            destination: BABEL_MULTICAST_V6,
             packet: OutboundPacket {
                 tlvs: vec![OutboundTlv::RouteRequest {
                     key: None,
@@ -55,12 +63,19 @@ impl Engine {
         let Some(state) = self.interfaces.get_mut(&interface) else {
             return Vec::new();
         };
+        let transport_changed = state.policy.control_transport != policy.control_transport;
         state.policy = policy.clone();
         state.next_hello_ms = now_ms;
         state.next_update_ms = now_ms;
         state.last_full_update_ms = None;
 
         let mut actions = Vec::new();
+        if transport_changed {
+            self.neighbours.retain(|key, _| key.interface != interface);
+            self.candidates
+                .retain(|_, route| route.interface != interface);
+            actions.extend(self.reselect(now_ms));
+        }
         if reset_metric {
             for (key, neighbour) in &mut self.neighbours {
                 if key.interface != interface {

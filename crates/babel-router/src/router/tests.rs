@@ -1,3 +1,4 @@
+use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -34,7 +35,7 @@ impl OutputTransport for TestTransport {
         }
     }
 
-    async fn send(&self, bytes: &[u8], _: Ipv6Addr) -> std::io::Result<usize> {
+    async fn send(&self, bytes: &[u8], _: IpAddr) -> std::io::Result<usize> {
         self.attempts.fetch_add(1, Ordering::Relaxed);
         loop {
             let wake = self.wake.notified();
@@ -50,7 +51,7 @@ impl OutputTransport for TestTransport {
 
 fn queue_test_ack(queue: &OutputQueue, now: u64) {
     queue.submit(OutboundIntent {
-        destination: Ipv6Addr::LOCALHOST,
+        destination: Ipv6Addr::LOCALHOST.into(),
         packet: babel_protocol::OutboundPacket {
             tlvs: vec![babel_protocol::OutboundTlv::Ack { nonce: 1 }],
         },
@@ -246,6 +247,8 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
         .await
         .unwrap()
         .unwrap();
+    tokio::time::advance(Duration::from_millis(200)).await;
+    settle_tasks().await;
     // Let old output expire, then recover the transport and wait for the
     // ordinary protocol timer to advertise current state on both links.
     tokio::time::advance(Duration::from_secs(2)).await;
@@ -271,8 +274,10 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
     }));
     bad_transport.blocked.store(false, Ordering::Relaxed);
     bad_transport.wake.notify_waiters();
-    tokio::time::advance(Duration::from_secs(16)).await;
-    settle_tasks().await;
+    for _ in 0..20 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle_tasks().await;
+    }
     for transport in [&bad_transport, &good_transport] {
         assert!(transport.sent.lock().unwrap().iter().any(|bytes| {
             decode_packet(
@@ -467,9 +472,8 @@ async fn sequence_changes_stay_in_memory_and_shutdown_checkpoints_all_origins_on
         .unwrap()
         .unwrap();
 
-    // The final batch withdrawal increments once for all three origins,
-    // wraps normally, and only that final sequence is checkpointed.
-    assert_eq!(*store.saved.lock().unwrap(), vec![0]);
+    // Withdrawal keeps the existing sequence; checkpoint once after cleanup.
+    assert_eq!(*store.saved.lock().unwrap(), vec![u16::MAX]);
     assert_eq!(exporter.cleanups.load(Ordering::SeqCst), 1);
 }
 

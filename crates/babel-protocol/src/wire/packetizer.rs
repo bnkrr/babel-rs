@@ -77,7 +77,8 @@ pub fn stamp_hello_timestamps(data: &mut [u8], timestamp: u32) -> Result<(), Wir
 /// Encode semantic outbound TLVs into independently decodable Babel packets.
 /// Router-ID and Next-Hop context is repeated after every packet boundary.
 /// `max_packet_size` includes the Babel header but excludes UDP/IP headers.
-/// A budget below four bytes is invalid; a single TLV that cannot fit is rejected.
+/// Timestamped IHUs must follow their timestamped Hello; each such group stays
+/// in one datagram. A group or TLV that cannot fit the budget is rejected.
 pub fn encode_packets(
     packet: &OutboundPacket,
     max_packet_size: usize,
@@ -90,29 +91,56 @@ pub fn encode_packets(
     let mut packets = Vec::new();
     let mut body = Vec::new();
     let mut context = EncodeContext::default();
-    for tlv in &packet.tlvs {
-        if !body.is_empty() && requires_fresh_next_hop_context(tlv, &context) {
+    let mut offset = 0;
+    let mut has_hello = false;
+    while offset < packet.tlvs.len() {
+        let tlv = &packet.tlvs[offset];
+        let is_hello = matches!(tlv, OutboundTlv::Hello { .. });
+        let timestamped = matches!(tlv, OutboundTlv::Hello { sub_tlvs, .. }
+            if sub_tlvs.iter().any(|s| matches!(s, SubTlv::TimestampHello(_))));
+        let mut end = offset + 1;
+        if timestamped {
+            while end < packet.tlvs.len() && matches!(&packet.tlvs[end], OutboundTlv::Ihu { .. }) {
+                end += 1;
+            }
+        } else if matches!(tlv, OutboundTlv::Ihu { sub_tlvs, .. }
+            if sub_tlvs.iter().any(|s| matches!(s, SubTlv::TimestampIhu { .. })))
+        {
+            return Err(WireError::InvalidTlv { type_: TLV_IHU });
+        }
+        let group = &packet.tlvs[offset..end];
+        if !body.is_empty()
+            && (requires_fresh_next_hop_context(tlv, &context) || (is_hello && has_hello))
+        {
             packets.push(finish_packet(std::mem::take(&mut body))?);
             context = EncodeContext::default();
+            has_hello = false;
         }
         let mut next_context = context.clone();
         let mut encoded = Vec::new();
-        encode_outbound_tlv(tlv, &mut next_context, &mut encoded)?;
+        for value in group {
+            encode_outbound_tlv(value, &mut next_context, &mut encoded)?;
+        }
         if encoded.len() > body_budget {
             return Err(WireError::BodyTooLarge);
         }
         if !body.is_empty() && body.len() + encoded.len() > body_budget {
             packets.push(finish_packet(std::mem::take(&mut body))?);
             context = EncodeContext::default();
+            has_hello = false;
             next_context = context.clone();
             encoded.clear();
-            encode_outbound_tlv(tlv, &mut next_context, &mut encoded)?;
+            for value in group {
+                encode_outbound_tlv(value, &mut next_context, &mut encoded)?;
+            }
             if encoded.len() > body_budget {
                 return Err(WireError::BodyTooLarge);
             }
         }
         body.extend(encoded);
         context = next_context;
+        has_hello |= is_hello;
+        offset = end;
     }
     packets.push(finish_packet(body)?);
     Ok(packets)

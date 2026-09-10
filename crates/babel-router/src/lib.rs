@@ -45,9 +45,9 @@ mod router;
 mod transport;
 
 pub use babel_protocol::{
-    AdditiveMetric, ConfigError, EtxMetric, InterfacePolicy, Ipv4NextHop, MetricAlgebra,
-    MetricProfile, NeighborMetric, ResourceLimits, ResourceStatus, RouteKey, RouteSelectionConfig,
-    RouterId, RttMetric, SelectedRoute, WiredMetric,
+    AdditiveMetric, ConfigError, ControlTransport, EtxMetric, InterfacePolicy, Ipv4NextHop,
+    MetricAlgebra, MetricProfile, NeighborMetric, ResourceLimits, ResourceStatus, RouteKey,
+    RouteSelectionConfig, RouterId, RttMetric, SelectedRoute, WiredMetric,
 };
 pub use export::{MemoryExporter, NoopSequenceStore, RouteExporter, RouteSnapshot, SequenceStore};
 pub use output_queue::OutputStatus;

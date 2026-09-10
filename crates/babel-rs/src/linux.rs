@@ -244,6 +244,10 @@ impl LinuxExporter {
 
 #[async_trait]
 impl RouteExporter for LinuxExporter {
+    fn supports_ipv4_via_ipv6(&self) -> bool {
+        true
+    }
+
     async fn reconcile(
         &self,
         snapshot: RouteSnapshot,

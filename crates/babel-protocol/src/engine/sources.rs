@@ -12,6 +12,9 @@ impl Engine {
         router_id: RouterId,
         now_ms: u64,
     ) -> Vec<Action> {
+        if self.originated.contains_key(&key) && router_id != self.config.router_id {
+            return vec![self.reply_to_route_request(key, requester, now_ms)];
+        }
         if let Some(route) = self.selected.get(&key).cloned()
             && (route.router_id != router_id
                 || route.seqno == seqno

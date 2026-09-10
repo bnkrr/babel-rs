@@ -52,10 +52,21 @@ explicit interface value > link_type preset > common built-in default
 | `wireless` | RFC 8966 ETX, window 6 | disabled |
 | `tunnel` | RFC 9616 RTT over the wired preset | enabled |
 
-The RTT preset probes every 2000 ms, uses a 6000 ms half-life, maps 10–120 ms
+The RTT preset probes every 2000 ms, uses per-sample EMA alpha 0.836, maps 10–120 ms
 to a maximum penalty of 150, and uses the wired preset as its base. An explicit
 `[interfaces.metric]` table replaces the complete metric preset; it is never
-deep-merged. `split_horizon` may also be set explicitly.
+deep-merged. Set `half_life_ms` to opt into elapsed-time smoothing instead.
+`split_horizon` may also be set explicitly.
+
+`control_transport = "ipv6"` (default) uses IPv6 link-local multicast;
+`"ipv4"` uses multicast 224.0.0.111 with an IPv4 interface address. IPv4 mode
+works without IPv6. A configuration reload that changes the control family
+reattaches the interface and acquires fresh neighbors. Other policy changes
+remain live. The public runtime API returns `TransportChangeRequiresReattach`
+for a direct policy update changing this field; remove and add the interface.
+This is separate from `ipv4_next_hop`, which controls announced route next hops.
+On IPv4 control links, an IPv6 route or IPv4-via-IPv6 announcement requires an
+explicit local IPv6 link-local next hop; otherwise that announcement is retracted.
 
 The common Hello interval is 4000 ms. The Update interval defaults to four
 times the effective Hello interval, so it is 16000 ms unless Hello is

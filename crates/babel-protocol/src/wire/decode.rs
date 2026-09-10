@@ -245,12 +245,20 @@ fn decode_update(value: &[u8], state: &mut ParserState) -> Result<Option<Tlv>, W
         return Err(invalid());
     }
     let prefix_bytes = &value[10..10 + encoded_len - omitted];
-    let prefix = decode_prefix(ae, plen, omitted, prefix_bytes, state.prefixes.get(&ae))
-        .ok_or_else(invalid)?;
+    let Some(prefix) = decode_prefix(ae, plen, omitted, prefix_bytes, state.prefixes.get(&ae))
+    else {
+        // Missing compression context invalidates this Update, not unrelated
+        // TLVs whose framing is still known (RFC 8966 section 4.6.9).
+        return Ok(None);
+    };
 
     // Parser state changes happen before mandatory sub-TLV handling.
     if flags & 0x80 != 0 {
-        state.prefixes.insert(ae, prefix_wire_bytes(prefix, ae));
+        // The default prefix includes its implicit trailing zeroes. Later
+        // updates can reuse more octets than this Update explicitly carried.
+        let mut bytes = prefix_wire_bytes(prefix, ae);
+        bytes.resize(ae.address_len().ok_or_else(invalid)?, 0);
+        state.prefixes.insert(ae, bytes);
     }
     if flags & 0x40 != 0 {
         let raw = router_id_from_prefix(prefix);
@@ -266,7 +274,10 @@ fn decode_update(value: &[u8], state: &mut ParserState) -> Result<Option<Tlv>, W
     let router_id = if metric == INFINITY {
         state.router_id
     } else {
-        Some(state.router_id.ok_or_else(invalid)?)
+        let Some(router_id) = state.router_id else {
+            return Ok(None);
+        };
+        Some(router_id)
     };
     let next_hop = if metric == INFINITY {
         None

@@ -1,4 +1,4 @@
-use std::net::Ipv6Addr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -10,13 +10,13 @@ pub(crate) const DEFAULT_PACING_MS: u64 = 2;
 const DEADLINE_MARGIN_MS: u64 = 5;
 
 pub(crate) struct OutboundIntent {
-    pub destination: Ipv6Addr,
+    pub destination: IpAddr,
     pub packet: OutboundPacket,
     pub timing: SendTiming,
 }
 
 pub(crate) struct ScheduledDatagram {
-    pub destination: Ipv6Addr,
+    pub destination: IpAddr,
     pub bytes: Vec<u8>,
     pub deadline_ms: u64,
     pub expires_ms: u64,
@@ -24,7 +24,7 @@ pub(crate) struct ScheduledDatagram {
 }
 
 struct PendingBatch {
-    destination: Ipv6Addr,
+    destination: IpAddr,
     tlvs: Vec<OutboundTlv>,
     release_ms: u64,
     deadline_ms: u64,
@@ -33,7 +33,7 @@ struct PendingBatch {
 }
 
 struct ReadyDatagram {
-    destination: Ipv6Addr,
+    destination: IpAddr,
     bytes: Vec<u8>,
     deadline_ms: u64,
     expires_ms: u64,
@@ -240,7 +240,7 @@ mod tests {
 
     fn intent(destination: Ipv6Addr, nonce: u16, timing: SendTiming) -> QueuedIntent {
         queued(OutboundIntent {
-            destination,
+            destination: destination.into(),
             packet: OutboundPacket {
                 tlvs: vec![OutboundTlv::Ack { nonce }],
             },
@@ -312,7 +312,7 @@ mod tests {
         };
         scheduler.enqueue(
             queued(OutboundIntent {
-                destination: Ipv6Addr::LOCALHOST,
+                destination: Ipv6Addr::LOCALHOST.into(),
                 packet,
                 timing: SendTiming {
                     deadline_ms: 103,
@@ -347,7 +347,7 @@ mod tests {
             Arc::new(tokio::time::Instant::now()),
         );
         let make = || OutboundIntent {
-            destination: Ipv6Addr::LOCALHOST,
+            destination: Ipv6Addr::LOCALHOST.into(),
             packet: packet.clone(),
             timing: SendTiming::immediate(0),
         };
@@ -382,7 +382,7 @@ mod tests {
         let mut scheduler = OutputScheduler::new(1);
         for now in [0, 900] {
             queue.submit(OutboundIntent {
-                destination: Ipv6Addr::LOCALHOST,
+                destination: Ipv6Addr::LOCALHOST.into(),
                 packet: OutboundPacket {
                     tlvs: vec![OutboundTlv::Ack { nonce: 1 }],
                 },
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(scheduler.expire(1_000), (2, 0));
         assert_eq!(queue.status().used_bytes, 0);
         queue.submit(OutboundIntent {
-            destination: Ipv6Addr::LOCALHOST,
+            destination: Ipv6Addr::LOCALHOST.into(),
             packet: OutboundPacket {
                 tlvs: vec![OutboundTlv::Ack { nonce: 2 }],
             },
@@ -458,7 +458,7 @@ mod tests {
         // Repeat to detect a budget that only allows an initial partial dump.
         for _ in 0..2 {
             queue.submit(OutboundIntent {
-                destination: Ipv6Addr::LOCALHOST,
+                destination: Ipv6Addr::LOCALHOST.into(),
                 packet: packet.clone(),
                 timing: SendTiming::immediate(0),
             });

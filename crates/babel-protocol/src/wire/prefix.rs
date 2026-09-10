@@ -85,7 +85,7 @@ pub(super) fn decode_prefix(
     }
     let mut encoded = vec![0u8; encoded_len];
     if omitted > 0 {
-        encoded[..omitted].copy_from_slice(&previous?[..omitted]);
+        encoded[..omitted].copy_from_slice(previous?.get(..omitted)?);
     }
     encoded[omitted..].copy_from_slice(&suffix[..encoded_len - omitted]);
     if !plen.is_multiple_of(8) && !encoded.is_empty() {

@@ -31,6 +31,7 @@ impl ConformanceHarness {
     pub fn with_limits(router_id: RouterId, limits: babel_protocol::ResourceLimits) -> Self {
         Self {
             engine: Engine::new(EngineConfig {
+                ipv4_via_ipv6: true,
                 limits,
                 router_id,
                 metric: Arc::new(WiredMetric::new(96, 1, 1).unwrap()),

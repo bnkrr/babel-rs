@@ -3,9 +3,16 @@
 The executable suite is `tests/e2e/run-on-linux-vm.sh`. It builds locally, copies
 only the binary and scripts to the Debian VM, and creates disposable network
 namespaces. The reference versions currently installed there are babeld
-1.13.1 and BIRD 3.1.7.
+1.13.1 and BIRD 3.1.7, on Linux 6.12.96+deb13-amd64.
 
-| Peer/topology | IPv6 | IPv4 via IPv6 | SADR | Lifecycle |
+The original scenarios below use IPv6 control transport; columns describe
+payload routes. The added RFC boundary suite also tests pure IPv4 control with
+IPv6 disabled and MTU 576, live control-family reload, independent babeld RTT,
+and ICMPv4 over unnumbered links. MAC/DTLS and general SADR are deferred; see
+[CONFORMANCE.md](CONFORMANCE.md). An RTT sample is evidence of timestamp exchange,
+not proof of route selection or arbitrary-load timing.
+
+| Peer/topology | IPv6 routes | IPv4 routes via IPv6 next hop | SADR | Lifecycle |
 |---|---:|---:|---:|---|
 | babel-rs ↔ babeld 1.13.1 | pass | pass | pass | retract, reannounce, restart |
 | babel-rs ↔ BIRD 3.1.7 | pass | pass | pass | bidirectional exchange |
@@ -66,3 +73,22 @@ are verified against both implementations.
 The interrupted mixed soak and fresh-state round replay are described in
 [TESTING.md](TESTING.md). The replay passing does not establish the cause of
 the historical missing BIRD route or reproduce its prior sequence history.
+
+## 2026-09-10 audit-fix verification
+
+All 15 VM scenarios passed across the full run and targeted continuation: the
+original eight through capacity isolation, restart recovery, shutdown recovery,
+RFC boundaries, shared LAN, control clients, combined failures, and 120-second
+steady state. The restart fixture was updated to assert the new withdrawal
+policy (unchanged sequence and remote route disappearance); stale-checkpoint
+recovery took about 180 seconds. The final queued-old-family guard additionally
+has a protocol regression and a rerun of the affected RFC boundary network.
+
+The pure IPv4 test disables IPv6, checks MTU 576 packet sizing, forwarding,
+wrong-port/off-subnet source admission and live family switching. babeld RTT
+samples match an injected 40 ms round-trip delay with a reachable adjacency.
+The ICMP test observes both TTL exceeded and fragmentation needed at MTU 1280,
+using the router's loopback IPv4 address or kernel fallback 192.0.0.8.
+The 120-second steady run passed 132 samples with maximum control latency
+1.262 ms; its duration is too short to make long-run leak claims.
+The historical mixed-soak round 170 observation remains unattributed.

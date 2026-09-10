@@ -14,8 +14,18 @@ impl Engine {
         let state = self.interfaces.get(interface);
         let policy = state.map_or(Ipv4NextHop::Auto, |s| s.policy.ipv4_next_hop);
         let ipv4 = state.and_then(|s| policy.ipv4_address(&s.local_addresses));
-        let unavailable =
-            key.destination.addr().is_ipv4() && policy == Ipv4NextHop::Ipv4 && ipv4.is_none();
+        let transport = state.map_or(ControlTransport::default(), |s| s.policy.control_transport);
+        let ipv6 = state.and_then(|s| {
+            s.local_addresses.iter().find_map(|address| match address {
+                IpAddr::V6(address) if address.is_unicast_link_local() => Some(*address),
+                _ => None,
+            })
+        });
+        let is_v4 = key.destination.addr().is_ipv4();
+        let needs_v6 = !is_v4 || ipv4.is_none();
+        let unavailable = (is_v4 && ipv4.is_none() && !self.config.ipv4_via_ipv6)
+            || (is_v4 && policy == Ipv4NextHop::Ipv4 && ipv4.is_none())
+            || (transport == ControlTransport::Ipv4 && needs_v6 && ipv6.is_none());
         let metric = if unavailable { INFINITY } else { metric };
         OutboundUpdate {
             key: Some(key),
@@ -23,19 +33,23 @@ impl Engine {
             seqno,
             metric,
             interval_cs: self.interface_update_interval(interface),
-            next_hop: if key.destination.addr().is_ipv4() && metric != INFINITY {
+            next_hop: if metric == INFINITY {
+                None
+            } else if is_v4 && ipv4.is_some() {
                 ipv4.map(IpAddr::V4)
+            } else if transport == ControlTransport::Ipv4 {
+                ipv6.map(IpAddr::V6)
             } else {
                 None
             },
-            // Retractions use ordinary AE 1, understood by both old and new peers.
-            v4_via_v6: key.destination.addr().is_ipv4() && metric != INFINITY && ipv4.is_none(),
+            // IPv4 retractions retain AE 1, including on an IPv6 control link.
+            v4_via_v6: is_v4 && metric != INFINITY && ipv4.is_none(),
             sub_tlvs: vec![],
         }
     }
 
     pub(super) fn update_action_to_candidate(
-        &self,
+        &mut self,
         key: RouteKey,
         router_id: RouterId,
         seqno: u16,
@@ -44,6 +58,17 @@ impl Engine {
         now_ms: u64,
     ) -> Action {
         let update = self.advertisement(&destination.interface, key, router_id, seqno, metric);
+        if update.metric != INFINITY {
+            self.maintain_source(
+                key,
+                router_id,
+                Distance {
+                    seqno,
+                    metric: update.metric,
+                },
+                now_ms,
+            );
+        }
         Action::Send {
             interface: destination.interface,
             destination: destination.address,
@@ -51,6 +76,31 @@ impl Engine {
                 tlvs: vec![OutboundTlv::Update(update)],
             },
             timing: SendTiming::urgent(now_ms),
+        }
+    }
+
+    pub(super) fn reply_to_route_request(
+        &mut self,
+        key: RouteKey,
+        destination: NeighborKey,
+        now_ms: u64,
+    ) -> Action {
+        // A specific request requires a reply even on a split-horizon link.
+        // Send it to the requester instead of interpreting suppression as loss.
+        let selected = self
+            .originated
+            .get(&key)
+            .map(|origin| (self.config.router_id, origin.seqno, origin.metric))
+            .or_else(|| {
+                self.selected
+                    .get(&key)
+                    .map(|route| (route.router_id, route.seqno, route.metric))
+            });
+        match selected {
+            Some((router_id, seqno, metric)) => {
+                self.update_action_to_candidate(key, router_id, seqno, metric, destination, now_ms)
+            }
+            None => self.retraction_action(key, self.sequence_number, destination, now_ms),
         }
     }
 
@@ -90,12 +140,32 @@ impl Engine {
     ) -> Vec<Action> {
         let interfaces: Vec<_> =
             interface.map_or_else(|| self.interfaces.keys().cloned().collect(), |v| vec![v]);
-        let origins: Vec<_> = self
-            .originated
-            .iter()
-            .map(|(key, origin)| (*key, origin.clone()))
-            .collect();
-        let selected: Vec<_> = self.selected.values().cloned().collect();
+        let origins: Vec<_> = match only {
+            Some(key) => self
+                .originated
+                .get(&key)
+                .map(|origin| (key, origin.clone()))
+                .into_iter()
+                .collect(),
+            None => self
+                .originated
+                .iter()
+                .map(|(key, origin)| (*key, origin.clone()))
+                .collect(),
+        };
+        let selected: Vec<_> = match only {
+            Some(key) => self.selected.get(&key).cloned().into_iter().collect(),
+            None => self.selected.values().cloned().collect(),
+        };
+        let tombstones: Vec<_> = match only {
+            Some(key) => self
+                .tombstones
+                .contains_key(&key)
+                .then_some(key)
+                .into_iter()
+                .collect(),
+            None => self.tombstones.keys().copied().collect(),
+        };
         interfaces
             .into_iter()
             .filter_map(|interface| {
@@ -155,6 +225,20 @@ impl Engine {
                         tlvs.push(OutboundTlv::Update(update));
                     }
                 }
+                for key in &tombstones {
+                    if !self.originated.contains_key(key)
+                        && !self.selected.contains_key(key)
+                        && only.is_none_or(|wanted| wanted == *key)
+                    {
+                        tlvs.push(OutboundTlv::Update(self.advertisement(
+                            &interface,
+                            *key,
+                            self.config.router_id,
+                            self.sequence_number,
+                            INFINITY,
+                        )));
+                    }
+                }
                 if only.is_none()
                     && !tlvs.is_empty()
                     && let Some(state) = self.interfaces.get_mut(&interface)
@@ -162,8 +246,15 @@ impl Engine {
                     state.last_full_update_ms = Some(now_ms);
                 }
                 (!tlvs.is_empty()).then_some(Action::Send {
+                    destination: self
+                        .interfaces
+                        .get(interface.as_str())
+                        .expect("interface exists")
+                        .policy
+                        .control_transport
+                        .multicast(),
+
                     interface,
-                    destination: BABEL_MULTICAST_V6,
                     packet: OutboundPacket { tlvs },
                     timing: send_timing,
                 })
@@ -184,7 +275,13 @@ impl Engine {
             .iter()
             .map(|(interface, state)| Action::Send {
                 interface: interface.clone(),
-                destination: BABEL_MULTICAST_V6,
+                destination: self
+                    .interfaces
+                    .get(interface.as_str())
+                    .expect("interface exists")
+                    .policy
+                    .control_transport
+                    .multicast(),
                 packet: OutboundPacket {
                     tlvs: vec![OutboundTlv::Update(OutboundUpdate {
                         key: Some(key),
@@ -197,7 +294,7 @@ impl Engine {
                         sub_tlvs: vec![],
                     })],
                 },
-                timing: SendTiming::triggered(now_ms, state.policy.hello_interval_cs),
+                timing: SendTiming::urgent(now_ms),
             })
             .collect()
     }
@@ -220,16 +317,22 @@ impl Engine {
         interfaces
             .into_iter()
             .map(|interface| {
-                let state = self.interfaces.get(&interface).expect("interface exists");
                 let update =
                     self.advertisement(&interface, route.key, route.router_id, route.seqno, metric);
                 Action::Send {
+                    destination: self
+                        .interfaces
+                        .get(interface.as_str())
+                        .expect("interface exists")
+                        .policy
+                        .control_transport
+                        .multicast(),
+
                     interface,
-                    destination: BABEL_MULTICAST_V6,
                     packet: OutboundPacket {
                         tlvs: vec![OutboundTlv::Update(update)],
                     },
-                    timing: SendTiming::triggered(now_ms, state.policy.hello_interval_cs),
+                    timing: SendTiming::urgent(now_ms),
                 }
             })
             .collect()

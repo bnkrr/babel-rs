@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
-use std::net::Ipv6Addr;
-use std::path::Path;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use babel_router::{RouterError, RouterHandle};
@@ -13,13 +12,14 @@ use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
-use crate::config::{Config, EffectiveInterface};
+use crate::config::{Config, ControlTransport, EffectiveInterface};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InterfaceSignature {
     index: u32,
     up: bool,
     link_local_addresses: Vec<Ipv6Addr>,
+    ipv4_addresses: Vec<Ipv4Addr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,8 +43,11 @@ pub async fn run(
     mut config: watch::Receiver<Config>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), InterfaceManagerError> {
-    let (connection, _monitor_handle, mut messages) =
-        new_multicast_connection(&[MulticastGroup::Link, MulticastGroup::Ipv6Ifaddr])?;
+    let (connection, _monitor_handle, mut messages) = new_multicast_connection(&[
+        MulticastGroup::Link,
+        MulticastGroup::Ipv6Ifaddr,
+        MulticastGroup::Ipv4Ifaddr,
+    ])?;
     tokio::spawn(connection);
 
     let mut attached = BTreeMap::new();
@@ -97,10 +100,22 @@ async fn reconcile(
     let stale: Vec<_> = attached
         .iter()
         .filter(|(name, attached)| {
-            config.effective_interface(name).is_none()
-                || current
-                    .get(*name)
-                    .is_none_or(|value| value != &attached.signature)
+            config
+                .effective_interface(name)
+                .is_none_or(|p| p.control_transport != attached.policy.control_transport)
+                || current.get(*name).is_none_or(|value| {
+                    value.index != attached.signature.index
+                        || value.up != attached.signature.up
+                        || match attached.policy.control_transport {
+                            ControlTransport::Ipv6 => {
+                                value.link_local_addresses
+                                    != attached.signature.link_local_addresses
+                            }
+                            ControlTransport::Ipv4 => {
+                                value.ipv4_addresses != attached.signature.ipv4_addresses
+                            }
+                        }
+                })
         })
         .map(|(name, _)| name.clone())
         .collect();
@@ -149,7 +164,10 @@ async fn reconcile(
         };
         if attached.contains_key(&name)
             || !signature.up
-            || signature.link_local_addresses.is_empty()
+            || match effective.control_transport {
+                ControlTransport::Ipv6 => signature.link_local_addresses.is_empty(),
+                ControlTransport::Ipv4 => signature.ipv4_addresses.is_empty(),
+            }
         {
             continue;
         }
@@ -175,7 +193,7 @@ async fn reconcile(
 }
 
 fn snapshot_interfaces() -> io::Result<BTreeMap<String, InterfaceSignature>> {
-    let addresses = link_local_addresses()?;
+    let (addresses, ipv4) = interface_address_map()?;
     let mut result = BTreeMap::new();
     for entry in fs::read_dir("/sys/class/net")? {
         let entry = entry?;
@@ -196,46 +214,48 @@ fn snapshot_interfaces() -> io::Result<BTreeMap<String, InterfaceSignature>> {
         };
         let mut link_local_addresses = addresses.get(&name).cloned().unwrap_or_default();
         link_local_addresses.sort();
+        let ipv4_addresses = ipv4.get(&name).cloned().unwrap_or_default();
         result.insert(
             name,
             InterfaceSignature {
                 index,
                 up: flags & 1 != 0,
                 link_local_addresses,
+                ipv4_addresses,
             },
         );
     }
     Ok(result)
 }
 
-fn link_local_addresses() -> io::Result<HashMap<String, Vec<Ipv6Addr>>> {
-    let mut result: HashMap<String, Vec<Ipv6Addr>> = HashMap::new();
-    let contents = fs::read_to_string(Path::new("/proc/net/if_inet6"))?;
-    for line in contents.lines() {
-        let fields: Vec<_> = line.split_ascii_whitespace().collect();
-        if fields.len() != 6 || fields[0].len() != 32 {
+type InterfaceAddressMap<T> = HashMap<String, Vec<T>>;
+
+fn interface_address_map()
+-> io::Result<(InterfaceAddressMap<Ipv6Addr>, InterfaceAddressMap<Ipv4Addr>)> {
+    let mut v6: InterfaceAddressMap<Ipv6Addr> = HashMap::new();
+    let mut v4: InterfaceAddressMap<Ipv4Addr> = HashMap::new();
+    for item in nix::ifaddrs::getifaddrs().map_err(io::Error::from)? {
+        let Some(address) = item.address else {
             continue;
+        };
+        if let Some(ip) = address
+            .as_sockaddr_in6()
+            .map(|a| a.ip())
+            .filter(Ipv6Addr::is_unicast_link_local)
+        {
+            v6.entry(item.interface_name.clone()).or_default().push(ip);
         }
-        let mut raw = [0u8; 16];
-        let mut valid = true;
-        for (index, byte) in raw.iter_mut().enumerate() {
-            match u8::from_str_radix(&fields[0][index * 2..index * 2 + 2], 16) {
-                Ok(value) => *byte = value,
-                Err(_) => {
-                    valid = false;
-                    break;
-                }
-            }
-        }
-        if valid {
-            let address = Ipv6Addr::from(raw);
-            if address.is_unicast_link_local() {
-                result
-                    .entry(fields[5].to_owned())
-                    .or_default()
-                    .push(address);
-            }
+        if let Some(ip) = address
+            .as_sockaddr_in()
+            .map(|a| a.ip())
+            .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
+        {
+            v4.entry(item.interface_name).or_default().push(ip);
         }
     }
-    Ok(result)
+    for values in v4.values_mut() {
+        values.sort();
+        values.dedup();
+    }
+    Ok((v6, v4))
 }

@@ -99,6 +99,17 @@ origins are advertised separately.
 
 ## Export and shutdown responsibilities
 
+`RouteExporter::supports_ipv4_via_ipv6()` defaults to false. Opt in only when
+its forwarding backend supports RFC 9229 routes and ICMPv4 generation on
+unnumbered links; unsupported routes are excluded before selection. A direct
+protocol host makes the same decision with `EngineConfig::ipv4_via_ipv6`.
+
+`InterfacePolicy::control_transport` defaults to IPv6; select IPv4 for links
+without IPv6. Runtime policy updates that change this field require interface
+removal and reattachment. `PacketReceivedWithTimestamp` lets a protocol host
+preserve microsecond arrival time while supplying current processing time for
+timers. All event processing clocks must remain nondecreasing.
+
 `RouteExporter` receives complete desired-state snapshots. Implementations
 must be idempotent and tolerate skipped generations. Reconciliation errors are
 logged and retried. During orderly shutdown the runtime stops submitting new
