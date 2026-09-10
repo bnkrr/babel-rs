@@ -13,6 +13,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  packages:
+    name: release archives and independent consumer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - run: python3 tests/release/check-packages.py
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  portable-protocol:
+    name: protocol (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo test -p babel-protocol --all-targets --locked
+      - run: cargo test -p babel-protocol --doc --locked
+
   rust:
     name: stable
     runs-on: ubuntu-24.04
@@ -24,6 +48,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - run: python3 -m unittest discover -s tests/endless -p 'test_*.py'
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings

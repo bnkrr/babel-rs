@@ -14,6 +14,7 @@ fn key() -> RouteKey {
 
 fn invalid_policy() -> InterfacePolicy {
     InterfacePolicy {
+        ipv4_next_hop: Default::default(),
         metric: Arc::new(WiredMetric::default()),
         hello_interval_cs: 0,
         update_interval_cs: 1,

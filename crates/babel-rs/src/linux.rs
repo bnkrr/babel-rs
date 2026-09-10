@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use babel_proto::{INFINITY, RouteKey, SelectedRoute};
+use babel_protocol::{INFINITY, RouteKey, SelectedRoute};
 use babel_router::{RouteExporter, RouteSnapshot};
 use futures::TryStreamExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};

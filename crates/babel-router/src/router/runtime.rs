@@ -4,6 +4,9 @@ use super::*;
 
 pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     let Runtime {
+        mut workers,
+        mut export_worker,
+        mut shutdown_timeout,
         router_id,
         interfaces,
         origins,
@@ -28,6 +31,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     } = runtime;
     let now = || elapsed_ms(&started);
     let default_policy = InterfacePolicy {
+        ipv4_next_hop: Default::default(),
         metric: Arc::clone(&metric),
         hello_interval_cs: 400,
         update_interval_cs: 1600,
@@ -60,8 +64,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 local_addresses: sockets
                     .get(interface)
                     .into_iter()
-                    .flat_map(|socket| socket.local_addresses.iter().copied())
-                    .map(IpAddr::V6)
+                    .flat_map(|socket| socket.addresses.read().expect("address lock").clone())
                     .collect(),
                 policy,
                 now_ms: now(),
@@ -81,6 +84,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     }
     let mut last_rejections = (0, 0, 0);
     let mut next_limit_log_ms = 0;
+    let mut next_address_scan_ms = 0;
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     let mut status = RouterStatus {
         sequence_number: engine.sequence_number(),
@@ -98,6 +102,8 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 // them immediately during an orderly shutdown/restart.  Repeat
                 // the datagrams because UDP provides no delivery acknowledgement
                 // and the process cannot rely on a later periodic update.
+                commands.close();
+                let cleanup = async {
                 let actions = engine.handle(Event::ReplaceOrigins {
                     origins: BTreeMap::new(),
                     now_ms: now(),
@@ -116,12 +122,44 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     routes: vec![],
                     unreachable: vec![],
                 };
-                checkpoint_sequence_number(&sequence_store, engine.sequence_number()).await;
-                if let Err(error) = exporter.shutdown(empty.clone()).await { warn!(%error, "final route export cleanup failed"); }
+                // Give the final repeat time to leave the bounded output scheduler.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let checkpoint = checkpoint_sequence_number(&sequence_store, engine.sequence_number()).await;
+                if let Some(worker) = export_worker.as_mut() { worker.join().await?; }
+                let exported = exporter.shutdown(empty.clone()).await
+                    .map_err(|error| RouterError::Cleanup(error.to_string()));
                 route_updates.send_replace(empty);
-                return Ok(());
+                for stop in interface_stops.values() { let _ = stop.send(true); }
+                for group in workers.values_mut() {
+                    for worker in group { worker.join().await?; }
+                }
+                exported?;
+                checkpoint
+                };
+                return tokio::time::timeout(shutdown_timeout, cleanup).await
+                    .map_err(|_| RouterError::ShutdownTimeout)?;
             },
             _ = ticker.tick() => {
+                if export_worker.as_ref().is_some_and(|worker| worker.0.is_finished()) && !*shutdown.borrow() {
+                    if let Some(worker) = export_worker.as_mut() { worker.join().await?; }
+                    return Err(RouterError::Task("export worker stopped unexpectedly".into()));
+                }
+                if now() >= next_address_scan_ms {
+                    next_address_scan_ms = now().saturating_add(2_000);
+                    for (name, socket) in &sockets {
+                        match crate::transport::interface_addresses(name) {
+                            Ok(addresses) => {
+                                let changed = *socket.addresses.read().expect("address lock") != addresses;
+                                if changed {
+                                    *socket.addresses.write().expect("address lock") = addresses.clone();
+                                    apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status,
+                                        engine.handle(Event::InterfaceAddressesChanged { interface: name.clone(), local_addresses: addresses, now_ms: now() }));
+                                }
+                            }
+                            Err(error) => debug!(interface = %name, %error, "could not refresh interface addresses"),
+                        }
+                    }
+                }
                 for (interface, queue) in &outbound { queue.log_losses(interface); }
                 let resources = engine.resource_status();
                 let rejections = (resources.rejected_neighbors, resources.rejected_candidates_global, resources.rejected_candidates_per_neighbor);
@@ -158,6 +196,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                         warn!(%interface, index, %error, "detaching failed Babel interface");
                         sockets.remove(&interface);
                         outbound.remove(&interface);
+                        workers.remove(&interface);
                         if let Some(stop) = interface_stops.remove(&interface) {
                             let _ = stop.send(true);
                         }
@@ -182,11 +221,17 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     );
                     let _ = reply.send(Ok(()));
                 },
-                Command::Originate(key, metric) => {
-                    apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::Originate { key, metric, now_ms: now() }))
+                Command::ShutdownTimeout(timeout, reply) => {
+                    shutdown_timeout = timeout;
+                    let _ = reply.send(());
                 },
-                Command::Withdraw(key) => {
-                    apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() }))
+                Command::Originate(key, metric, reply) => {
+                    apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::Originate { key, metric, now_ms: now() })) ;
+                    let _ = reply.send(());
+                },
+                Command::Withdraw(key, reply) => {
+                    apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() })) ;
+                    let _ = reply.send(());
                 },
                 Command::AddInterface(interface, configured_policy, reply) => {
                     let result = if sockets.contains_key(&interface) {
@@ -197,21 +242,22 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                                 let policy = configured_policy.unwrap_or_else(|| default_policy.clone());
                                 let socket = Arc::new(socket);
                                 let (stop, stop_rx) = watch::channel(false);
-                                spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx.clone(), Arc::clone(&started));
-                                outbound.insert(interface.clone(), spawn_sender(
+                                let receiver = spawn_receiver(socket.clone(), received_tx.clone(), shutdown.clone(), stop_rx.clone(), Arc::clone(&started));
+                                let (sender, sender_worker) = spawn_sender(
                                     socket.clone(),
                                     stop.subscribe(),
                                     Arc::clone(&started),
                                     Arc::clone(&output_counters),
-                                ));
+                                );
+                                outbound.insert(interface.clone(), sender);
+                                workers.insert(interface.clone(), vec![receiver, sender_worker]);
                                 sockets.insert(interface.clone(), socket);
                                 interface_policies.insert(interface.clone(), policy.clone());
                                 interface_stops.insert(interface.clone(), stop);
                                 let local_addresses = sockets
                                     .get(&interface)
                                     .into_iter()
-                                    .flat_map(|socket| socket.local_addresses.iter().copied())
-                                    .map(IpAddr::V6)
+                                    .flat_map(|socket| socket.addresses.read().expect("address lock").clone())
                                     .collect();
                                 apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::InterfaceUpWithPolicy { interface, local_addresses, policy, now_ms: now() }));
                                 status.interfaces = sorted_interface_names(&sockets);
@@ -250,6 +296,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 Command::RemoveInterface(interface, reply) => {
                     let result = if sockets.remove(&interface).is_some() {
                         outbound.remove(&interface);
+                        workers.remove(&interface);
                         if let Some(stop) = interface_stops.remove(&interface) {
                             let _ = stop.send(true);
                         }
@@ -321,13 +368,26 @@ pub(super) fn interface_status(
             RouterInterfaceStatus {
                 name: socket.name.clone(),
                 index: socket.index,
-                local_addresses: socket.local_addresses.clone(),
+                local_addresses: socket
+                    .addresses
+                    .read()
+                    .expect("address lock")
+                    .iter()
+                    .filter_map(|address| match address {
+                        IpAddr::V6(address) => Some(*address),
+                        _ => None,
+                    })
+                    .collect(),
                 mtu,
                 udp_payload_budget: payload_budget_for_mtu(mtu).unwrap_or_default(),
                 metric: policy.metric.name(),
                 hello_interval_ms: u64::from(policy.hello_interval_cs) * 10,
                 update_interval_ms: u64::from(policy.update_interval_cs) * 10,
                 split_horizon: policy.split_horizon,
+                ipv4_next_hop: policy.ipv4_next_hop,
+                ipv4_address: policy
+                    .ipv4_next_hop
+                    .ipv4_address(&socket.addresses.read().expect("address lock")),
                 output: OutputStatus::default(),
             }
         })
@@ -344,11 +404,11 @@ pub(super) fn update_output_status(status: &mut RouterStatus, counters: &OutputC
 pub(super) async fn checkpoint_sequence_number(
     store: &Arc<dyn SequenceStore>,
     sequence_number: u16,
-) {
+) -> Result<(), RouterError> {
     match tokio::time::timeout(SEQUENCE_CHECKPOINT_TIMEOUT, store.persist(sequence_number)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => warn!(%error, "final Babel sequence checkpoint failed"),
-        Err(_) => warn!("final Babel sequence checkpoint timed out"),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(RouterError::SequenceStore(error.to_string())),
+        Err(_) => Err(RouterError::SequenceStore("checkpoint timed out".into())),
     }
 }
 

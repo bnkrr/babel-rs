@@ -204,8 +204,12 @@ source = "2001:db8:11::/48"
                 assert proc.wait(timeout=timeout_ms / 1000 + 2) != 0
                 elapsed = time.monotonic() - started
                 assert timeout_ms / 1000 - 0.08 <= elapsed < timeout_ms / 1000 + 0.8, elapsed
-                assert "shutdown deadline exceeded" in log.read_text()
-                assert "router cleanup" in log.read_text()
+                messages = log.read_text()
+                assert "shutdown deadline exceeded" in messages
+                # Either the runtime's own cleanup budget or the daemon's
+                # enclosing deadline may expire first. Both must be observable.
+                assert ("router cleanup" in messages
+                        or "router shutdown exceeded its deadline" in messages)
                 assert owned() == leftovers, "unexpected removal with netlink unavailable"
                 if block_fsync:
                     assert fsync_hit.exists(), "checkpoint did not consume part of the total budget"

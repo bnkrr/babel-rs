@@ -9,6 +9,7 @@ namespaces. The reference versions currently installed there are babeld
 |---|---:|---:|---:|---|
 | babel-rs ↔ babeld 1.13.1 | pass | pass | pass | retract, reannounce, restart |
 | babel-rs ↔ BIRD 3.1.7 | pass | pass | pass | bidirectional exchange |
+| shared LAN: two babel-rs + babeld | pass | pass between babel-rs | n/a | numbered IPv4, live policies/addresses, one-way and partial loss |
 | three babel-rs nodes, line | pass | n/a | n/a | two-hop, failure, recovery |
 | two babel-rs nodes, RFC 9616 | pass | n/a | n/a | Timestamp exchange and non-null RTT status |
 | babel-rs lifecycle | pass | n/a | n/a | glob attach, rebind, reload, FIB repair |
@@ -52,3 +53,16 @@ must attach the new ifindex and restore the FIB route without restarting.
 Network namespaces disable automatic IPv6 address generation and assign one
 stable link-local address per interface, avoiding accidental ambiguity in the
 test topology.
+
+The shared-LAN regression passed on 2026-09-10 with babeld 1.13.1. In that
+fixture, babeld retained its existing IPv4 gateway after the neighboring
+babel-rs changed its advertisement to an IPv6 next hop; the second babel-rs
+updated its gateway. The test records that observation and does not claim
+that babeld supports a live next-hop-family switch. For such peers, choose a
+compatible mode before establishing routes; live changes need separate peer
+validation. Initial ordinary IPv4 exchange and subsequent withdrawal/recovery
+are verified against both implementations.
+
+The interrupted mixed soak and fresh-state round replay are described in
+[TESTING.md](TESTING.md). The replay passing does not establish the cause of
+the historical missing BIRD route or reproduce its prior sequence history.

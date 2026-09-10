@@ -229,6 +229,18 @@ class Runner:
     def delete_node(self, node):
         info = self.nodes[node]
         proc = info["proc"]
+        # Overwrite one bounded per-slot pre-kill snapshot, so slow restart
+        # convergence can be compared with the actual previous sequence/RIB.
+        before = {"round": self.round, "node": node, "implementation": self.implementations[node]}
+        for operation in ("status", "routes"):
+            try:
+                before[operation] = self.command(node, operation)
+            except (OSError, RuntimeError, ValueError) as error:
+                before[operation] = {"error": str(error)}
+        self.save(f"pre-stop-{node}.json", before)
+        status = before.get("status", {})
+        self.record("node-stopping", node=node, implementation=self.implementations[node],
+                    sequence_number=status.get("sequence_number") if isinstance(status, dict) else None)
         proc.kill()  # Removal is abrupt; the retained identity is reused on add.
         proc.wait(timeout=self.timeout(5))
         info["thread"].join(timeout=3)

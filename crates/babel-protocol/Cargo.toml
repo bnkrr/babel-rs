@@ -1,11 +1,18 @@
 [package]
-name = "babel-proto"
+name = "babel-protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Sans-I/O Babel protocol codec and deterministic routing engine"
+readme = "README.md"
+keywords = ["babel", "routing", "network", "ipv6", "vpn"]
+categories = ["network-programming"]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
 ipnet.workspace = true

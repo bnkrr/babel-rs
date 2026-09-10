@@ -8,8 +8,8 @@ pub(super) fn spawn_receiver(
     mut shutdown: watch::Receiver<bool>,
     mut stop: watch::Receiver<bool>,
     started: Arc<Instant>,
-) {
-    tokio::spawn(async move {
+) -> Worker {
+    Worker(tokio::spawn(async move {
         let mut buffer = vec![0u8; 65535];
         let slots = Arc::new(Semaphore::new(RECEIVED_PER_INTERFACE));
         loop {
@@ -23,31 +23,40 @@ pub(super) fn spawn_receiver(
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
                 result = socket.socket.recv_from(&mut buffer) => match result {
                     Ok((length, SocketAddr::V6(source)))
-                        if valid_babel_source(&source, &socket.local_addresses) => {
+                        if valid_babel_source(&source, &socket.addresses.read().expect("address lock")) => {
                         let now_ms = elapsed_ms(&started);
                         let item = Received::Packet { _permit: permit, interface: socket.name.clone(), index: socket.index, source: IpAddr::V6(*source.ip()), bytes: buffer[..length].to_vec(), now_ms };
-                        if received.send(item).await.is_err() { return; }
+                        tokio::select! {
+                            _ = shutdown.changed() => return,
+                            _ = stop.changed() => return,
+                            result = received.send(item) => if result.is_err() { return; },
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => {
                         warn!(interface = %socket.name, %error, "Babel receive failed");
-                        let _ = received.send(Received::Failed {
+                        let failed = Received::Failed {
                             interface: socket.name.clone(),
                             index: socket.index,
                             error: error.to_string(),
-                        }).await;
+                        };
+                        tokio::select! {
+                            _ = shutdown.changed() => {},
+                            _ = stop.changed() => {},
+                            _ = received.send(failed) => {},
+                        }
                         return;
                     }
                 }
             }
         }
-    });
+    }))
 }
 
-pub(super) fn valid_babel_source(source: &std::net::SocketAddrV6, local: &[Ipv6Addr]) -> bool {
-    source.port() == babel_proto::wire::PORT
+pub(super) fn valid_babel_source(source: &std::net::SocketAddrV6, local: &[IpAddr]) -> bool {
+    source.port() == babel_protocol::wire::PORT
         && source.ip().is_unicast_link_local()
-        && !local.contains(source.ip())
+        && !local.contains(&IpAddr::V6(*source.ip()))
 }
 
 #[async_trait::async_trait]
@@ -74,22 +83,22 @@ pub(super) fn spawn_sender(
     stop: watch::Receiver<bool>,
     started: Arc<Instant>,
     counters: Arc<OutputCounters>,
-) -> OutputQueue {
+) -> (OutputQueue, Worker) {
     let (queue, receive) = OutputQueue::new(
         OUTPUT_QUEUE_CAPACITY,
         OUTPUT_BUDGET_BYTES,
         counters,
         Arc::clone(&started),
     );
-    tokio::spawn(run_sender(
+    let worker = Worker(tokio::spawn(run_sender(
         socket.clone(),
         stop,
         started,
         queue.clone(),
         receive,
         output_seed(&socket),
-    ));
-    queue
+    )));
+    (queue, worker)
 }
 
 pub(super) async fn run_sender(
@@ -223,10 +232,13 @@ pub(super) fn spawn_exporter(
     exporter: Arc<dyn RouteExporter>,
     mut snapshots: watch::Receiver<RouteSnapshot>,
     mut shutdown: watch::Receiver<bool>,
-) {
-    tokio::spawn(async move {
+) -> Worker {
+    Worker(tokio::spawn(async move {
         let mut last_generation = None;
         loop {
+            if *shutdown.borrow() {
+                return;
+            }
             let snapshot = snapshots.borrow_and_update().clone();
             if last_generation != Some(snapshot.generation) {
                 if let Err(error) = exporter.reconcile(snapshot.clone()).await {
@@ -235,11 +247,14 @@ pub(super) fn spawn_exporter(
                     last_generation = Some(snapshot.generation);
                 }
             }
+            if *shutdown.borrow() {
+                return;
+            }
             tokio::select! {
                 changed = snapshots.changed() => if changed.is_err() { return; },
                 changed = shutdown.changed() => if changed.is_err() || *shutdown.borrow() { return; },
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {},
             }
         }
-    });
+    }))
 }

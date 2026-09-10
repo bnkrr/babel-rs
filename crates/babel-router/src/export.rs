@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use babel_proto::{RouteKey, SelectedRoute};
+use babel_protocol::{RouteKey, SelectedRoute};
 use tokio::sync::RwLock;
 
 /// Complete desired learned RIB and unreachable hold state for one generation.
@@ -20,11 +20,14 @@ pub struct RouteSnapshot {
 /// Desired-state sink with coalesced snapshots and retries after failure.
 ///
 /// Reconciliation must be idempotent, yield during I/O and converge to the newest
-/// complete snapshot. The runtime may skip intermediate generations. Serialize
-/// external writes and make shutdown terminal: a pending reconciliation can
-/// overlap [`Self::shutdown`] and must not reinstall state after final cleanup.
+/// complete snapshot. The runtime may skip intermediate generations. It stops
+/// submitting snapshots and waits for an in-flight reconciliation before
+/// [`Self::shutdown`]; these callbacks never overlap within one router.
+/// Make external operations cancellation-safe: Drop or a shutdown deadline can
+/// drop either future. Any independently spawned work remains the implementer's
+/// responsibility and must not reinstall state after final cleanup.
 /// The runtime logs exporter failures; successful router commands do not imply
-/// successful export. The embedding host owns the overall cleanup deadline.
+/// successful export. The router enforces its configured overall cleanup deadline.
 #[async_trait]
 pub trait RouteExporter: Send + Sync + 'static {
     /// Reconcile the complete desired state; errors are logged and retried.
@@ -48,7 +51,8 @@ pub trait RouteExporter: Send + Sync + 'static {
 ///
 /// The router calls this once after withdrawing its origins, never for runtime
 /// sequence changes. Errors are logged and a pending future is dropped after
-/// one second so route cleanup can continue. Implementations must yield while
+/// one second so route cleanup can continue. Errors/timeouts are returned after
+/// exporter cleanup as `RouterError::SequenceStore`. Implementations must yield while
 /// waiting for I/O; dropping this future does not stop detached tasks or an
 /// already running blocking operation. Applications own their runtime shutdown
 /// policy for any such work.

@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
-use babel_proto::{
+use babel_protocol::{
     Engine, EngineConfig, Event, INFINITY, Packet, ResolvedUpdate, ResourceLimits, RouteKey,
     RouterId, Tlv, WiredMetric,
 };

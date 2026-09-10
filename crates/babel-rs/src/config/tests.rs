@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn ipv4_next_hop_defaults_overrides_and_reloads() {
+    let base = "[[interfaces]]\nmatch = [\"lan*\"]\n";
+    let export = "[export]\n[[export.views]]\ntable = 201\n";
+    let original = Config::parse(&format!("{base}{export}")).unwrap();
+    assert_eq!(
+        original.effective_interface("lan0").unwrap().ipv4_next_hop,
+        Ipv4NextHop::Auto
+    );
+    for (mode, expected) in [
+        ("auto", babel_protocol::Ipv4NextHop::Auto),
+        ("ipv4", babel_protocol::Ipv4NextHop::Ipv4),
+        ("ipv6", babel_protocol::Ipv4NextHop::Ipv6),
+    ] {
+        let changed =
+            Config::parse(&format!("{base}ipv4_next_hop = \"{mode}\"\n{export}")).unwrap();
+        assert!(original.reload_identity_matches(&changed));
+        assert_eq!(
+            changed
+                .effective_interface("lan0")
+                .unwrap()
+                .build_policy()
+                .unwrap()
+                .ipv4_next_hop,
+            expected
+        );
+    }
+    assert!(Config::parse(&format!("{base}ipv4_next_hop = \"both\"\n{export}")).is_err());
+}
+
+#[test]
 fn shutdown_timeout_defaults_validates_and_can_reload() {
     let base = "[[interfaces]]\nmatch = [\"wg0\"]\n[export]\n[[export.views]]\ntable = 20001\n";
     let original = Config::parse(base).unwrap();
@@ -19,7 +49,7 @@ fn limits_default_override_zero_and_reload_identity() {
     let original = Config::parse(base).unwrap();
     assert_eq!(
         original.limits.effective(),
-        babel_proto::ResourceLimits::default()
+        babel_protocol::ResourceLimits::default()
     );
     let explicit = Config::parse(&format!("{base}[limits]\nmax_candidates = 16384\n")).unwrap();
     assert!(original.reload_identity_matches(&explicit));

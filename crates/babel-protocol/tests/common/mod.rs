@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use babel_proto::{
+use babel_protocol::{
     Action, AdditiveMetric, Engine, EngineConfig, Event, OutboundTlv, Packet, ResolvedUpdate,
     RouteKey, RouteSelectionConfig, RouterId, Tlv, WiredMetric,
 };
@@ -25,10 +25,10 @@ pub struct ConformanceHarness {
 
 impl ConformanceHarness {
     pub fn new(router_id: RouterId) -> Self {
-        Self::with_limits(router_id, babel_proto::ResourceLimits::default())
+        Self::with_limits(router_id, babel_protocol::ResourceLimits::default())
     }
 
-    pub fn with_limits(router_id: RouterId, limits: babel_proto::ResourceLimits) -> Self {
+    pub fn with_limits(router_id: RouterId, limits: babel_protocol::ResourceLimits) -> Self {
         Self {
             engine: Engine::new(EngineConfig {
                 limits,
@@ -103,7 +103,7 @@ impl ConformanceHarness {
             vec![Tlv::Update(ResolvedUpdate {
                 key: Some(route),
                 router_id: Some(router_id),
-                next_hop: (metric != babel_proto::INFINITY)
+                next_hop: (metric != babel_protocol::INFINITY)
                     .then(|| IpAddr::from_str(source).unwrap()),
                 interval_cs,
                 seqno,

@@ -1,6 +1,6 @@
 mod common;
 
-use babel_proto::{Action, Event, OutboundTlv, RouteKey, Tlv};
+use babel_protocol::{Action, Event, OutboundTlv, RouteKey, Tlv};
 use common::{ConformanceHarness, id, key, sent_tlv};
 
 fn relay(cost: u16) -> (ConformanceHarness, RouteKey) {
@@ -98,7 +98,9 @@ fn losing_current_path_still_requests_sequence_from_stored_alternate() {
 /// without loss, using virtual time so the 180-second GC cannot hide starvation.
 #[test]
 fn triangle_recovers_without_waiting_for_source_gc() {
-    use babel_proto::{DecodeContext, Engine, EngineConfig, Packet, decode_packet, encode_packets};
+    use babel_protocol::{
+        DecodeContext, Engine, EngineConfig, Packet, decode_packet, encode_packets,
+    };
     use std::collections::{BTreeMap, HashSet};
     use std::net::IpAddr;
 
@@ -130,7 +132,7 @@ fn triangle_recovers_without_waiting_for_source_gc() {
                     let peer = if a == node { b } else { a };
                     assert!(
                         destination == address(peer)
-                            || destination == babel_proto::engine::BABEL_MULTICAST_V6
+                            || destination == babel_protocol::engine::BABEL_MULTICAST_V6
                     );
                     for bytes in encode_packets(&packet, 1232).unwrap() {
                         let packet = decode_packet(

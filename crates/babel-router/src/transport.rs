@@ -1,11 +1,11 @@
 use std::io;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::Path;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
-use babel_proto::wire::PORT;
+use babel_protocol::wire::PORT;
 
 const IPV6_HEADER_BYTES: u32 = 40;
 const UDP_HEADER_BYTES: u32 = 8;
@@ -15,17 +15,24 @@ const MAX_UDP_PAYLOAD: usize = 65_527;
 pub struct InterfaceSocket {
     pub name: String,
     pub index: u32,
-    pub local_addresses: Vec<Ipv6Addr>,
+    pub addresses: std::sync::RwLock<Vec<IpAddr>>,
     pub mtu: u32,
     pub socket: UdpSocket,
 }
 
 impl InterfaceSocket {
     pub fn open(name: &str) -> io::Result<Self> {
+        if !cfg!(target_os = "linux") {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "babel-router currently supports Linux interfaces only",
+            ));
+        }
         let index = interface_index(name)?;
         let mtu = interface_mtu(name)?;
         payload_budget_for_mtu(mtu)?;
         let local_addresses = interface_ipv6_addresses(name)?;
+        let addresses = interface_addresses(name)?;
         if !local_addresses.iter().any(Ipv6Addr::is_unicast_link_local) {
             return Err(io::Error::new(
                 io::ErrorKind::AddrNotAvailable,
@@ -47,7 +54,7 @@ impl InterfaceSocket {
         Ok(Self {
             name: name.to_owned(),
             index,
-            local_addresses,
+            addresses: std::sync::RwLock::new(addresses),
             mtu,
             socket,
         })
@@ -66,6 +73,38 @@ impl InterfaceSocket {
 
     pub fn payload_budget(&self) -> io::Result<usize> {
         payload_budget_for_mtu(self.current_mtu()?)
+    }
+}
+
+/// Read live interface addresses without shelling out or importing daemon netlink types.
+pub(crate) fn interface_addresses(name: &str) -> io::Result<Vec<IpAddr>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut addresses = Vec::new();
+        for item in nix::ifaddrs::getifaddrs().map_err(io::Error::from)? {
+            if item.interface_name != name {
+                continue;
+            }
+            if let Some(address) = item.address {
+                if let Some(v4) = address.as_sockaddr_in() {
+                    addresses.push(IpAddr::V4(v4.ip()));
+                }
+                if let Some(v6) = address.as_sockaddr_in6() {
+                    addresses.push(IpAddr::V6(v6.ip()));
+                }
+            }
+        }
+        addresses.sort();
+        addresses.dedup();
+        Ok(addresses)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "babel-router currently supports Linux interfaces only",
+        ))
     }
 }
 

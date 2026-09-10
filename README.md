@@ -8,12 +8,16 @@ maintains neighbour and route state, selects feasible paths, and exposes the
 selected routing information either to an embedding application or to Linux
 routing tables.
 
+See [SUPPORT.md](docs/SUPPORT.md) for platform and compatibility contracts,
+[CHANGELOG.md](CHANGELOG.md) for migration, and [RELEASING.md](docs/RELEASING.md)
+for archive/consumer verification.
+
 It interoperates on the wire with `babeld` and BIRD; neither is a runtime
 dependency.
 
 The project can be used at three layers:
 
-- `babel-proto` is a sans-I/O packet codec and deterministic protocol engine;
+- `babel-protocol` is a sans-I/O packet codec and deterministic protocol engine;
 - `babel-router` is an embeddable Tokio UDP runtime with a route-export API;
 - `babel-rs` is a Linux daemon that reconciles selected routes and policy rules
   through netlink.
@@ -25,7 +29,7 @@ users opt into the Linux backend.
 
 ## Current scope
 
-The v0.4 profile implements RFC 8966 base TLVs, neighbour maintenance,
+The v0.5 profile implements RFC 8966 base TLVs, neighbour maintenance,
 feasibility, route selection, route and sequence-number requests, retractions,
 and multi-hop propagation. It also implements RFC 9079 source-specific routes
 and RFC 9229 IPv4 routes with IPv6 next hops.
@@ -38,7 +42,8 @@ cost 96 is the default. Embedders can supply a different `MetricProfile` and
 authentication is not implemented. Deployments should therefore run Babel on
 a protected link when authentication is required.
 
-The standalone daemon is Linux-specific. It exports selected routes plus the
+The socket runtime and standalone daemon currently support Linux. The sans-I/O
+protocol engine is independent of the operating system. It exports selected routes plus the
 temporary exact unreachable routes required by RFC 8966 hold time. It owns only
 its configured protocol and does not automatically redistribute the kernel
 routing table; local origins come from configuration or the embedding API.
@@ -87,6 +92,7 @@ preset for that interface:
 [[interfaces]]
 match = ["test-*"]
 link_type = "tunnel"
+ipv4_next_hop = "auto" # prefer numbered IPv4; ipv6 forces RFC 9229
 ```
 
 An entry without metacharacters is an exact name. `*` and `?` match multiple
@@ -177,11 +183,13 @@ not enable it when another supervisor owns the daemon instance.
 Run the compile-checked examples:
 
 ```sh
-cargo run -p babel-proto --example packet
-cargo run -p babel-router --example embedded
+cargo run -p babel-protocol --example packet
+cargo run -p babel-router --example embedded -- wg0 /var/lib/my-router/state 0102030405060708
 ```
 
-`BabelRouter::builder()` accepts typed Router-ID, interfaces, originated
+`BabelRouter::builder().start().await` starts an owned runtime; `wait()` observes
+its result and `shutdown().await` performs bounded orderly cleanup. Dropping the
+owner cancels its tasks without asynchronous cleanup. The builder accepts typed Router-ID, interfaces, originated
 routes, a default `MetricProfile`, optional `MetricAlgebra`, `SequenceStore`,
 and `RouteExporter`. `interface_with_policy` and
 `RouterHandle::add_interface_with_policy` select metric, timing and split

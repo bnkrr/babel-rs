@@ -17,6 +17,7 @@ fn config(router_id: RouterId) -> EngineConfig {
 
 fn policy(cost: u16, hello_interval_cs: u16, split_horizon: bool) -> InterfacePolicy {
     InterfacePolicy {
+        ipv4_next_hop: Default::default(),
         metric: Arc::new(WiredMetric::new(cost, 1, 1).unwrap()),
         hello_interval_cs,
         update_interval_cs: hello_interval_cs * 4,

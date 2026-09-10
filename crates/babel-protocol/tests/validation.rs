@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use babel_proto::{
+use babel_protocol::{
     ConfigError, Engine, EngineConfig, Event, INFINITY, InterfacePolicy, ResourceLimits, RouteKey,
     RouteSelectionConfig, RouterId, WiredMetric,
 };
@@ -35,6 +35,7 @@ fn configuration_boundaries_agree_with_engine_construction() {
         config.hello_interval_cs = hello;
         config.update_interval_cs = update;
         let policy = InterfacePolicy {
+            ipv4_next_hop: Default::default(),
             metric: Arc::clone(&config.metric),
             hello_interval_cs: hello,
             update_interval_cs: update,
@@ -74,6 +75,7 @@ fn invalid_local_events_leave_existing_state_unchanged() {
         );
     }
     let invalid_policy = InterfacePolicy {
+        ipv4_next_hop: Default::default(),
         metric: Arc::new(WiredMetric::default()),
         hello_interval_cs: 0,
         update_interval_cs: 1,
@@ -170,5 +172,5 @@ fn infallible_event_handler_does_not_bypass_validation() {
 #[test]
 #[should_panic(expected = "Hello window must be in 1..=16")]
 fn hello_history_rejects_invalid_public_window() {
-    babel_proto::HelloHistory::default().received(17);
+    babel_protocol::HelloHistory::default().received(17);
 }

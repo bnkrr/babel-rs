@@ -32,7 +32,8 @@ mod sources;
 mod timers;
 
 pub use api::{
-    Action, EngineConfig, Event, InterfacePolicy, NeighborStatus, RouteSelectionConfig, SendTiming,
+    Action, EngineConfig, Event, InterfacePolicy, Ipv4NextHop, NeighborStatus,
+    RouteSelectionConfig, SendTiming,
 };
 use sources::seqno_request_action;
 use timers::{
@@ -232,6 +233,25 @@ impl Engine {
                 reset_metric,
                 now_ms,
             } => self.interface_policy_changed(interface, policy, reset_metric, now_ms),
+            Event::InterfaceAddressesChanged {
+                interface,
+                local_addresses,
+                now_ms,
+            } => {
+                if let Some(state) = self.interfaces.get_mut(&interface) {
+                    if state.local_addresses == local_addresses {
+                        return Vec::new();
+                    }
+                    state.local_addresses = local_addresses;
+                    state.last_full_update_ms = None;
+                }
+                self.send_updates(
+                    now_ms,
+                    None,
+                    Some(interface),
+                    Some(SendTiming::urgent(now_ms)),
+                )
+            }
             Event::InterfaceDown { interface, now_ms } => {
                 self.interfaces.remove(&interface);
                 self.neighbours.retain(|key, _| key.interface != interface);

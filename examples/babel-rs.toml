@@ -13,6 +13,8 @@ shutdown_timeout_ms = 5000
 match = ["test-special-*"]
 link_type = "tunnel"
 hello_interval_ms = 1000
+# auto prefers an available IPv4 address; ipv4/ipv6 explicitly override it.
+ipv4_next_hop = "auto"
 
 [[interfaces]]
 match = ["test-*", "backbone0"]

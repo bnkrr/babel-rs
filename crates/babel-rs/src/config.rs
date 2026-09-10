@@ -7,7 +7,7 @@ use ipnet::IpNet;
 use serde::Deserialize;
 use thiserror::Error;
 
-use babel_proto::{
+use babel_protocol::{
     EtxMetric, MetricProfile, RouteKey, RouteSelectionConfig, RttMetric, WiredMetric,
 };
 
@@ -39,9 +39,9 @@ pub struct Limits {
 }
 
 impl Limits {
-    pub fn effective(&self) -> babel_proto::ResourceLimits {
-        let defaults = babel_proto::ResourceLimits::default();
-        babel_proto::ResourceLimits {
+    pub fn effective(&self) -> babel_protocol::ResourceLimits {
+        let defaults = babel_protocol::ResourceLimits::default();
+        babel_protocol::ResourceLimits {
             max_neighbors: self.max_neighbors.unwrap_or(defaults.max_neighbors),
             max_candidates: self.max_candidates.unwrap_or(defaults.max_candidates),
             max_candidates_per_neighbor: self
@@ -59,9 +59,30 @@ pub struct InterfaceSection {
     #[serde(default)]
     pub link_type: LinkType,
     pub split_horizon: Option<bool>,
+    #[serde(default)]
+    pub ipv4_next_hop: Ipv4NextHop,
     pub hello_interval_ms: Option<u64>,
     pub update_interval_ms: Option<u64>,
     pub metric: Option<MetricConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Ipv4NextHop {
+    #[default]
+    Auto,
+    Ipv4,
+    Ipv6,
+}
+
+impl From<Ipv4NextHop> for babel_protocol::Ipv4NextHop {
+    fn from(value: Ipv4NextHop) -> Self {
+        match value {
+            Ipv4NextHop::Auto => Self::Auto,
+            Ipv4NextHop::Ipv4 => Self::Ipv4,
+            Ipv4NextHop::Ipv6 => Self::Ipv6,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -81,11 +102,13 @@ pub struct EffectiveInterface {
     pub hello_interval_cs: u16,
     pub update_interval_cs: u16,
     pub split_horizon: bool,
+    pub ipv4_next_hop: Ipv4NextHop,
 }
 
 impl EffectiveInterface {
-    pub fn build_policy(&self) -> Result<babel_proto::InterfacePolicy, ConfigError> {
-        Ok(babel_proto::InterfacePolicy {
+    pub fn build_policy(&self) -> Result<babel_protocol::InterfacePolicy, ConfigError> {
+        Ok(babel_protocol::InterfacePolicy {
+            ipv4_next_hop: self.ipv4_next_hop.into(),
             metric: self.metric.build()?,
             hello_interval_cs: self.hello_interval_cs,
             update_interval_cs: self.update_interval_cs,
@@ -442,7 +465,7 @@ impl Config {
         let mut origins = HashSet::new();
         for origin in &self.origins {
             let key = origin.key()?;
-            if origin.metric == babel_proto::INFINITY {
+            if origin.metric == babel_protocol::INFINITY {
                 return Err(ConfigError::InvalidOriginMetric);
             }
             if !origins.insert(key) {
@@ -469,6 +492,7 @@ impl Config {
                                 .expect("validated interface interval");
                         EffectiveInterface {
                             section: index,
+                            ipv4_next_hop: item.ipv4_next_hop,
                             link_type: item.link_type,
                             metric: item
                                 .metric

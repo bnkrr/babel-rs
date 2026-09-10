@@ -2,8 +2,12 @@
 
 //! Embeddable Tokio runtime for the independent Babel protocol engine.
 //!
-//! [`BabelRouterBuilder::build`] validates all local configuration before opening
-//! sockets or starting tasks. It starts routing immediately; [`BabelRouter::run`]
+//! The live interface backend currently supports Linux. Other platforms may use
+//! `babel-protocol` directly with their own transport. Zero-interface operation does
+//! not imply platform support for sockets.
+//!
+//! [`BabelRouterBuilder::start`] validates all local configuration before opening
+//! sockets or starting tasks. It starts routing immediately; [`BabelRouter::wait`]
 //! joins that task. A Tokio runtime with I/O and timers is required. Attaching
 //! interfaces uses the host's socket privileges and interface configuration.
 //!
@@ -13,11 +17,10 @@
 //! # async fn main() -> Result<(), RouterError> {
 //! let builder = BabelRouter::builder().router_id(RouterId::new([1; 8]).unwrap());
 //! builder.validate()?; // No I/O. Zero interfaces is valid for dynamic attachment.
-//! let router = builder.build().await?;
+//! let router = builder.start().await?;
 //! let handle = router.handle();
 //! assert!(handle.status().await?.interfaces.is_empty());
-//! handle.shutdown();
-//! router.run().await?;
+//! router.shutdown().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -30,9 +33,10 @@
 //! Embedders own stable identity and restart policy: the default initial sequence
 //! is zero and the default [`SequenceStore`] is a no-op. No runtime sequence change
 //! waits for persistence. Orderly shutdown retracts origins, attempts one bounded
-//! checkpoint, then calls [`RouteExporter::shutdown`]. Apply an overall host
-//! deadline if cleanup must be bounded; [`BabelRouter::abort_handle`] can cancel
-//! the engine but does not guarantee cleanup of external state or detached I/O.
+//! checkpoint, waits for in-flight export, then calls [`RouteExporter::shutdown`].
+//! The total cleanup budget defaults to five seconds. Checkpoint, cleanup and
+//! timeout errors are observable. Dropping the owner or its wait future cancels
+//! owned tasks without guaranteeing cleanup of external state or detached I/O.
 
 mod export;
 mod output;
@@ -40,10 +44,10 @@ mod output_queue;
 mod router;
 mod transport;
 
-pub use babel_proto::{
-    AdditiveMetric, ConfigError, EtxMetric, InterfacePolicy, MetricAlgebra, MetricProfile,
-    NeighborMetric, ResourceLimits, ResourceStatus, RouteKey, RouteSelectionConfig, RouterId,
-    RttMetric, SelectedRoute, WiredMetric,
+pub use babel_protocol::{
+    AdditiveMetric, ConfigError, EtxMetric, InterfacePolicy, Ipv4NextHop, MetricAlgebra,
+    MetricProfile, NeighborMetric, ResourceLimits, ResourceStatus, RouteKey, RouteSelectionConfig,
+    RouterId, RttMetric, SelectedRoute, WiredMetric,
 };
 pub use export::{MemoryExporter, NoopSequenceStore, RouteExporter, RouteSnapshot, SequenceStore};
 pub use output_queue::OutputStatus;

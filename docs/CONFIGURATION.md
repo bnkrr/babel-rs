@@ -77,8 +77,7 @@ settings require a restart to change. Give each daemon its own state file.
 Startup must be able to write the file and its parent directory: it consumes
 any checkpoint before advertising. While running, sequence changes cause no
 disk writes. SIGINT, SIGTERM and the control `shutdown` command attempt one
-final checkpoint, waiting at most one second. Save failures are logged and do
-not prevent cleanup. The checkpoint's one-second limit also fits within the
+final checkpoint, waiting at most one second. Save failures do not prevent cleanup, but are reported as a shutdown error afterward. The checkpoint's one-second limit also fits within the
 remaining global shutdown budget; a shorter `shutdown_timeout_ms` can interrupt
 it earlier. There is no separate checkpoint timeout or persistence interval.
 
@@ -101,3 +100,23 @@ The ownership token is the namespace plus `export.protocol`. Other protocols
 and namespaces are untouched. Changing either token on restart does not clean
 the previous ownership scope automatically. Every manager must use its own
 protocol number within a namespace, including an external policy-rule manager.
+
+## IPv4 next-hop policy
+
+Each `[[interfaces]]` accepts `ipv4_next_hop = "auto"` (default), `"ipv4"`,
+or `"ipv6"`, independently of link type. `auto` follows RFC 9229's compatibility
+recommendation: use ordinary IPv4 with an explicit usable interface IPv4 address,
+otherwise use an IPv6 next hop. Multiple usable IPv4 addresses are ordered
+numerically for deterministic selection. Loopback, multicast, broadcast and
+unspecified IPv4 addresses are excluded.
+
+`ipv4` never silently falls back. Without a usable IPv4 address it retracts IPv4
+advertisements on that interface while IPv6 continues. `ipv6` always uses RFC
+9229, even on numbered interfaces. Control traffic remains IPv6 in all modes.
+These policies select outbound advertisements; they do not filter inbound forms.
+
+The runtime refreshes addresses every two seconds without discarding neighbors
+or the RIB. Address changes and policy reloads trigger updated advertisements.
+Status reports the configured mode, effective mode (`ipv4`, `ipv6`, `unavailable`)
+and the chosen IPv4 next-hop address. UDP loss can delay remote observation until
+a later update; the local mode is not a remote delivery acknowledgement.

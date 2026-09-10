@@ -115,13 +115,13 @@ source prefixes, interface identity, Router-ID changes at capacity, mixed
 rejected/withdrawn TLVs, garbage collection, and interface recreation:
 
 ```sh
-cargo test -p babel-proto --test capacity
+cargo test -p babel-protocol --test capacity
 ```
 
 Sustained source churn is covered separately with public engine events:
 
 ```sh
-cargo test -p babel-proto --test source_churn
+cargo test -p babel-protocol --test source_churn
 ```
 
 The test rotates 28,800 Router-ID/source-key pairs through 32 candidate slots
@@ -144,8 +144,8 @@ is covered separately by deterministic and network tests. This is a synthetic
 operation benchmark, not a convergence or packets-per-second guarantee.
 
 ```sh
-cargo run --release -p babel-proto --example capacity -- 1024
-cargo run --release -p babel-proto --example capacity -- 4096
+cargo run --release -p babel-protocol --example capacity -- 1024
+cargo run --release -p babel-protocol --example capacity -- 4096
 ```
 
 Run on an idle machine, record the build and machine, and compare the same

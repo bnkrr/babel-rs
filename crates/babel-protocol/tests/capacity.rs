@@ -1,6 +1,6 @@
 mod common;
 
-use babel_proto::{Event, INFINITY, ResolvedUpdate, ResourceLimits, RouteKey, Tlv};
+use babel_protocol::{Event, INFINITY, ResolvedUpdate, ResourceLimits, RouteKey, Tlv};
 use common::{ConformanceHarness, id, key};
 
 fn harness(neighbors: usize, total: usize, per_neighbor: usize) -> ConformanceHarness {

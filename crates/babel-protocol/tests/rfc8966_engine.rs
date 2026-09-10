@@ -2,7 +2,7 @@ mod common;
 
 use std::net::IpAddr;
 
-use babel_proto::{Action, Event, INFINITY, OutboundTlv, Packet, ResolvedUpdate, Tlv};
+use babel_protocol::{Action, Event, INFINITY, OutboundTlv, Packet, ResolvedUpdate, Tlv};
 use common::{ConformanceHarness, id, key};
 
 #[test]

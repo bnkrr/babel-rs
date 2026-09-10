@@ -2,7 +2,7 @@ mod common;
 
 use std::collections::HashMap;
 
-use babel_proto::{
+use babel_protocol::{
     Action, INFINITY, OutboundTlv, ResolvedUpdate, ResourceLimits, RouteKey, RouterId, Tlv,
 };
 use common::{ConformanceHarness, id, key};

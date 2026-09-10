@@ -5,10 +5,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::Instant;
 
-use babel_proto::{
+use babel_protocol::{
     Action, AdditiveMetric, DecodeContext, Engine, EngineConfig, Event, InterfacePolicy,
-    MetricAlgebra, MetricProfile, NeighborStatus, ResourceLimits, ResourceStatus, RouteKey,
-    RouteSelectionConfig, RouterId, WiredMetric, decode_packet, stamp_hello_timestamps,
+    Ipv4NextHop, MetricAlgebra, MetricProfile, NeighborStatus, ResourceLimits, ResourceStatus,
+    RouteKey, RouteSelectionConfig, RouterId, WiredMetric, decode_packet, stamp_hello_timestamps,
 };
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -27,11 +27,12 @@ use crate::transport::{InterfaceSocket, payload_budget_for_mtu};
 
 /// Configuration, interface activation or runtime command failure.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RouterError {
     #[error("router-id is required")]
     MissingRouterId,
     #[error(transparent)]
-    InvalidConfig(#[from] babel_proto::ConfigError),
+    InvalidConfig(#[from] babel_protocol::ConfigError),
     #[error("duplicate Babel interface {0}")]
     DuplicateInterface(String),
     #[error("open Babel interface {interface}: {source}")]
@@ -51,7 +52,12 @@ pub enum RouterError {
     Stopped,
     #[error("router task failed: {0}")]
     Task(String),
-    /// Retained for compatibility; shutdown checkpoint failures are now logged.
+    #[error("router shutdown exceeded its deadline")]
+    ShutdownTimeout,
+    #[error("final route export cleanup failed: {0}")]
+    Cleanup(String),
+    #[error("shutdown timeout must be nonzero")]
+    InvalidShutdownTimeout,
     #[error("persist Babel sequence number: {0}")]
     SequenceStore(String),
 }
@@ -68,6 +74,10 @@ pub struct RouterInterfaceStatus {
     pub hello_interval_ms: u64,
     pub update_interval_ms: u64,
     pub split_horizon: bool,
+    /// Configured IPv4 announcement policy.
+    pub ipv4_next_hop: Ipv4NextHop,
+    /// Chosen ordinary IPv4 next hop. None means IPv6 for Auto/Ipv6, unavailable for Ipv4.
+    pub ipv4_address: Option<std::net::Ipv4Addr>,
     pub output: OutputStatus,
 }
 
@@ -92,8 +102,9 @@ pub struct RouterStatus {
 pub type RouteStream = watch::Receiver<RouteSnapshot>;
 
 enum Command {
-    Originate(RouteKey, u16),
-    Withdraw(RouteKey),
+    Originate(RouteKey, u16, oneshot::Sender<()>),
+    Withdraw(RouteKey, oneshot::Sender<()>),
+    ShutdownTimeout(Duration, oneshot::Sender<()>),
     ReplaceOrigins(
         BTreeMap<RouteKey, u16>,
         oneshot::Sender<Result<(), RouterError>>,
@@ -130,6 +141,9 @@ enum Received {
 }
 
 struct Runtime {
+    workers: HashMap<String, Vec<Worker>>,
+    export_worker: Option<Worker>,
+    shutdown_timeout: Duration,
     router_id: RouterId,
     interfaces: Vec<(String, Option<InterfacePolicy>)>,
     origins: Vec<(RouteKey, u16)>,
@@ -153,6 +167,23 @@ struct Runtime {
     started: Arc<Instant>,
 }
 
+/// Every worker is owned by the runtime; cancellation cannot detach it.
+struct Worker(JoinHandle<()>);
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl Worker {
+    async fn join(&mut self) -> Result<(), RouterError> {
+        (&mut self.0)
+            .await
+            .map_err(|error| RouterError::Task(error.to_string()))
+    }
+}
+
 // Bound each interface's share of the common input queue so a route burst
 // cannot put hundreds of expensive updates ahead of another link's Hello.
 const RECEIVED_PER_INTERFACE: usize = 4;
@@ -173,22 +204,39 @@ pub struct RouterHandle {
 }
 
 impl RouterHandle {
-    /// Validate and enqueue a finite local origin. Success means queued, not advertised/exported.
+    /// Apply a finite local origin. Success acknowledges engine application, not delivery/export.
     pub async fn originate(&self, key: RouteKey, metric: u16) -> Result<(), RouterError> {
         validate_origin(key, metric)?;
+        let (reply, done) = oneshot::channel();
         self.commands
-            .send(Command::Originate(key, metric))
+            .send(Command::Originate(key, metric, reply))
             .await
-            .map_err(|_| RouterError::Stopped)
+            .map_err(|_| RouterError::Stopped)?;
+        done.await.map_err(|_| RouterError::Stopped)
     }
 
-    /// Validate and enqueue a local withdrawal. An absent key is harmless; success means queued.
+    /// Apply a local withdrawal. An absent key is harmless; success acknowledges engine application.
     pub async fn withdraw(&self, key: RouteKey) -> Result<(), RouterError> {
         key.validate()?;
+        let (reply, done) = oneshot::channel();
         self.commands
-            .send(Command::Withdraw(key))
+            .send(Command::Withdraw(key, reply))
             .await
-            .map_err(|_| RouterError::Stopped)
+            .map_err(|_| RouterError::Stopped)?;
+        done.await.map_err(|_| RouterError::Stopped)
+    }
+
+    /// Change the total orderly-cleanup deadline for the next shutdown.
+    pub async fn set_shutdown_timeout(&self, timeout: Duration) -> Result<(), RouterError> {
+        if timeout.is_zero() {
+            return Err(RouterError::InvalidShutdownTimeout);
+        }
+        let (reply, done) = oneshot::channel();
+        self.commands
+            .send(Command::ShutdownTimeout(timeout, reply))
+            .await
+            .map_err(|_| RouterError::Stopped)?;
+        done.await.map_err(|_| RouterError::Stopped)
     }
 
     /// Validate the complete set, reject duplicate keys, and wait for atomic engine replacement.
@@ -281,8 +329,13 @@ impl RouterHandle {
         receive.await.map_err(|_| RouterError::Stopped)
     }
 
-    /// Request orderly shutdown without waiting. Await [`BabelRouter::run`] to join.
+    /// Compatibility alias for [`Self::request_shutdown`]. Does not wait.
     pub fn shutdown(&self) {
+        self.request_shutdown();
+    }
+
+    /// Request orderly shutdown; await [`BabelRouter::wait`] to observe its result.
+    pub fn request_shutdown(&self) {
         let _ = self.shutdown.send(true);
     }
 
@@ -293,11 +346,17 @@ impl RouterHandle {
     }
 }
 
-/// An already running Tokio router and its join handle. Dropping this value
-/// detaches the task; request shutdown explicitly and await [`Self::run`].
+/// Owner of a running router. Drop cancels its tasks without asynchronous cleanup.
+/// Use [`Self::shutdown`] for orderly retractions, checkpointing and export cleanup.
 pub struct BabelRouter {
     handle: RouterHandle,
     task: JoinHandle<Result<(), RouterError>>,
+}
+
+impl Drop for BabelRouter {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl BabelRouter {
@@ -318,13 +377,22 @@ impl BabelRouter {
         self.task.abort_handle()
     }
 
-    /// Join the task started by [`BabelRouterBuilder::build`]. This does not start it.
-    /// The embedding host owns its overall shutdown deadline; a stalled exporter
-    /// can delay this future. Dropping it does not cancel the router task.
+    /// Compatibility alias for [`Self::wait`].
     pub async fn run(self) -> Result<(), RouterError> {
-        self.task
+        self.wait().await
+    }
+
+    /// Wait for normal shutdown or a runtime failure. Dropping this future cancels the router.
+    pub async fn wait(mut self) -> Result<(), RouterError> {
+        (&mut self.task)
             .await
             .map_err(|error| RouterError::Task(error.to_string()))?
+    }
+
+    /// Request and await orderly shutdown, bounded by the configured total cleanup deadline.
+    pub async fn shutdown(self) -> Result<(), RouterError> {
+        self.handle.request_shutdown();
+        self.wait().await
     }
 }
 
@@ -333,6 +401,7 @@ impl BabelRouter {
 /// No interfaces is valid: attach them later through [`RouterHandle`].
 #[derive(Default)]
 pub struct BabelRouterBuilder {
+    shutdown_timeout: Option<Duration>,
     router_id: Option<RouterId>,
     interfaces: Vec<(String, Option<InterfacePolicy>)>,
     origins: Vec<(RouteKey, u16)>,
@@ -346,6 +415,11 @@ pub struct BabelRouterBuilder {
 }
 
 impl BabelRouterBuilder {
+    /// Total orderly-cleanup budget, default five seconds; must be nonzero.
+    pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = Some(timeout);
+        self
+    }
     /// Set the stable local origin identity (required).
     pub fn router_id(mut self, value: RouterId) -> Self {
         self.router_id = Some(value);
@@ -407,8 +481,8 @@ impl BabelRouterBuilder {
         self
     }
     /// Save the final sequence number once during orderly shutdown. Runtime
-    /// changes remain in memory. Checkpoint errors/timeouts are logged, and the
-    /// router continues cleanup; see [`SequenceStore`] for cancellation details.
+    /// changes remain in memory. Checkpoint errors/timeouts are reported after
+    /// cleanup; see [`SequenceStore`] for cancellation details.
     pub fn sequence_store(mut self, value: impl SequenceStore) -> Self {
         self.sequence_store = Some(Arc::new(value));
         self
@@ -417,6 +491,12 @@ impl BabelRouterBuilder {
     /// Validate all configuration without opening sockets or spawning tasks.
     /// Zero interfaces/origins are allowed for later dynamic attachment.
     pub fn validate(&self) -> Result<(), RouterError> {
+        if self
+            .shutdown_timeout
+            .is_some_and(|timeout| timeout.is_zero())
+        {
+            return Err(RouterError::InvalidShutdownTimeout);
+        }
         self.router_id.ok_or(RouterError::MissingRouterId)?;
         self.route_selection.unwrap_or_default().validate()?;
         let mut interfaces = std::collections::HashSet::new();
@@ -442,6 +522,12 @@ impl BabelRouterBuilder {
     /// Requires a Tokio runtime with I/O and timers enabled. Socket failures
     /// are returned before any worker starts; configuration errors precede I/O.
     pub async fn build(self) -> Result<BabelRouter, RouterError> {
+        self.start().await
+    }
+
+    /// Validate, open Linux interfaces, and start all workers. Success means
+    /// initial interfaces and origins have been applied, not exported or delivered.
+    pub async fn start(self) -> Result<BabelRouter, RouterError> {
         self.validate()?;
         let router_id = self.router_id.ok_or(RouterError::MissingRouterId)?;
         let mut sockets = HashMap::new();
@@ -461,7 +547,12 @@ impl BabelRouterBuilder {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (route_updates, route_stream) = watch::channel(RouteSnapshot::default());
         let (export_updates, export_stream) = watch::channel(RouteSnapshot::default());
-        spawn_exporter(Arc::clone(&exporter), export_stream, shutdown_rx.clone());
+        let export_worker = Some(spawn_exporter(
+            Arc::clone(&exporter),
+            export_stream,
+            shutdown_rx.clone(),
+        ));
+        let mut workers = HashMap::new();
         let mut interface_stops = HashMap::new();
         let mut outbound = HashMap::new();
         let started = Arc::new(Instant::now());
@@ -469,24 +560,26 @@ impl BabelRouterBuilder {
         for (name, socket) in &sockets {
             let (stop, stop_rx) = watch::channel(false);
             interface_stops.insert(name.clone(), stop);
-            spawn_receiver(
+            let receiver = spawn_receiver(
                 Arc::clone(socket),
                 received_tx.clone(),
                 shutdown_rx.clone(),
                 stop_rx.clone(),
                 Arc::clone(&started),
             );
-            outbound.insert(
-                name.clone(),
-                spawn_sender(
-                    Arc::clone(socket),
-                    stop_rx,
-                    Arc::clone(&started),
-                    Arc::clone(&output_counters),
-                ),
+            let (sender, sender_worker) = spawn_sender(
+                Arc::clone(socket),
+                stop_rx,
+                Arc::clone(&started),
+                Arc::clone(&output_counters),
             );
+            outbound.insert(name.clone(), sender);
+            workers.insert(name.clone(), vec![receiver, sender_worker]);
         }
         let task = tokio::spawn(run_loop(Runtime {
+            workers,
+            export_worker,
+            shutdown_timeout: self.shutdown_timeout.unwrap_or(Duration::from_secs(5)),
             router_id,
             interfaces: self.interfaces,
             origins: self.origins,
@@ -515,14 +608,16 @@ impl BabelRouterBuilder {
                 .unwrap_or_else(|| Arc::new(NoopSequenceStore)),
             started,
         }));
-        Ok(BabelRouter {
+        let router = BabelRouter {
             handle: RouterHandle {
                 commands: commands_tx,
                 shutdown: shutdown_tx,
                 routes: route_stream,
             },
             task,
-        })
+        };
+        router.handle.status().await?;
+        Ok(router)
     }
 }
 
@@ -534,7 +629,7 @@ fn validate_interface_policy(policy: &InterfacePolicy) -> Result<(), RouterError
 
 fn validate_origin(key: RouteKey, metric: u16) -> Result<(), RouterError> {
     key.validate_origin(metric).map_err(|error| match error {
-        babel_proto::ConfigError::InvalidOriginMetric => RouterError::InvalidOriginMetric,
+        babel_protocol::ConfigError::InvalidOriginMetric => RouterError::InvalidOriginMetric,
         other => RouterError::InvalidConfig(other),
     })
 }

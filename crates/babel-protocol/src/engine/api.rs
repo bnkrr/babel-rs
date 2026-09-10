@@ -111,9 +111,56 @@ pub struct EngineConfig {
     pub route_selection: RouteSelectionConfig,
 }
 
+/// IPv4 announcement policy, independent of the IPv6 Babel control transport.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Ipv4NextHop {
+    /// Prefer an available IPv4 next hop, otherwise use RFC 9229.
+    #[default]
+    Auto,
+    /// Require an IPv4 next hop; retract IPv4 advertisements when none exists.
+    Ipv4,
+    /// Always use an IPv6 next hop (RFC 9229).
+    Ipv6,
+}
+
+impl Ipv4NextHop {
+    /// Stable spelling used by configuration and status interfaces.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+        }
+    }
+
+    /// Select the lowest usable IPv4 address deterministically. `None` means
+    /// RFC 9229 for Auto/Ipv6, or unavailable IPv4 advertisements for Ipv4.
+    pub fn ipv4_address(self, addresses: &[IpAddr]) -> Option<std::net::Ipv4Addr> {
+        if self == Self::Ipv6 {
+            return None;
+        }
+        addresses
+            .iter()
+            .filter_map(|address| match address {
+                IpAddr::V4(address)
+                    if !address.is_unspecified()
+                        && !address.is_loopback()
+                        && !address.is_multicast()
+                        && !address.is_broadcast() =>
+                {
+                    Some(*address)
+                }
+                _ => None,
+            })
+            .min()
+    }
+}
+
 /// Behaviour selected independently for one Babel interface.
 #[derive(Clone)]
 pub struct InterfacePolicy {
+    /// IPv4 next-hop preference; normally [`Ipv4NextHop::Auto`].
+    pub ipv4_next_hop: Ipv4NextHop,
     /// Creates independent metric state for each neighbor on this interface.
     pub metric: Arc<dyn MetricProfile>,
     /// Periodic Hello interval in centiseconds, nonzero.
@@ -128,6 +175,7 @@ impl std::fmt::Debug for InterfacePolicy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("InterfacePolicy")
+            .field("ipv4_next_hop", &self.ipv4_next_hop)
             .field("metric", &self.metric.name())
             .field("hello_interval_cs", &self.hello_interval_cs)
             .field("update_interval_cs", &self.update_interval_cs)
@@ -175,6 +223,12 @@ pub enum Event {
         interface: String,
         policy: InterfacePolicy,
         reset_metric: bool,
+        now_ms: u64,
+    },
+    /// Replace live addresses without discarding neighbors or feasibility state.
+    InterfaceAddressesChanged {
+        interface: String,
+        local_addresses: Vec<IpAddr>,
         now_ms: u64,
     },
     /// Remove an interface and its neighbors/candidates, then reselect routes.

@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-`babel-proto` is the single protocol state owner. Calls provide an explicit
+`babel-protocol` is the single protocol state owner. Calls provide an explicit
 event and monotonic time; results are `Action`s for packet transmission,
 selected-route replacement, or local sequence-number changes. It performs no I/O,
 spawns no tasks, reads no clock, and contains no async or operating-system
@@ -20,7 +20,7 @@ It repeats context after packet boundaries and emits independently decodable
 datagrams within the live interface MTU minus IPv6 and UDP headers. This
 applies equally to finite updates and retractions.
 
-`babel-router` owns one serialized engine plus orthogonal per-interface UDP
+`babel-router` currently uses Linux interface discovery and owns one serialized engine plus orthogonal per-interface UDP
 receiver and bounded sender tasks. Every engine Send action includes an
 absolute deadline and permitted jitter. Each sender keeps semantic TLVs
 unencoded during that jitter window, aggregates work for the same destination,
@@ -156,8 +156,8 @@ This prevents a crash from reusing a previous shutdown's checkpoint. Startup
 fails if this write cannot complete. Writes use a temporary file, file fsync,
 rename and parent-directory fsync. Orderly shutdown withdraws all origins in one
 engine event, then checkpoints the final sequence number once, before exporter
-cleanup. This save is best effort: errors or a one-second timeout produce a
-warning and cleanup continues. The daemon uses one dedicated thread for this
+cleanup. This save has a one-second cap: errors/timeouts are retained as shutdown
+errors while route cleanup continues. The daemon uses one dedicated thread for this
 save so stalled storage cannot hold Tokio runtime destruction open; the thread
 retains protocol ownership until it finishes or the process exits.
 
@@ -206,7 +206,7 @@ Long-running protocol, interface, exporter, and control tasks are a single
 failure domain: an unexpected return or panic exits nonzero rather than trying
 to reconstruct a possibly inconsistent subset in process. Transient external
 I/O failures stay inside their task and retry. A failed orderly-exit sequence
-checkpoint is nonfatal; it may make the next restart converge more slowly.
+checkpoint is returned after cleanup; it may make the next restart converge more slowly.
 
 ## Internal module map
 
@@ -216,12 +216,19 @@ of protocol state; the split introduces no new tasks, locks or queues.
 
 | Area | Private implementation responsibilities |
 | --- | --- |
-| `babel-proto::engine` | Root owns state and event dispatch; `api` defines public inputs/results; `interfaces` applies lifecycle/policy changes; `neighbors` handles observations and received packets; `rib` admits candidates and selects routes; `sources` maintains feasibility history and sequence requests; `timers` handles expiry/periodic work; `output` constructs semantic advertisements |
-| `babel-proto::wire` | Root retains public types/constants; `decode` validates and resolves inbound context; `encode` writes outbound TLVs; `packetizer` owns datagram boundaries and timestamp stamping; `prefix` holds shared address/prefix wire primitives |
-| `babel-proto::validation` | Shared side-effect-free configuration and local-event validation, reexported through public types and `ConfigError` |
+| `babel-protocol::engine` | Root owns state and event dispatch; `api` defines public inputs/results; `interfaces` applies lifecycle/policy changes; `neighbors` handles observations and received packets; `rib` admits candidates and selects routes; `sources` maintains feasibility history and sequence requests; `timers` handles expiry/periodic work; `output` constructs semantic advertisements |
+| `babel-protocol::wire` | Root retains public types/constants; `decode` validates and resolves inbound context; `encode` writes outbound TLVs; `packetizer` owns datagram boundaries and timestamp stamping; `prefix` holds shared address/prefix wire primitives |
+| `babel-protocol::validation` | Shared side-effect-free configuration and local-event validation, reexported through public types and `ConfigError` |
 | `babel-router::router` | Root exposes builder/handle/status; `runtime` serializes engine commands and shutdown; `io` runs independent receiver, sender and exporter workers |
 | `babel-rs::linux` | Root owns exporter lifecycle, locking and the shutdown latch; `projection` maps the RIB to policy views; `identity` parses kernel identities; `netlink` performs owned route/rule reconciliation |
 
 Unit tests live beside these modules in `tests.rs`; public API and protocol
 integration tests remain in the crate-level `tests/` directories. Configuration
 validation and embedding contracts are described in [EMBEDDING.md](EMBEDDING.md).
+
+Runtime ownership is explicit: start completes initial engine setup, wait observes
+termination, and owner shutdown requests bounded cleanup. Owner Drop cancels all
+owned workers. Origin/withdraw commands acknowledge application. The exporter
+worker finishes its in-flight callback before final shutdown; the total runtime
+cleanup budget defaults to five seconds. Independently spawned exporter work must
+remain cancellation-safe and synchronized by its owner.

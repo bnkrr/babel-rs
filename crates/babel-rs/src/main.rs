@@ -206,10 +206,15 @@ async fn run_daemon(
     for origin in &active_config.origins {
         builder = builder.originate(origin.key()?, origin.metric);
     }
-    let router = builder.build().await?;
+    let router = builder
+        .shutdown_timeout(std::time::Duration::from_millis(u64::from(
+            active_config.shutdown_timeout_ms,
+        )))
+        .start()
+        .await?;
     let handle = router.handle();
     let router_abort = router.abort_handle();
-    let mut running = Box::pin(router.run());
+    let mut running = Box::pin(router.wait());
 
     let metadata = Arc::new(RwLock::new(RuntimeMetadata {
         shutdown_timeout_ms: active_config.shutdown_timeout_ms,
@@ -435,6 +440,11 @@ async fn reload(
     }
 
     let new_origins = origin_map(&candidate)?;
+    router
+        .set_shutdown_timeout(std::time::Duration::from_millis(u64::from(
+            candidate.shutdown_timeout_ms,
+        )))
+        .await?;
     // Commit the protocol-owned origins in one serialized engine event.  No
     // observer sees the candidate configuration before all validation has
     // completed, and removed origins share one sequence transition.

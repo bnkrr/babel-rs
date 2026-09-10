@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use babel_proto::{
+use babel_protocol::{
     DecodeContext, INFINITY, OutboundPacket, OutboundTlv, OutboundUpdate, RouteKey, RouterId,
     SubTlv, WireError, decode_packet, encode_packet, stamp_hello_timestamps,
 };
@@ -17,7 +17,7 @@ fn rfc8966_padn_mbz_is_ignored_on_receive_and_enforced_on_send() {
     let raw = [42, 2, 0, 3, 1, 1, 1];
     assert_eq!(
         decode_packet(&raw, context()).unwrap().tlvs,
-        vec![babel_proto::Tlv::PadN(vec![1])]
+        vec![babel_protocol::Tlv::PadN(vec![1])]
     );
     assert_eq!(
         encode_packet(&OutboundPacket {
@@ -103,7 +103,7 @@ fn rfc9616_timestamp_is_stamped_at_the_transport_boundary() {
     let decoded = decode_packet(&data, context()).unwrap();
     assert!(matches!(
         &decoded.tlvs[0],
-        babel_proto::Tlv::Hello { sub_tlvs, .. }
+        babel_protocol::Tlv::Hello { sub_tlvs, .. }
             if sub_tlvs.contains(&SubTlv::TimestampHello(0x0102_0304))
     ));
 }

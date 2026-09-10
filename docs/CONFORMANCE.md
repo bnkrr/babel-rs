@@ -57,7 +57,7 @@ so decoder and encoder bugs cannot mask each other.
 | SADR-MODEL-01 | 9079 §2–3 | Destination plus source forms every route/source/request key; `/0` source is the ordinary SADR domain | `rfc9079_zero_source_prefix_is_the_ordinary_sadr_domain` |
 | SADR-FIB-01 | 9079 §4 | The shipped Linux exporter cannot silently implement source-first semantics for ambiguous routes | config overlap rejection and Linux projection tests |
 | V4V6-WIRE-01 | 9229 §2, §4 | AE 4 has distinct compression state, uses IPv4 prefix encoding and IPv6 next-hop state, and is rejected in IHU/Next Hop | AE 4 codec and packetisation tests |
-| V4V6-SEND-01 | 9229 §2.1 | Ordinary IPv4 AE is preferred on an interface with IPv4; AE 4 is used on IPv6-only interfaces | `rfc9229_prefers_ordinary_ipv4_ae_when_interface_has_ipv4` and interoperability E2E |
+| V4V6-SEND-01 | 9229 §2.1 | Auto prefers ordinary IPv4 AE with an IPv4 next hop when a usable address exists, otherwise AE 4; per-interface overrides are supported | `ipv4_policy.rs`, `rfc9229_prefers_ordinary_ipv4_ae_when_interface_has_ipv4`, shared-LAN E2E |
 | RTT-WIRE-01 | 9616 §3, §5 | Hello and IHU Timestamp sub-TLV forms round-trip; every RTT Hello timestamp is stamped at the socket boundary | timestamp codec and `rfc9616_timestamp_is_stamped_at_the_transport_boundary` |
 | RTT-ENGINE-01 | 9616 §3.2 | Origin/receive timestamps are recorded; timestamped IHU is co-located with timestamped Hello; wrap-safe Mills samples reject invalid elapsed values | timestamp exchange engine tests |
 | RTT-METRIC-01 | 9616 §4 | RTT is smoothed over elapsed time and mapped monotonically to a bounded piecewise-linear penalty | `rtt_uses_rfc_bounded_penalty` and RTT multipath E2E |

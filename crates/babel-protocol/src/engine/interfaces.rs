@@ -5,6 +5,7 @@ use super::*;
 impl Engine {
     pub(super) fn default_interface_policy(&self) -> InterfacePolicy {
         InterfacePolicy {
+            ipv4_next_hop: Default::default(),
             metric: Arc::clone(&self.config.metric),
             hello_interval_cs: self.config.hello_interval_cs,
             update_interval_cs: self.config.update_interval_cs,
@@ -83,14 +84,14 @@ impl Engine {
                 actions.extend(self.reselect(now_ms));
             }
         }
+        actions.extend(self.send_updates(
+            now_ms,
+            None,
+            Some(interface),
+            Some(SendTiming::urgent(now_ms)),
+        ));
         actions.extend(self.tick(now_ms));
         actions
-    }
-
-    pub(super) fn interface_has_ipv4(&self, interface: &str) -> bool {
-        self.interfaces
-            .get(interface)
-            .is_some_and(|state| state.local_addresses.iter().any(IpAddr::is_ipv4))
     }
 
     pub(super) fn interface_hello_interval(&self, interface: &str) -> u16 {

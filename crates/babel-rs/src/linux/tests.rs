@@ -1,5 +1,5 @@
 use super::*;
-use babel_proto::{RouteKey, RouterId};
+use babel_protocol::{RouteKey, RouterId};
 
 fn selected(destination: &str, source: Option<&str>, metric: u16) -> SelectedRoute {
     SelectedRoute {

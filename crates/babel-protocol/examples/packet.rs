@@ -1,6 +1,8 @@
 use std::net::IpAddr;
 
-use babel_proto::{DecodeContext, OutboundPacket, OutboundTlv, Tlv, decode_packet, encode_packet};
+use babel_protocol::{
+    DecodeContext, OutboundPacket, OutboundTlv, Tlv, decode_packet, encode_packet,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let packet = OutboundPacket {

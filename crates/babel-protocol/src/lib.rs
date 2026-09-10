@@ -8,7 +8,7 @@
 //! editable, and their `validate()` methods provide side-effect-free checks.
 //!
 //! ```
-//! use babel_proto::{ConfigError, Engine, EngineConfig, Event, RouteKey, RouterId};
+//! use babel_protocol::{ConfigError, Engine, EngineConfig, Event, RouteKey, RouterId};
 //! # fn main() -> Result<(), ConfigError> {
 //! let id = RouterId::new([1; 8]).expect("valid router-id");
 //! let mut engine = Engine::try_new(EngineConfig::recommended(id))?;
@@ -41,8 +41,8 @@ pub mod model;
 pub mod wire;
 
 pub use engine::{
-    Action, Engine, EngineConfig, Event, InterfacePolicy, NeighborStatus, RouteSelectionConfig,
-    SendTiming,
+    Action, Engine, EngineConfig, Event, InterfacePolicy, Ipv4NextHop, NeighborStatus,
+    RouteSelectionConfig, SendTiming,
 };
 pub use limits::{ResourceLimits, ResourceStatus};
 pub use metric::{

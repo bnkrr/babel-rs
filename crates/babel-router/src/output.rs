@@ -4,7 +4,7 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use crate::output_queue::QueuedIntent;
 
-use babel_proto::{OutboundPacket, OutboundTlv, SendTiming, WireError, encode_packets};
+use babel_protocol::{OutboundPacket, OutboundTlv, SendTiming, WireError, encode_packets};
 
 pub(crate) const DEFAULT_PACING_MS: u64 = 2;
 const DEADLINE_MARGIN_MS: u64 = 5;
@@ -223,7 +223,7 @@ impl JitterRandom {
 mod tests {
     use std::net::Ipv6Addr;
 
-    use babel_proto::{OutboundPacket, OutboundTlv, SendTiming};
+    use babel_protocol::{OutboundPacket, OutboundTlv, SendTiming};
 
     use super::*;
 
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn default_budget_delivers_a_complete_default_size_rib_at_minimum_mtu() {
         use crate::output_queue::{OUTPUT_BUDGET_BYTES, OutputCounters, OutputQueue};
-        use babel_proto::{
+        use babel_protocol::{
             DecodeContext, OutboundUpdate, ResourceLimits, RouteKey, RouterId, Tlv, decode_packet,
         };
         let count = ResourceLimits::default().max_candidates;

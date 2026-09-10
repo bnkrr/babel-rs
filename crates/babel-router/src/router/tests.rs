@@ -4,12 +4,12 @@ use async_trait::async_trait;
 
 use super::*;
 
-fn send_action(interface: &str, nonce: u16, timing: babel_proto::SendTiming) -> Action {
+fn send_action(interface: &str, nonce: u16, timing: babel_protocol::SendTiming) -> Action {
     Action::Send {
         interface: interface.into(),
         destination: "ff02::1:6".parse().unwrap(),
-        packet: babel_proto::OutboundPacket {
-            tlvs: vec![babel_proto::OutboundTlv::Ack { nonce }],
+        packet: babel_protocol::OutboundPacket {
+            tlvs: vec![babel_protocol::OutboundTlv::Ack { nonce }],
         },
         timing,
     }
@@ -51,10 +51,10 @@ impl OutputTransport for TestTransport {
 fn queue_test_ack(queue: &OutputQueue, now: u64) {
     queue.submit(OutboundIntent {
         destination: Ipv6Addr::LOCALHOST,
-        packet: babel_proto::OutboundPacket {
-            tlvs: vec![babel_proto::OutboundTlv::Ack { nonce: 1 }],
+        packet: babel_protocol::OutboundPacket {
+            tlvs: vec![babel_protocol::OutboundTlv::Ack { nonce: 1 }],
         },
-        timing: babel_proto::SendTiming::immediate(now),
+        timing: babel_protocol::SendTiming::immediate(now),
     });
 }
 
@@ -191,6 +191,9 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
     // No privileged sockets: the real engine and command loop run against
     // independently controlled sender transports, on one runtime thread.
     let router = tokio::spawn(run_loop(Runtime {
+        workers: HashMap::new(),
+        export_worker: None,
+        shutdown_timeout: Duration::from_secs(5),
         router_id: RouterId::new([1; 8]).unwrap(),
         interfaces: vec![("bad".into(), None), ("good".into(), None)],
         origins: vec![],
@@ -262,8 +265,8 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
         .into_iter()
         .any(|tlv| {
             matches!(tlv,
-                babel_proto::Tlv::Update(update)
-                    if update.key == Some(keys[0]) && update.metric == babel_proto::INFINITY)
+                babel_protocol::Tlv::Update(update)
+                    if update.key == Some(keys[0]) && update.metric == babel_protocol::INFINITY)
         })
     }));
     bad_transport.blocked.store(false, Ordering::Relaxed);
@@ -283,7 +286,7 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
             .into_iter()
             .any(|tlv| {
                 matches!(tlv,
-                    babel_proto::Tlv::Update(update)
+                    babel_protocol::Tlv::Update(update)
                         if update.key == Some(keys[31]) && update.metric == 0)
             })
         }));
@@ -310,7 +313,7 @@ async fn large_output_batch_progresses_with_one_available_channel_slot() {
     );
     let outbound = HashMap::from([("eth0".into(), send)]);
     let (exports, _) = watch::channel(RouteSnapshot::default());
-    let timing = babel_proto::SendTiming::urgent(100);
+    let timing = babel_protocol::SendTiming::urgent(100);
     let actions = (0..1024).map(|n| send_action("eth0", n, timing)).collect();
     // No consumer runs until apply_actions returns. Per-prefix sends would
     // deadlock here after filling the single channel slot.
@@ -320,7 +323,7 @@ async fn large_output_batch_progresses_with_one_available_channel_slot() {
     assert_eq!(
         intent.packet.tlvs,
         (0..1024)
-            .map(|nonce| babel_proto::OutboundTlv::Ack { nonce })
+            .map(|nonce| babel_protocol::OutboundTlv::Ack { nonce })
             .collect::<Vec<_>>()
     );
     assert!(receive.try_recv().is_err());
@@ -328,8 +331,8 @@ async fn large_output_batch_progresses_with_one_available_channel_slot() {
 
 #[test]
 fn output_batch_preserves_destinations_deadlines_and_sequence_order() {
-    let urgent = babel_proto::SendTiming::urgent(100);
-    let later = babel_proto::SendTiming::urgent(200);
+    let urgent = babel_protocol::SendTiming::urgent(100);
+    let later = babel_protocol::SendTiming::urgent(200);
     let actions = batch_send_actions(vec![
         send_action("eth0", 1, urgent),
         send_action("eth1", 2, urgent),
@@ -340,7 +343,7 @@ fn output_batch_preserves_destinations_deadlines_and_sequence_order() {
     ]);
     assert_eq!(actions.len(), 5);
     assert!(matches!(&actions[0], Action::Send { packet, timing, .. }
-        if packet.tlvs == vec![babel_proto::OutboundTlv::Ack { nonce: 1 }, babel_proto::OutboundTlv::Ack { nonce: 3 }] && *timing == urgent));
+        if packet.tlvs == vec![babel_protocol::OutboundTlv::Ack { nonce: 1 }, babel_protocol::OutboundTlv::Ack { nonce: 3 }] && *timing == urgent));
     assert!(matches!(&actions[1], Action::Send { interface, .. } if interface == "eth1"));
     assert_eq!(actions[2], Action::SequenceNumberChanged(4));
     assert_eq!(actions[3], send_action("eth0", 5, urgent));
@@ -471,7 +474,7 @@ async fn sequence_changes_stay_in_memory_and_shutdown_checkpoints_all_origins_on
 }
 
 #[tokio::test(start_paused = true)]
-async fn failed_sequence_checkpoint_does_not_fail_or_skip_shutdown_cleanup() {
+async fn failed_sequence_checkpoint_is_reported_after_shutdown_cleanup() {
     let store = TestSequenceStore::new(CheckpointOutcome::Failure);
     let exporter = CleanupExporter::default();
     let router = BabelRouterBuilder::default()
@@ -485,10 +488,11 @@ async fn failed_sequence_checkpoint_does_not_fail_or_skip_shutdown_cleanup() {
     let handle = router.handle();
     handle.status().await.unwrap();
     handle.shutdown();
-    tokio::time::timeout(Duration::from_secs(1), router.run())
+    let error = tokio::time::timeout(Duration::from_secs(1), router.run())
         .await
         .unwrap()
-        .unwrap();
+        .unwrap_err();
+    assert!(matches!(error, RouterError::SequenceStore(_)));
     assert_eq!(*store.saved.lock().unwrap(), vec![17]);
     assert_eq!(exporter.cleanups.load(Ordering::SeqCst), 1);
 }
@@ -509,10 +513,11 @@ async fn pending_sequence_checkpoint_times_out_and_continues_shutdown_cleanup() 
     handle.status().await.unwrap();
     let started = Instant::now();
     handle.shutdown();
-    tokio::time::timeout(Duration::from_secs(2), router.run())
+    let error = tokio::time::timeout(Duration::from_secs(2), router.run())
         .await
         .unwrap()
-        .unwrap();
+        .unwrap_err();
+    assert!(matches!(error, RouterError::SequenceStore(_)));
     assert!(started.elapsed() >= SEQUENCE_CHECKPOINT_TIMEOUT);
     assert_eq!(*store.saved.lock().unwrap(), vec![23]);
     assert_eq!(exporter.cleanups.load(Ordering::SeqCst), 1);
@@ -541,7 +546,7 @@ async fn slow_exporter_coalesces_to_the_latest_complete_snapshot() {
     let observed = exporter.generation.clone();
     let (snapshots, stream) = watch::channel(RouteSnapshot::default());
     let (shutdown, shutdown_stream) = watch::channel(false);
-    spawn_exporter(Arc::new(exporter), stream, shutdown_stream);
+    let _worker = spawn_exporter(Arc::new(exporter), stream, shutdown_stream);
     tokio::task::yield_now().await;
     for generation in 1..=20 {
         snapshots.send_replace(RouteSnapshot {

@@ -1,6 +1,6 @@
 # Embedding API
 
-`babel-proto` owns synchronous protocol state and the packet codec.
+`babel-protocol` owns synchronous protocol state and the packet codec.
 `babel-router` adds the Tokio socket runtime. Neither crate depends on the
 standalone daemon, its TOML format, state files, control socket or Linux
 netlink exporter.
@@ -12,7 +12,7 @@ and runs the examples with `cargo test --workspace --doc`.
 ## Validate at the input boundary
 
 Public configuration structs retain editable fields. Their `validate()`
-methods are side-effect-free and return `babel_proto::ConfigError`.
+methods are side-effect-free and return `babel_protocol::ConfigError`.
 `babel-router` reexports that error and reports shared configuration failures
 through `RouterError::InvalidConfig`. Its existing `InvalidInterfacePolicy`
 and `InvalidOriginMetric` variants remain available for those specific errors.
@@ -44,12 +44,12 @@ before sending an event.
 convenience methods for known-valid inputs. They now call the same validation
 and panic on invalid local configuration. Applications accepting user input
 should use the fallible methods. Valid configuration and events keep their
-previous behavior. Existing public paths, including `babel_proto::engine::*`
-and `babel_proto::wire::*`, remain available.
+previous behavior. Existing public paths, including `babel_protocol::engine::*`
+and `babel_protocol::wire::*`, remain available.
 
 For the runtime, builder setters store pending values.
 `BabelRouterBuilder::validate()` checks the entire configuration without I/O;
-`build()` calls it before opening any socket or spawning any task. It rejects
+`start()` calls it before opening any socket or spawning any task. It rejects
 missing Router-ID, duplicate interface names, duplicate origins, invalid
 origin keys/metrics, intervals and route-selection parameters. Zero interfaces
 is allowed so an application can attach them later. Dynamic handle methods
@@ -65,18 +65,27 @@ inbound TLVs. `encode_packets` accepts a UDP payload budget including the Babel
 header and excluding UDP/IP headers. The host handles send timing and stamps
 Hello timestamps immediately before sending.
 
-The runtime starts during `build()`; `BabelRouter::run()` joins its task.
-Dropping the router or the join future detaches that task and does not request
-shutdown.
+`BabelRouterBuilder::start()` validates configuration, opens Linux sockets and
+starts routing; it returns after initial engine configuration is applied.
+`BabelRouter::wait()` joins the running instance. `BabelRouter::shutdown().await`
+requests and waits for orderly cleanup. `build`/`run` remain compatibility aliases
+for `start`/`wait`.
+
+Dropping the owner or its wait future cancels the engine and its owned workers;
+it does not perform asynchronous retractions/checkpoints/export cleanup. Cloned
+control handles do not own the runtime and cannot keep it running after its owner
+is dropped. The live socket backend supports Linux; see [SUPPORT.md](SUPPORT.md).
 
 | Handle operation | Successful completion means |
 | --- | --- |
-| `originate`, `withdraw` | The validated command was queued |
+| `originate`, `withdraw` | The validated change was applied by the serialized engine |
 | `replace_origins` | The complete replacement was applied by the serialized engine |
 | Add/update/remove interface | The socket/engine operation completed |
 | `status` | Earlier commands in that queue have been processed and status was sampled |
 | `subscribe_routes` | A watch receiver for complete selected learned-route snapshots was created |
-| `shutdown` | A shutdown request was signaled; await `run()` to join |
+| Handle `request_shutdown` (legacy `shutdown`) | A shutdown request was signaled; await owner `wait()` to join |
+| Owner `shutdown().await` | Orderly cleanup completed, or an error identifies failure/timeout |
+| `set_shutdown_timeout` | The nonzero cleanup budget was applied |
 
 Adding an already active interface is a no-op; use
 `update_interface_policy` to change it. Removing/updating an absent interface
@@ -91,22 +100,38 @@ origins are advertised separately.
 ## Export and shutdown responsibilities
 
 `RouteExporter` receives complete desired-state snapshots. Implementations
-must be idempotent, tolerate skipped generations and serialize external
-writes. Reconciliation errors are logged and retried. An in-flight
-reconciliation can overlap the final shutdown hook, so an exporter must make
-shutdown terminal and prevent an old snapshot from reinstalling routes after
-cleanup. The daemon's Linux exporter implements this with an apply lock and a
-stopping flag.
+must be idempotent and tolerate skipped generations. Reconciliation errors are
+logged and retried. During orderly shutdown the runtime stops submitting new
+snapshots, waits for in-flight reconciliation, and then calls the final shutdown
+hook. These runtime callbacks do not overlap. Any exporter-owned background work
+still needs synchronization and cancellation handling; the daemon's independent
+periodic reconciler uses an apply lock and terminal stopping flag.
 
-`SequenceStore` is a best-effort orderly-exit checkpoint. The runtime keeps
-sequence changes in memory, attempts one checkpoint on exit and drops a pending
-checkpoint future after one second. Dropping a future does not stop a detached
-task or an already running blocking operation.
+The total orderly-cleanup deadline defaults to five seconds and is configured
+with `BabelRouterBuilder::shutdown_timeout(Duration)` or the handle setter. It
+covers retractions, checkpoint, waiting for the exporter, final cleanup and worker
+joins. Expiry cancels owned tasks and returns `RouterError::ShutdownTimeout`;
+external state may require repair on restart. Custom callbacks must yield during
+I/O; an async deadline cannot preempt arbitrary synchronous blocking code.
 
-The embedding host owns stable Router-ID storage and restart sequence policy.
-The runtime defaults to sequence zero and `NoopSequenceStore`; it does not
-implement the standalone daemon's checkpoint consumption or random restart
-fallback. It also does not impose the daemon's global five-second shutdown
-budget. Hosts requiring bounded cleanup should signal `shutdown()`, await
-`run()` within their own deadline and use `abort_handle()` when necessary,
-while arranging cleanup/recovery for external state and detached I/O.
+`SequenceStore` remains an orderly-exit checkpoint, with no runtime writes and a
+one-second cap inside that overall budget. A failed/timed-out checkpoint does not
+skip route cleanup, but is returned afterward as `RouterError::SequenceStore`.
+Final exporter errors return `RouterError::Cleanup` (taking precedence over a
+checkpoint failure); runtime task failures return `RouterError::Task`. Successful
+cleanup does not guarantee that a remote peer received UDP retractions.
+
+The host owns stable identity and initial sequence policy. Defaults remain zero
+and `NoopSequenceStore`; persistent identities must use an explicit restart policy.
+The `embedded` example accepts INTERFACE, an exclusively owned STATE_FILE, and a
+stable unique 16-digit ROUTER_ID_HEX. It durably consumes an orderly checkpoint
+before advertising, saves once on orderly exit, and uses random fallback after
+an unclean restart. This can still need minute-scale convergence. It is an example
+of host integration, not a shared state-file service or crash-safe sequence store.
+
+```sh
+cargo run -p babel-router --example embedded -- wg0 /var/lib/my-router/state 0102030405060708
+```
+
+The host retains responsibility for privileges, domain-wide identity uniqueness,
+external-state recovery and any detached I/O its callbacks start.

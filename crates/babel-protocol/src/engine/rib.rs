@@ -447,21 +447,30 @@ impl Engine {
             .map(|(_, selected)| selected.clone())
             .collect();
         for selected in &changed {
-            self.maintain_source(
-                selected.key,
-                selected.router_id,
-                Distance {
-                    seqno: selected.seqno,
-                    metric: selected.metric,
-                },
-                now_ms,
-            );
-            actions.extend(self.advertise_learned(
+            let advertisements = self.advertise_learned(
                 selected,
                 selected.metric,
                 Some(&selected.interface),
                 now_ms,
-            ));
+            );
+            let finite = advertisements.iter().any(|action| match action {
+                Action::Send { packet, .. } => packet.tlvs.iter().any(
+                    |tlv| matches!(tlv, OutboundTlv::Update(update) if update.metric != INFINITY),
+                ),
+                _ => false,
+            });
+            if finite {
+                self.maintain_source(
+                    selected.key,
+                    selected.router_id,
+                    Distance {
+                        seqno: selected.seqno,
+                        metric: selected.metric,
+                    },
+                    now_ms,
+                );
+            }
+            actions.extend(advertisements);
         }
         actions
     }

@@ -22,13 +22,15 @@ jobs:
       - name: Install routing daemons
         run: |
           sudo apt-get update
-          sudo apt-get install --yes babeld bird2 iproute2
+          sudo apt-get install --yes babeld bird2 iproute2 iputils-ping
       - name: Build daemon
         run: cargo build --locked --release --package babel-rs
       - name: Test babeld interoperability
         run: sudo sh tests/e2e/netns-babeld.sh "$PWD/target/release/babel-rs"
       - name: Test BIRD interoperability
         run: sudo sh tests/e2e/netns-bird.sh "$PWD/target/release/babel-rs"
+      - name: Test shared LAN, IPv4 next-hop policies and asymmetric loss
+        run: sudo python3 tests/e2e/netns-general.py "$PWD/target/release/babel-rs"
       - name: Test three-node convergence
         run: sudo sh tests/e2e/netns-three-node.sh "$PWD/target/release/babel-rs"
       - name: Test RFC 9616 RTT metric

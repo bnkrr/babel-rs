@@ -5,16 +5,44 @@ examples, Clippy and documentation checks, plus the Rust 1.90 compatibility
 check. The network workflows build the release daemon and exercise it inside
 disposable Linux namespaces; the daemon uses production protocol defaults.
 
-`crates/babel-proto/tests/seqno_recovery.rs` checks that worse/equal infeasible
+`crates/babel-protocol/tests/seqno_recovery.rs` checks that worse/equal infeasible
 alternates do not originate unnecessary sequence requests, while preferable
 alternates, an infeasible current path and route loss still trigger recovery.
 Its three-node triangle delivers encoded packets with virtual time and verifies
 loop-free recovery within 20 seconds of a direct-link failure, without relying
 on source feasibility garbage collection. It runs in the regular Rust suite.
 
+## Library and release checks
+
+`crates/babel-protocol/tests/ipv4_policy.rs` decodes emitted wire packets to
+check default and forced next-hop policies, address/policy changes, retractions,
+IPv6 continuity and request responses. `crates/babel-router/tests/lifecycle.rs`
+uses public APIs to check ownership cancellation, orderly exporter sequencing,
+cleanup errors and deadlines. Configuration tests cover mode parsing and reload.
+
+`tests/release/check-packages.py` builds actual package archives and tests a
+consumer outside the workspace using only their extracted contents. It also
+checks archive tests/examples/docs and installs the packaged daemon. See
+[RELEASING.md](RELEASING.md) for the independent registry upload steps.
+Protocol-only Windows/macOS tests and Linux MSRV tests are defined in CI; live
+network support and evidence are scoped in [SUPPORT.md](SUPPORT.md).
+
+## Shared LAN and next-hop policies
+
+`tests/e2e/netns-general.py` puts two babel-rs instances and babeld on a common
+bridge with IPv4 and IPv6 routes. It checks kernel gateways and bidirectional
+forwarding, multiple neighbors on one interface, live `auto`/`ipv4`/`ipv6`
+changes, IPv4 address removal/restoration, 100% one-way loss, continued forwarding
+between unaffected peers, and recovery after partial loss. It uses production
+protocol intervals. Run the VM wrapper with `general`, or include it with `all`.
+
+A peer retaining an old next hop after a live mode change is recorded explicitly;
+see [INTEROPERABILITY.md](INTEROPERABILITY.md). Dynamic gateway assertions use
+the babel-rs peer. Ordinary numbered-interface exchange still includes babeld.
+
 ## Network CI
 
-Every push and pull request runs the seven interoperability/lifecycle/RTT/MTU
+Every push and pull request runs the eight interoperability/lifecycle/RTT/MTU
 regressions and five independent robustness jobs:
 
 | Job | Checks |
@@ -165,3 +193,22 @@ slots with seeded weighted sampling. All implementations receive FIB and
 forwarding checks; babel-rs additionally receives RIB/export-progress checks.
 It is deliberately excluded from ordinary CI,
 Cargo tests and the network runner's `all` mode; invoke it explicitly.
+
+## Bounded mixed-round replay
+
+`tests/endless/replay.py --replay-round N` accepts the same daemon, topology,
+seed, mix and artifact arguments as `netns.py`. It advances the seeded topology
+to just before round N, starts fresh processes, verifies the network, applies
+that round's mutations and verifies again with the same RIB/FIB/forwarding
+oracle. Each phase has a finite settle deadline and cleanup runs on exit.
+This replays topology and events, not the sequence/feasibility history of all
+previous rounds. Node deletion records a bounded per-slot pre-stop status/RIB
+snapshot to improve future restart diagnostics.
+
+The 2026-09-09 mixed soak was operator-interrupted during round 170 after 169
+completed rounds. At interruption BIRD node 17 lacked a route in both its RIB
+and FIB; that observation alone does not identify a babel-rs or kernel-export
+bug. The 2026-09-10 fresh-state replay (32 slots, minimum 16, degree 4,
+bottleneck, seed 20260908, mix babel-rs=2,bird=1,babeld=1) passed round 170 and
+cleanup. Historical accumulated-state behavior remains unproven; neither run
+is reported as a completed mixed endless pass.

@@ -13,7 +13,7 @@ and releases its client slot. This bounds client I/O, not command execution.
 Immediately after accept, the server sends:
 
 ```json
-{"type":"hello","api_version":1,"server_version":"0.4.0","capabilities":["status","interfaces","neighbors","routes","reload","shutdown"]}
+{"type":"hello","api_version":1,"server_version":"0.5.0","capabilities":["status","interfaces","neighbors","routes","reload","shutdown"]}
 ```
 
 A client then sends requests of this form:
@@ -133,3 +133,8 @@ request writers and 21 blocked response readers. It fills all 64 slots, checks
 that extra clients are refused, and reuses all 63 timed-out slots before closing
 the old client sockets. It also checks disconnect reuse and shutdown while
 clients remain connected. The `all` suite includes this mode.
+
+Interface inspection includes `ipv4_next_hop` (configured auto/ipv4/ipv6),
+`effective_ipv4_next_hop` (ipv4/ipv6/unavailable), and nullable
+`ipv4_next_hop_address`. The effective value reflects the latest address scan;
+`unavailable` means forced IPv4 has no usable address and sends retractions.

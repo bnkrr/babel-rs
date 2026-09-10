@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use babel_proto::INFINITY;
+use babel_protocol::INFINITY;
 use babel_router::{RouteSnapshot, RouterHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -368,6 +368,9 @@ async fn interfaces(shared: &Shared) -> Result<Value, (&'static str, String)> {
                     "hello_interval_ms": item.hello_interval_ms,
                     "update_interval_ms": item.update_interval_ms,
                     "split_horizon": item.split_horizon,
+                    "ipv4_next_hop": item.ipv4_next_hop.as_str(),
+                    "effective_ipv4_next_hop": if item.ipv4_address.is_some() { "ipv4" } else if item.ipv4_next_hop == babel_router::Ipv4NextHop::Ipv4 { "unavailable" } else { "ipv6" },
+                    "ipv4_next_hop_address": item.ipv4_address.map(|address| address.to_string()),
                     "output": item.output,
                     "attached": true,
                 })
@@ -595,9 +598,9 @@ mod tests {
 
     #[test]
     fn route_filter_matches_exact_fields() {
-        let route = babel_proto::SelectedRoute {
-            key: babel_proto::RouteKey::new("192.0.2.0/24".parse().unwrap(), None).unwrap(),
-            router_id: babel_proto::RouterId::new([1; 8]).unwrap(),
+        let route = babel_protocol::SelectedRoute {
+            key: babel_protocol::RouteKey::new("192.0.2.0/24".parse().unwrap(), None).unwrap(),
+            router_id: babel_protocol::RouterId::new([1; 8]).unwrap(),
             seqno: 2,
             metric: 96,
             next_hop: "fe80::1".parse().unwrap(),

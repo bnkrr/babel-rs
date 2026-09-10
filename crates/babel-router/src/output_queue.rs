@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use babel_proto::{OutboundPacket, OutboundTlv, SubTlv};
+use babel_protocol::{OutboundPacket, OutboundTlv, SubTlv};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
 use tracing::warn;
@@ -232,7 +232,7 @@ pub(crate) fn packet_charge(packet: &OutboundPacket) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use babel_proto::SendTiming;
+    use babel_protocol::SendTiming;
 
     #[test]
     fn full_closed_and_oversized_admission_release_reservations() {

@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Linux Babel daemon with a versioned route-export boundary"
+readme = "README.md"
+keywords = ["babel", "routing", "network", "ipv6", "vpn"]
+categories = ["network-programming"]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["x86_64-unknown-linux-gnu"]
 
 [[bin]]
 name = "babel-rs"
@@ -13,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait.workspace = true
-babel-proto.workspace = true
+babel-protocol.workspace = true
 babel-router.workspace = true
 clap.workspace = true
 futures.workspace = true
