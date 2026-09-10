@@ -31,6 +31,8 @@
 /// Engine configuration, events, actions and synchronous protocol state.
 pub mod engine;
 mod limits;
+/// RFC 8967 authentication and RFC 9467 replay protection, before normal decoding.
+pub mod mac;
 pub mod policy;
 pub use policy::{AllowAllRoutes, ExportContext, ImportContext, RoutePolicy};
 mod validation;

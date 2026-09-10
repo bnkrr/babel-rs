@@ -64,10 +64,16 @@ manage_rules = true
 [[export.views]]
 table = 20000
 
-# A source-specific view gets matching SADR routes plus ordinary fallbacks.
-# Nonzero source prefixes across all views must not overlap.
-# rule_priority defaults to table when omitted.
+# Pin an optional source view; overlapping sources are supported.
+# Other learned sources automatically allocate tables from 1000000 upward.
+# Views inherit covering source routes and ordinary routes.
+# Rule priorities default to 10000 + 128 - source prefix length.
 [[export.views]]
 table = 20001
 source = "10.0.0.0/8"
-rule_priority = 20001
+
+# Optional authentication, attached inside the relevant [[interfaces]] section:
+# [interfaces.mac]
+# [[interfaces.mac.keys]]
+# algorithm = "hmac_sha256"  # or "blake2s128"
+# key_file = "/etc/babel-rs/link.key"  # hex-encoded random shared key

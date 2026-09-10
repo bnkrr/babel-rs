@@ -4,6 +4,22 @@ Use Rust 1.90+ to build the product. Use Cargo 1.96+ for the release checks belo
 which package the three workspace crates together and stage their unpublished
 dependencies locally. Python 3.11+ runs the archive consumer verification.
 
+## Publication status — 2026-09-11
+
+The [v0.5.0 release workflow](https://github.com/bnkrr/babel-rs/actions/runs/34486917845)
+completed all validation jobs successfully, including archive consumers,
+Windows/macOS protocol tests, Linux tests, E2E and the short steady-state run.
+The publish job then failed during the crates.io credential exchange:
+`No Trusted Publishing config found for repository bnkrr/babel-rs`.
+No upload or post-upload registry verification ran in that workflow.
+
+The public crates.io API returned HTTP 404 for `babel-protocol`, `babel-router`
+and `babel-rs` on 2026-09-11. Initial publication and the per-crate Trusted
+Publishing setup below remain outstanding. The local 0.6.0 archive rehearsal
+passed without uploading; it does not establish hosted CI or registry success
+for that version. Current verification and follow-ups are in
+[CONFORMANCE.md](CONFORMANCE.md).
+
 ## Verify before uploading
 
 Run the normal format, Clippy, workspace tests, doctests, rustdoc and MSRV checks

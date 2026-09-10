@@ -364,6 +364,7 @@ async fn interfaces(shared: &Shared) -> Result<Value, (&'static str, String)> {
                     "local_addresses": item.local_addresses.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
                     "mtu": item.mtu,
                     "udp_payload_budget": item.udp_payload_budget,
+                    "mac_mode": item.mac_mode,
                     "metric": item.metric,
                     "hello_interval_ms": item.hello_interval_ms,
                     "update_interval_ms": item.update_interval_ms,

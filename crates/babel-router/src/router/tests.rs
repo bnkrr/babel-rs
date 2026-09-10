@@ -320,7 +320,7 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
         export_worker: None,
         shutdown_timeout: Duration::from_secs(5),
         router_id: RouterId::new([1; 8]).unwrap(),
-        interfaces: vec![("bad".into(), None), ("good".into(), None)],
+        interfaces: vec![("bad".into(), None, None), ("good".into(), None, None)],
         origins: vec![],
         sockets: HashMap::new(),
         outbound: HashMap::from([("bad".into(), bad.clone()), ("good".into(), good.clone())]),

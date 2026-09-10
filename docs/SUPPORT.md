@@ -1,6 +1,6 @@
 # Support and compatibility
 
-The 0.5 release targets reusable Babel protocol and Linux runtime consumers.
+The 0.6.0 development version targets reusable Babel protocol and Linux runtime consumers.
 
 The [2026-09-10 RFC audit](CONFORMANCE.md) records repaired defects and deferred
 extensions. Platform support and successful tests do not
@@ -34,18 +34,17 @@ boundary test checks TTL-exceeded and fragmentation-needed messages both with
 a loopback IPv4 address and with no usable IPv4 address (kernel source 192.0.0.8).
 Custom exporters must opt in only when these requirements hold.
 
-Authentication (RFC 8967/8968) is not implemented. Use authenticated, authorized
-links such as WireGuard. This release does not promise safe deployment of Babel
-directly on an untrusted network, or a completed independent security audit.
+Optional RFC 8967 authentication supports HMAC-SHA256 and BLAKE2s-128, with
+RFC 9467 split receive counters. Keyed interfaces default to strict verification.
+DTLS remains deferred; a completed independent security audit is not claimed.
+See [MAC.md](MAC.md) for deployment, key rotation and the explicit migration mode.
 
-Stable identities and restart sequence policy belong to embedding hosts. The
-provided checkpoint example demonstrates orderly restart without repeatedly
-using zero; abrupt restarts may still need minutes to converge. Crash-safe
-sequence persistence is not claimed. Linux source views reject overlapping
-nonzero prefixes; this is not a complete general SADR forwarding backend.
-That configuration check does not prevent selection/advertisement of received
-routes outside the configured views. Finite-route/tombstone precedence within supported views is regression-tested.
-General SADR support remains deferred, including gating uncovered source views.
+Stable identities and restart sequence policy belong to embedding hosts. Abrupt
+restarts may still need minutes to converge; crash-safe sequence persistence is
+not claimed. Linux source views support overlapping prefixes and destination-first
+forwarding, automatically allocate learned source views, and gate uncovered
+sources in static mode. See [SADR.md](SADR.md) for external policy integration,
+materialization cost, non-atomic reconciliation and custom-exporter obligations.
 
 ## API compatibility
 

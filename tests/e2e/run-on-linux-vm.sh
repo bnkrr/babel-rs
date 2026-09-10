@@ -48,6 +48,7 @@ scp "${ssh_args[@]}" \
   "${repo_root}/tests/e2e/netns-general.py" \
   "${repo_root}/tests/e2e/netns-rfc-boundaries.py" \
   "${repo_root}/tests/e2e/netns-route-policy.py" \
+  "${repo_root}/tests/e2e/netns-mac-sadr.py" \
   "${repo_root}/tests/e2e/netns-state-restart.py" \
   "${repo_root}/tests/e2e/netns-shutdown-recovery.py" \
   "${repo_root}/tests/e2e/netns-control-clients.py" \
@@ -61,9 +62,13 @@ case ${1:-all} in
     remote_tests+=" && python3 '${remote_root}/netns-rfc-boundaries.py' '${remote_root}/babel-rs'"
     remote_tests+=" && python3 '${remote_root}/netns-route-policy.py' '${remote_root}/babel-rs' '${remote_root}/route_policy'"
     remote_tests+=" && python3 '${remote_root}/netns-general.py' '${remote_root}/babel-rs'"
+    remote_tests+=" && python3 '${remote_root}/netns-mac-sadr.py' '${remote_root}/babel-rs'"
     remote_tests+=" && python3 '${remote_root}/netns-control-clients.py' '${remote_root}/babel-rs'"
     remote_tests+=" && python3 '${remote_root}/netns-combined-failures.py' '${remote_root}/babel-rs'"
     remote_tests+=" && python3 '${remote_root}/netns-steady-state.py' '${remote_root}/babel-rs' --seconds 120"
+    ;;
+  mac-sadr)
+    remote_tests="python3 '${remote_root}/netns-mac-sadr.py' '${remote_root}/babel-rs'"
     ;;
   rfc-boundaries)
     remote_tests="python3 '${remote_root}/netns-rfc-boundaries.py' '${remote_root}/babel-rs'"
@@ -113,7 +118,7 @@ case ${1:-all} in
   mtu-output)
     remote_tests="'${remote_root}/netns-mtu-output.sh' '${remote_root}/babel-rs'"
     ;;
-  *) echo "usage: $0 [all|route-policy|rfc-boundaries|general|babeld|bird|three-node|rtt|rtt-multipath|lifecycle|mtu-output|capacity|state-restart|shutdown-recovery|control-clients|combined-failures|steady-state]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|mac-sadr|route-policy|rfc-boundaries|general|babeld|bird|three-node|rtt|rtt-multipath|lifecycle|mtu-output|capacity|state-restart|shutdown-recovery|control-clients|combined-failures|steady-state]" >&2; exit 2 ;;
 esac
 ssh "${ssh_args[@]}" "${ssh_host}" \
   "chmod 0700 '${remote_root}/babel-rs' '${remote_root}/netns-babeld.sh' '${remote_root}/netns-bird.sh' '${remote_root}/netns-three-node.sh' '${remote_root}/netns-rtt.sh' '${remote_root}/netns-rtt-multipath.sh' '${remote_root}/netns-lifecycle.sh' '${remote_root}/netns-mtu-output.sh' && ${remote_tests}"

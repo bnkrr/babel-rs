@@ -29,10 +29,13 @@ otherwise RFC 9229; `ipv4` and `ipv6` override this per interface.
 This package is the executable. Embed `babel-router` for a Tokio runtime or
 `babel-protocol` for a sans-I/O engine. No babeld or BIRD runtime dependency.
 
-Authentication is absent; deploy on protected links. Abrupt restarts may require
-minutes to recover retained sequence history. The Linux source-specific exporter
-rejects overlapping nonzero source views. Kernel routes are not automatically
-redistributed: configure origins explicitly.
+Optional RFC 8967 MAC authentication supports HMAC-SHA256, BLAKE2s-128 and live
+key rotation; configuring keys enables strict reception. DTLS is deferred.
+Linux SADR supports overlapping source prefixes and automatically materializes
+complete source tables with destination-first forwarding. Static configurations
+filter uncovered sources. Kernel routes are not automatically redistributed:
+configure origins explicitly. Abrupt restarts may require minutes to recover
+retained sequence history.
 
 [Configuration](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFIGURATION.md) ·
 [Control API](https://github.com/bnkrr/babel-rs/blob/main/docs/CONTROL.md) ·

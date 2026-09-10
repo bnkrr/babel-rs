@@ -9,8 +9,10 @@ The [2026-09-10 audit follow-up](CONFORMANCE.md) adds maintained regressions in
 `crates/babel-protocol/tests/rfc_audit_regressions.rs`, covering structured prefix
 compression, request replies, timestamp packet boundaries, withdrawal holds,
 backend capability gating and custom-algebra infinity. The original random-byte
-test did not reach the decoder panic. The follow-up's stable and Rust 1.90
-workspace runs each passed 157 tests.
+test did not reach the decoder panic. At the 0.5.0 audit-fix stage, stable and
+Rust 1.90 workspace runs each passed 157 tests. The 0.6.0 MAC/SADR work increases
+this to 180 tests per toolchain; current evidence is recorded in
+[CONFORMANCE.md](CONFORMANCE.md).
 
 `crates/babel-protocol/tests/seqno_recovery.rs` checks that worse/equal infeasible
 alternates do not originate unnecessary sequence requests, while preferable
@@ -183,7 +185,7 @@ BABEL_RS_E2E_HOST=router-test-vm BABEL_RS_STEADY_SECONDS=120 \
   tests/e2e/run-on-linux-vm.sh steady-state
 ```
 
-`all` runs the twelve regression groups plus the 120-second
+`all` runs the configured regression groups plus the 120-second
 steady-state smoke test. The explicitly selected `steady-state` mode defaults
 to one hour. `BABEL_RS_STEADY_SECONDS` accepts
 120..86400 seconds for VM runs. For direct runs, `--rss-growth-kib` adjusts the
@@ -241,3 +243,18 @@ tests additionally cover alternate selection, source-prefix contexts, unicast
 and forwarded request replies, repeated withdrawals and retained feasibility.
 The runtime's injected blocked socket test covers cancellation of stale channel,
 scheduler and in-flight output without needing network timing assumptions.
+
+## MAC and overlapping SADR
+
+`tests/e2e/netns-mac-sadr.py` (VM wrapper `mac-sadr`) checks strict authentication
+on IPv6 MTU 1280 and IPv4 MTU 576, rotation overlap/removal, wrong-key isolation,
+restart recovery, and independent babeld HMAC-SHA256/BLAKE2s-128 interoperability.
+Four namespaces exercise authenticated SADR with real IPv4/IPv6 transit pings,
+destination-before-source precedence, equal-destination source overrides,
+withdrawal holds, reannouncement and owned-state shutdown cleanup.
+
+Sans-I/O MAC tests use independent digest vectors and exercise forged endpoints,
+body tampering, replay/reordering, counter rollover, challenge expiry/rate limits,
+key overlap, malformed framing and bounded state. Linux projection tests compare
+varied finite/withdrawn route sets to an independent destination-first lookup
+oracle, and check inherited updates plus source-table lifetime and reuse.

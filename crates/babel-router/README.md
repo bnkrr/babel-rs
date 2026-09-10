@@ -55,7 +55,10 @@ transport (`ControlTransport::Ipv6` by default, or `Ipv4`). IPv4
 announcements use `auto`, `ipv4`, or `ipv6` next-hop policy independently of
 the selected control transport. Custom exporters default to rejecting IPv4-via-IPv6
 routes; opt in with `supports_ipv4_via_ipv6()` only when the backend supports
-that forwarding form and unnumbered ICMPv4. Authentication is not implemented; use protected links.
+that forwarding form and unnumbered ICMPv4. Configure `MacKey`/`MacConfig` with
+`interface_with_mac` or `add_interface_with_mac` for strict RFC 8967 authentication
+from the first packet. HMAC-SHA256 and BLAKE2s-128 are supported. Remove/reattach
+the interface to rotate its key set without restarting the router. DTLS is deferred.
 
 [API](https://docs.rs/babel-router) ·
 [Embedding contracts](https://github.com/bnkrr/babel-rs/blob/main/docs/EMBEDDING.md) ·

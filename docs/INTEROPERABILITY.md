@@ -8,7 +8,7 @@ namespaces. The reference versions currently installed there are babeld
 The original scenarios below use IPv6 control transport; columns describe
 payload routes. The added RFC boundary suite also tests pure IPv4 control with
 IPv6 disabled and MTU 576, live control-family reload, independent babeld RTT,
-and ICMPv4 over unnumbered links. MAC/DTLS and general SADR are deferred; see
+and ICMPv4 over unnumbered links. MAC and overlapping SADR have a dedicated `netns-mac-sadr.py` fixture. DTLS remains deferred; see
 [CONFORMANCE.md](CONFORMANCE.md). An RTT sample is evidence of timestamp exchange,
 not proof of route selection or arbitrary-load timing.
 
@@ -92,3 +92,19 @@ using the router's loopback IPv4 address or kernel fallback 192.0.0.8.
 The 120-second steady run passed 132 samples with maximum control latency
 1.262 ms; its duration is too short to make long-run leak claims.
 The historical mixed-soak round 170 observation remains unattributed.
+
+## 0.6.0 MAC/SADR verification
+
+The VM MAC suite passed HMAC-SHA256 and BLAKE2s-128 exchange against babeld
+1.13.1. IPv4 and IPv6 babel-rs peers also passed key rotation, wrong-key
+isolation, restart recovery and multi-datagram route dumps at MTU 576 and 1280,
+respectively, using the daemon installed from the verified crate archive.
+
+The overlapping-source tests passed actual IPv4/IPv6 transit forwarding,
+destination-first lookup, equal-destination source overrides, withdrawal and
+reannouncement, static-source filtering/re-enable and owned-state cleanup.
+The final SADR run waited for all child defaults before testing destination
+precedence; an earlier run failed because that readiness condition was missing.
+The existing BIRD SADR, RFC boundary and dynamic-MTU regressions also passed.
+These are scoped VM checks; hosted tests for the 0.6.0 commit and a long-duration
+mixed run remain outstanding. No Babel-DTLS interoperability is claimed.

@@ -92,7 +92,7 @@ source = "10.0.0.0/8"
     .unwrap();
     config.validate().unwrap();
     assert!(config.origins[0].key().unwrap().source.is_some());
-    assert_eq!(config.export.views[1].effective_rule_priority(), 20001);
+    assert_eq!(config.export.rule_priority(config.export.views[1]), 10120);
 }
 
 #[test]
@@ -131,8 +131,8 @@ source = "10.1.0.0/16"
 }
 
 #[test]
-fn overlapping_source_views_are_rejected_even_in_different_tables() {
-    let error = Config::parse(
+fn overlapping_source_views_query_more_specific_sources_first() {
+    let config = Config::parse(
         r#"
 [[interfaces]]
 match = ["wg0"]
@@ -145,8 +145,91 @@ table = 20002
 source = "10.1.0.0/16"
 "#,
     )
-    .unwrap_err();
-    assert!(matches!(error, ConfigError::OverlappingSourceViews(_, _)));
+    .unwrap();
+    assert!(
+        config.export.rule_priority(config.export.views[1])
+            < config.export.rule_priority(config.export.views[0])
+    );
+}
+
+#[test]
+fn source_view_priority_overrides_and_canonical_prefixes_are_validated() {
+    let text = r#"
+[[interfaces]]
+match = ["wg0"]
+[export]
+automatic_sources = false
+source_rule_priority = 500
+[[export.views]]
+table = 201
+source = "10.1.2.3/16"
+rule_priority = 200
+[[export.views]]
+table = 202
+source = "10.1.2.0/24"
+rule_priority = 100
+"#;
+    let config = Config::parse(text).unwrap();
+    assert_eq!(
+        config.export.views[0].source.unwrap().to_string(),
+        "10.1.0.0/16"
+    );
+    assert!(matches!(
+        Config::parse(&text.replace("rule_priority = 100", "rule_priority = 300")),
+        Err(ConfigError::SourceRuleOrder(_, _))
+    ));
+    assert!(matches!(
+        Config::parse(&text.replace("automatic_sources = false", "automatic_sources = true")),
+        Err(ConfigError::AutomaticSourceConfig)
+    ));
+    assert!(matches!(
+        Config::parse(&text.replace("source_rule_priority = 500", "source_rule_priority = 0")),
+        Err(ConfigError::SourcePriorityRange)
+    ));
+    let auto = Config::parse(
+        &text
+            .replace("automatic_sources = false", "automatic_sources = true")
+            .replace("rule_priority = 200", "")
+            .replace("rule_priority = 100", ""),
+    )
+    .unwrap();
+    assert_eq!(auto.export.rule_priority(auto.export.views[0]), 612);
+    assert_eq!(auto.export.rule_priority(auto.export.views[1]), 604);
+}
+
+#[test]
+fn key_files_are_reread_on_reload_and_secret_errors_are_redacted() {
+    let path = std::env::temp_dir().join(format!("babel-mac-config-{}.key", std::process::id()));
+    let text = format!(
+        r#"
+[[interfaces]]
+match = ["wg0"]
+[[interfaces.mac.keys]]
+key_file = "{}"
+[export]
+[[export.views]]
+table = 201
+"#,
+        path.display()
+    );
+    fs::write(&path, "11".repeat(32)).unwrap();
+    let first = Config::parse(&text).unwrap();
+    let first_mac = first.effective_interface("wg0").unwrap().mac.unwrap();
+    assert!(first_mac.is_strict());
+    fs::write(&path, "22".repeat(32)).unwrap();
+    let second = Config::parse(&text)
+        .unwrap()
+        .effective_interface("wg0")
+        .unwrap()
+        .mac
+        .unwrap();
+    assert_ne!(first_mac, second);
+    let secret = "not-a-valid-secret";
+    fs::write(&path, secret).unwrap();
+    let error = Config::parse(&text).unwrap_err();
+    assert!(!error.to_string().contains(secret));
+    fs::remove_file(path).unwrap();
+    assert!(matches!(Config::parse(&text), Err(ConfigError::Mac(_))));
 }
 
 #[test]

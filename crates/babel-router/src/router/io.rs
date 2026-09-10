@@ -21,11 +21,16 @@ pub(super) fn spawn_receiver(
             tokio::select! {
                 changed = shutdown.changed() => if changed.is_err() || *shutdown.borrow() { return; },
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
-                result = socket.socket.recv_from(&mut buffer) => match result {
-                    Ok((length, source))
-                        if valid_socket_source(&socket, source) => {
+                result = socket.receive(&mut buffer) => match result {
+                    Ok((length, endpoints))
+                        if valid_socket_source(&socket, endpoints.source) => {
                         let received_timestamp_us = started.elapsed().as_micros() as u32;
-                        let item = Received::Packet { _permit: permit, interface: socket.name.clone(), index: socket.index, source: source.ip(), bytes: buffer[..length].to_vec(), received_timestamp_us };
+                        let authentication = socket.authenticate(&buffer[..length], endpoints, elapsed_ms(&started));
+                        for control in authentication.controls {
+                            let _ = tokio::time::timeout(Duration::from_millis(SEND_TIMEOUT_MS), socket.send(&control, endpoints.source.ip())).await;
+                        }
+                        if !authentication.accepted { continue; }
+                        let item = Received::Packet { _permit: permit, interface: socket.name.clone(), socket: socket.clone(), source: endpoints.source.ip(), bytes: buffer[..length].to_vec(), received_timestamp_us };
                         tokio::select! {
                             _ = shutdown.changed() => return,
                             _ = stop.changed() => return,
@@ -37,7 +42,7 @@ pub(super) fn spawn_receiver(
                         warn!(interface = %socket.name, %error, "Babel receive failed");
                         let failed = Received::Failed {
                             interface: socket.name.clone(),
-                            index: socket.index,
+                            socket: socket.clone(),
                             error: error.to_string(),
                         };
                         tokio::select! {
@@ -91,9 +96,7 @@ impl OutputTransport for InterfaceSocket {
     }
 
     async fn send(&self, bytes: &[u8], destination: IpAddr) -> std::io::Result<usize> {
-        self.socket
-            .send_to(bytes, self.destination(destination))
-            .await
+        InterfaceSocket::send(self, bytes, destination).await
     }
 }
 

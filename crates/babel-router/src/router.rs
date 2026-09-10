@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::Instant;
 
+use babel_protocol::mac::MacConfig;
 use babel_protocol::{
     Action, AdditiveMetric, AllowAllRoutes, DecodeContext, Engine, EngineConfig, Event,
     InterfacePolicy, Ipv4NextHop, MetricAlgebra, MetricProfile, NeighborStatus, ResourceLimits,
@@ -24,7 +25,7 @@ use crate::output_queue::{
     OUTPUT_BUDGET_BYTES, OUTPUT_QUEUE_CAPACITY, OutputCounters, OutputQueue, OutputStatus,
     QueuedIntent, SEND_TIMEOUT_MS,
 };
-use crate::transport::{InterfaceSocket, payload_budget_for_transport};
+use crate::transport::InterfaceSocket;
 
 /// Configuration, interface activation or runtime command failure.
 #[derive(Debug, Error)]
@@ -74,6 +75,8 @@ pub struct RouterInterfaceStatus {
     pub control_transport: babel_protocol::ControlTransport,
     pub mtu: u32,
     pub udp_payload_budget: usize,
+    /// `disabled`, `strict`, or explicit unauthenticated `migration` mode.
+    pub mac_mode: String,
     pub metric: String,
     pub hello_interval_ms: u64,
     pub update_interval_ms: u64,
@@ -117,6 +120,7 @@ enum Command {
     AddInterface(
         String,
         Option<InterfacePolicy>,
+        Option<MacConfig>,
         oneshot::Sender<Result<(), RouterError>>,
     ),
     UpdateInterfacePolicy(
@@ -133,14 +137,14 @@ enum Received {
     Packet {
         _permit: OwnedSemaphorePermit,
         interface: String,
-        index: u32,
+        socket: Arc<InterfaceSocket>,
         source: IpAddr,
         bytes: Vec<u8>,
         received_timestamp_us: u32,
     },
     Failed {
         interface: String,
-        index: u32,
+        socket: Arc<InterfaceSocket>,
         error: String,
     },
 }
@@ -150,7 +154,7 @@ struct Runtime {
     export_worker: Option<Worker>,
     shutdown_timeout: Duration,
     router_id: RouterId,
-    interfaces: Vec<(String, Option<InterfacePolicy>)>,
+    interfaces: Vec<(String, Option<InterfacePolicy>, Option<MacConfig>)>,
     origins: Vec<(RouteKey, u16)>,
     sockets: HashMap<String, Arc<InterfaceSocket>>,
     outbound: HashMap<String, OutputQueue>,
@@ -281,7 +285,7 @@ impl RouterHandle {
 
     /// Attach using default policy and wait for socket/engine activation. Already active is a no-op.
     pub async fn add_interface(&self, interface: impl Into<String>) -> Result<(), RouterError> {
-        self.add_interface_inner(interface.into(), None).await
+        self.add_interface_inner(interface.into(), None, None).await
     }
 
     /// Validate a policy before opening an interface. Already active is a no-op;
@@ -292,7 +296,21 @@ impl RouterHandle {
         policy: InterfacePolicy,
     ) -> Result<(), RouterError> {
         validate_interface_policy(&policy)?;
-        self.add_interface_inner(interface.into(), Some(policy))
+        self.add_interface_inner(interface.into(), Some(policy), None)
+            .await
+    }
+
+    /// Attach an interface with RFC 8967 authentication from its first packet.
+    /// To rotate keys, remove and reattach the interface with the new key set;
+    /// the router continues running and the link performs a fresh challenge.
+    pub async fn add_interface_with_mac(
+        &self,
+        interface: impl Into<String>,
+        policy: InterfacePolicy,
+        mac: Option<MacConfig>,
+    ) -> Result<(), RouterError> {
+        validate_interface_policy(&policy)?;
+        self.add_interface_inner(interface.into(), Some(policy), mac)
             .await
     }
 
@@ -300,10 +318,11 @@ impl RouterHandle {
         &self,
         interface: String,
         policy: Option<InterfacePolicy>,
+        mac: Option<MacConfig>,
     ) -> Result<(), RouterError> {
         let (send, receive) = oneshot::channel();
         self.commands
-            .send(Command::AddInterface(interface, policy, send))
+            .send(Command::AddInterface(interface, policy, mac, send))
             .await
             .map_err(|_| RouterError::Stopped)?;
         receive.await.map_err(|_| RouterError::Stopped)?
@@ -425,7 +444,7 @@ impl BabelRouter {
 pub struct BabelRouterBuilder {
     shutdown_timeout: Option<Duration>,
     router_id: Option<RouterId>,
-    interfaces: Vec<(String, Option<InterfacePolicy>)>,
+    interfaces: Vec<(String, Option<InterfacePolicy>, Option<MacConfig>)>,
     origins: Vec<(RouteKey, u16)>,
     exporter: Option<Arc<dyn RouteExporter>>,
     metric: Option<Arc<dyn MetricProfile>>,
@@ -457,7 +476,7 @@ impl BabelRouterBuilder {
     }
     /// Add an exact interface name with default policy; duplicates fail validation.
     pub fn interface(mut self, value: impl Into<String>) -> Self {
-        self.interfaces.push((value.into(), None));
+        self.interfaces.push((value.into(), None, None));
         self
     }
     /// Add an exact interface name with explicit metric, timers and split horizon.
@@ -466,7 +485,17 @@ impl BabelRouterBuilder {
         value: impl Into<String>,
         policy: InterfacePolicy,
     ) -> Self {
-        self.interfaces.push((value.into(), Some(policy)));
+        self.interfaces.push((value.into(), Some(policy), None));
+        self
+    }
+    /// Configure authenticated output and strict input admission before activation.
+    pub fn interface_with_mac(
+        mut self,
+        name: impl Into<String>,
+        policy: InterfacePolicy,
+        mac: MacConfig,
+    ) -> Self {
+        self.interfaces.push((name.into(), Some(policy), Some(mac)));
         self
     }
     /// Add an initial canonical local route with a finite metric; duplicates fail validation.
@@ -530,7 +559,7 @@ impl BabelRouterBuilder {
         self.router_id.ok_or(RouterError::MissingRouterId)?;
         self.route_selection.unwrap_or_default().validate()?;
         let mut interfaces = std::collections::HashSet::new();
-        for (name, policy) in &self.interfaces {
+        for (name, policy, _) in &self.interfaces {
             if !interfaces.insert(name) {
                 return Err(RouterError::DuplicateInterface(name.clone()));
             }
@@ -561,12 +590,14 @@ impl BabelRouterBuilder {
         self.validate()?;
         let router_id = self.router_id.ok_or(RouterError::MissingRouterId)?;
         let mut sockets = HashMap::new();
-        for (name, policy) in &self.interfaces {
-            let socket = InterfaceSocket::open(
+        for (name, policy, mac) in &self.interfaces {
+            let socket = InterfaceSocket::open_authenticated(
                 name,
                 policy
                     .as_ref()
                     .map_or(Default::default(), |p| p.control_transport),
+                mac.clone(),
+                self.limits.max_neighbors,
             )
             .map_err(|source| RouterError::OpenInterface {
                 interface: name.clone(),

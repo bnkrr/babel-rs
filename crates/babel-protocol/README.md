@@ -36,8 +36,10 @@ history is retained, and retractions bypass policy. Callbacks are synchronous
 and must not block or silently change behavior between explicit replacements.
 
 Implements RFC 8966, source-specific routes (RFC 9079), IPv4 routes with IPv6
-next hops (RFC 9229), and RTT metrics (RFC 9616). MAC/DTLS authentication is
-absent: the host must provide a protected link or authentication boundary.
+next hops (RFC 9229), and RTT metrics (RFC 9616). `mac::MacSession` implements
+RFC 8967 authentication and RFC 9467 split replay counters. Hosts supply entropy,
+actual UDP endpoints and monotonic time; verify before decoding and sign after
+stamping timestamps. DTLS is not implemented.
 The core is OS-independent but uses Rust's standard library; it is not `no_std`.
 
 [API](https://docs.rs/babel-protocol) ·

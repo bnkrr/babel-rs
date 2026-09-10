@@ -100,22 +100,21 @@ async fn reconcile(
     let stale: Vec<_> = attached
         .iter()
         .filter(|(name, attached)| {
-            config
-                .effective_interface(name)
-                .is_none_or(|p| p.control_transport != attached.policy.control_transport)
-                || current.get(*name).is_none_or(|value| {
-                    value.index != attached.signature.index
-                        || value.up != attached.signature.up
-                        || match attached.policy.control_transport {
-                            ControlTransport::Ipv6 => {
-                                value.link_local_addresses
-                                    != attached.signature.link_local_addresses
-                            }
-                            ControlTransport::Ipv4 => {
-                                value.ipv4_addresses != attached.signature.ipv4_addresses
-                            }
+            config.effective_interface(name).is_none_or(|p| {
+                p.control_transport != attached.policy.control_transport
+                    || p.mac != attached.policy.mac
+            }) || current.get(*name).is_none_or(|value| {
+                value.index != attached.signature.index
+                    || value.up != attached.signature.up
+                    || match attached.policy.control_transport {
+                        ControlTransport::Ipv6 => {
+                            value.link_local_addresses != attached.signature.link_local_addresses
                         }
-                })
+                        ControlTransport::Ipv4 => {
+                            value.ipv4_addresses != attached.signature.ipv4_addresses
+                        }
+                    }
+            })
         })
         .map(|(name, _)| name.clone())
         .collect();
@@ -174,7 +173,10 @@ async fn reconcile(
         let policy = effective
             .build_policy()
             .expect("validated interface policy");
-        match router.add_interface_with_policy(name.clone(), policy).await {
+        match router
+            .add_interface_with_mac(name.clone(), policy, effective.mac.clone())
+            .await
+        {
             Ok(()) => {
                 info!(interface = %name, index = signature.index, "attached Babel interface");
                 attached.insert(

@@ -49,7 +49,7 @@ announcements. See [route policy contracts and examples](docs/EMBEDDING.md#route
 
 ## Current scope
 
-The v0.5 implementation includes RFC 8966 base TLVs, neighbour maintenance,
+The v0.6 implementation includes RFC 8966 base TLVs, neighbour maintenance,
 feasibility, route selection, route and sequence-number requests, retractions,
 and multi-hop propagation. It also implements RFC 9079 source-specific routes
 and RFC 9229 IPv4 routes with IPv6 next hops.
@@ -58,9 +58,9 @@ Link quality is policy rather than an engine constant. The built-in profiles
 implement RFC 8966 wired k-out-of-j sensing and ETX, plus RFC 9616 timestamp
 sampling and its recommended RTT cost policy. Wired 2-out-of-3 with nominal
 cost 96 is the default. Embedders can supply a different `MetricProfile` and
-`MetricAlgebra` without replacing the protocol engine. RFC 8967/8968
-authentication is not implemented. Deployments should therefore run Babel on
-a protected link when authentication is required.
+`MetricAlgebra` without replacing the protocol engine. Optional RFC 8967 MAC
+authentication supports HMAC-SHA256 and BLAKE2s-128 with RFC 9467 replay protection.
+RFC 8968 DTLS remains deferred.
 
 The socket runtime and standalone daemon currently support Linux. The sans-I/O
 protocol engine is independent of the operating system. It exports selected routes plus the
@@ -176,12 +176,16 @@ reconciles the newest snapshot. Out-of-band deletion and stale owned state are
 repaired while routes and rules owned by other protocols remain untouched.
 Control status exposes the last successfully applied route and export-config
 generations, together with the last success age and export error.
-Export views project ordinary and source-specific routes into complete Linux
-tables. Standalone mode can manage one source rule per view; an external
-manager can set `manage_rules = false`. Nonzero source-view prefixes must not
-overlap, because the Linux policy-rule exporter admits only the unambiguous
-subset where its lookup order is equivalent to RFC 9079 destination-first
-selection.
+Export views support overlapping source prefixes with RFC 9079 destination-first
+forwarding. Source tables inherit ordinary and covering-source routes, with
+more-specific sources winning equal destinations. By default, managed export
+allocates views for newly learned source prefixes. Static/external configurations
+filter unsupported sources before selection and announcement. See [SADR.md](docs/SADR.md)
+for table ownership, rule priorities, and migration from 0.5.0.
+
+Optional per-interface [MAC authentication](docs/MAC.md) supports RFC 8967
+HMAC-SHA256 and BLAKE2s-128, RFC 9467 replay counters, and live key rotation.
+Configuring keys enables strict authentication; DTLS remains deferred.
 
 `SIGHUP` parses and validates a complete candidate before committing interface
 rules, origins, and export policy. An invalid candidate leaves the active

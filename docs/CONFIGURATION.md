@@ -131,3 +131,8 @@ or the RIB. Address changes and policy reloads trigger updated advertisements.
 Status reports the configured mode, effective mode (`ipv4`, `ipv6`, `unavailable`)
 and the chosen IPv4 next-hop address. UDP loss can delay remote observation until
 a later update; the local mode is not a remote delivery acknowledgement.
+
+## Authentication and source-specific routing
+
+See [MAC.md](MAC.md) for per-interface `[interfaces.mac]`, key files and rotation,
+and [SADR.md](SADR.md) for automatic/explicit source tables and rule priorities.

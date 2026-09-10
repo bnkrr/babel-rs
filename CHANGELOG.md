@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 — Unreleased
+
+- Implement optional RFC 8967 MAC authentication (HMAC-SHA256/BLAKE2s-128),
+  RFC 9467 split replay counters, challenge/restart handling, and live key rotation.
+  Add safe UDP packet-info reception/source-pinned transmission and MTU reservation.
+- Support overlapping IPv4/IPv6 SADR sources through inherited destination tables,
+  automatic source-view allocation, withdrawal holds, and unsupported-source
+  filtering in static configurations. Source rule priorities now follow prefix
+  specificity; existing overrides must be migrated as described in docs/SADR.md.
+- Add independent digest/babeld interop, MAC rotation/restart, destination-first
+  oracle, and actual source-specific transit forwarding regressions. DTLS is deferred.
+
 ## 0.5.0 — 2026-09-10
 
 - Add read-only `RoutePolicy` import/export hooks, defaulting to `AllowAllRoutes`.

@@ -66,6 +66,77 @@ pub struct InterfaceSection {
     pub hello_interval_ms: Option<u64>,
     pub update_interval_ms: Option<u64>,
     pub metric: Option<MetricConfig>,
+    pub mac: Option<MacSection>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MacSection {
+    pub keys: Vec<MacKeyFile>,
+    #[serde(default)]
+    pub accept_unverified: bool,
+    #[serde(skip)]
+    pub resolved: Option<babel_router::MacConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MacKeyFile {
+    #[serde(default)]
+    pub algorithm: MacAlgorithm,
+    /// A file containing only a hexadecimal key (optional surrounding whitespace).
+    pub key_file: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MacAlgorithm {
+    #[default]
+    HmacSha256,
+    Blake2s128,
+}
+
+impl MacSection {
+    fn resolve(&mut self) -> Result<(), ConfigError> {
+        let mut keys = Vec::new();
+        for key in &self.keys {
+            let text = fs::read_to_string(&key.key_file)
+                .map_err(|_| ConfigError::Mac("cannot read MAC key file".into()))?;
+            let text = text.trim();
+            if text.is_empty() || text.len() > 8192 || !text.len().is_multiple_of(2) {
+                return Err(ConfigError::Mac(
+                    "MAC key file must contain hexadecimal bytes".into(),
+                ));
+            }
+            let bytes = text
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let high = (pair[0] as char).to_digit(16);
+                    let low = (pair[1] as char).to_digit(16);
+                    high.zip(low)
+                        .map(|(h, l)| (h * 16 + l) as u8)
+                        .ok_or_else(|| {
+                            ConfigError::Mac("MAC key file must contain hexadecimal bytes".into())
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let algorithm = match key.algorithm {
+                MacAlgorithm::HmacSha256 => babel_router::MacAlgorithm::HmacSha256,
+                MacAlgorithm::Blake2s128 => babel_router::MacAlgorithm::Blake2s128,
+            };
+            keys.push(
+                babel_router::MacKey::new(algorithm, bytes)
+                    .map_err(|e| ConfigError::Mac(e.to_string()))?,
+            );
+        }
+        self.resolved = Some(
+            babel_router::MacConfig::new(keys)
+                .map_err(|e| ConfigError::Mac(e.to_string()))?
+                .accept_unverified(self.accept_unverified),
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -114,6 +185,7 @@ pub enum LinkType {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectiveInterface {
+    pub mac: Option<babel_router::MacConfig>,
     pub section: usize,
     pub control_transport: ControlTransport,
     pub link_type: LinkType,
@@ -351,7 +423,34 @@ pub struct Export {
     pub device_only: bool,
     #[serde(default = "default_manage_rules")]
     pub manage_rules: bool,
+    /// Allocate a view for every learned source prefix when rules are managed.
+    #[serde(default = "default_manage_rules")]
+    pub automatic_sources: bool,
+    #[serde(default = "default_source_table_base")]
+    pub source_table_base: u32,
+    #[serde(default = "default_source_rule_priority")]
+    pub source_rule_priority: u32,
     pub views: Vec<ExportView>,
+}
+
+fn default_source_table_base() -> u32 {
+    1_000_000
+}
+
+fn default_source_rule_priority() -> u32 {
+    10_000
+}
+
+impl Export {
+    pub fn rule_priority(&self, view: ExportView) -> u32 {
+        view.rule_priority.unwrap_or_else(|| {
+            self.source_rule_priority
+                .saturating_add(u32::from(128 - view.source.map_or(0, |s| s.prefix_len())))
+        })
+    }
+    pub fn automatic_sources(&self) -> bool {
+        self.automatic_sources && self.manage_rules
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -362,14 +461,10 @@ pub struct ExportView {
     pub rule_priority: Option<u32>,
 }
 
-impl ExportView {
-    pub fn effective_rule_priority(self) -> u32 {
-        self.rule_priority.unwrap_or(self.table)
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("MAC configuration: {0}")]
+    Mac(String),
     #[error("read configuration: {0}")]
     Read(#[from] std::io::Error),
     #[error("parse TOML configuration: {0}")]
@@ -404,10 +499,14 @@ pub enum ConfigError {
     DuplicateView(String),
     #[error("source-specific export views in the same address family must use different tables")]
     SharedSourceTable,
+    #[error("overlapping source views must query the more-specific source first: {0} and {1}")]
+    SourceRuleOrder(IpNet, IpNet),
     #[error(
-        "overlapping source-specific export views are not supported by the Linux exporter: {0} and {1}"
+        "automatic source views require default rule priorities and source_table_base in 256..=2147483647"
     )]
-    OverlappingSourceViews(IpNet, IpNet),
+    AutomaticSourceConfig,
+    #[error("source_rule_priority must be in 1..=32638 and explicit priorities must be nonzero")]
+    SourcePriorityRange,
     #[error("rule_priority is only valid on a source-specific export view")]
     OrdinaryRulePriority,
 }
@@ -419,11 +518,19 @@ impl Config {
 
     pub fn parse(contents: &str) -> Result<Self, ConfigError> {
         let mut value: Self = toml::from_str(contents)?;
+        for interface in &mut value.interfaces {
+            if let Some(mac) = &mut interface.mac {
+                mac.resolve()?;
+            }
+        }
         for origin in &mut value.origins {
             origin.source = origin.source.filter(|source| source.prefix_len() != 0);
         }
         for view in &mut value.export.views {
-            view.source = view.source.filter(|source| source.prefix_len() != 0);
+            view.source = view
+                .source
+                .filter(|source| source.prefix_len() != 0)
+                .map(|source| source.trunc());
         }
         value.validate()?;
         Ok(value)
@@ -453,6 +560,25 @@ impl Config {
         if self.export.views.is_empty() {
             return Err(ConfigError::NoExportViews);
         }
+        if self.export.automatic_sources()
+            && (!(256..=0x7fff_ffff).contains(&self.export.source_table_base)
+                || self.export.views.iter().any(|v| {
+                    v.rule_priority.is_some_and(|p| {
+                        p != self.export.rule_priority(ExportView {
+                            rule_priority: None,
+                            ..*v
+                        })
+                    })
+                }))
+        {
+            return Err(ConfigError::AutomaticSourceConfig);
+        }
+        if self.export.source_rule_priority == 0
+            || self.export.source_rule_priority > 32_638
+            || self.export.views.iter().any(|v| v.rule_priority == Some(0))
+        {
+            return Err(ConfigError::SourcePriorityRange);
+        }
         let mut views = HashSet::new();
         let mut source_tables = HashSet::new();
         for view in &self.export.views {
@@ -476,16 +602,25 @@ impl Config {
                 }
             }
         }
-        let sources: Vec<_> = self
-            .export
-            .views
-            .iter()
-            .filter_map(|view| view.source)
-            .collect();
-        for (index, left) in sources.iter().enumerate() {
-            for right in &sources[index + 1..] {
-                if prefixes_overlap(*left, *right) {
-                    return Err(ConfigError::OverlappingSourceViews(*left, *right));
+        for (index, left) in self.export.views.iter().enumerate() {
+            for right in &self.export.views[index + 1..] {
+                if left.table == right.table && (left.source.is_none() || right.source.is_none()) {
+                    return Err(ConfigError::SharedSourceTable);
+                }
+                if let (Some(l), Some(r)) = (left.source, right.source) {
+                    if l == r {
+                        return Err(ConfigError::DuplicateView(l.to_string()));
+                    }
+                    if prefixes_overlap(l, r)
+                        && ((l.prefix_len() > r.prefix_len()
+                            && self.export.rule_priority(*left)
+                                >= self.export.rule_priority(*right))
+                            || (r.prefix_len() > l.prefix_len()
+                                && self.export.rule_priority(*right)
+                                    >= self.export.rule_priority(*left)))
+                    {
+                        return Err(ConfigError::SourceRuleOrder(l, r));
+                    }
                 }
             }
         }
@@ -518,6 +653,7 @@ impl Config {
                             effective_interval(item.hello_interval_ms, "hello_interval_ms")
                                 .expect("validated interface interval");
                         EffectiveInterface {
+                            mac: item.mac.as_ref().and_then(|mac| mac.resolved.clone()),
                             section: index,
                             ipv4_next_hop: item.ipv4_next_hop,
                             control_transport: item.control_transport,

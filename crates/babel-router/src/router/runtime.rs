@@ -55,7 +55,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     export_updates.send_replace(initial.clone());
     route_updates.send_replace(initial);
     let mut interface_policies = HashMap::new();
-    for (interface, configured_policy) in &interfaces {
+    for (interface, configured_policy, _) in &interfaces {
         let policy = configured_policy
             .clone()
             .unwrap_or_else(|| default_policy.clone());
@@ -178,10 +178,10 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 update_output_status(&mut status, &output_counters);
             },
             Some(item) = received.recv() => match item {
-                Received::Packet { _permit, interface, index, source, bytes, received_timestamp_us } => {
+                Received::Packet { _permit, interface, socket: received_socket, source, bytes, received_timestamp_us } => {
                     if sockets
                         .get(&interface)
-                        .is_none_or(|socket| socket.index != index)
+                        .is_none_or(|socket| !Arc::ptr_eq(socket, &received_socket))
                     {
                         continue;
                     }
@@ -194,8 +194,9 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                         Err(error) => debug!(%error, "ignored invalid Babel packet"),
                     }
                 }
-                Received::Failed { interface, index, error } => {
-                    let is_current = sockets.get(&interface).is_some_and(|socket| socket.index == index);
+                Received::Failed { interface, socket: failed_socket, error } => {
+                    let index = failed_socket.index;
+                    let is_current = sockets.get(&interface).is_some_and(|socket| Arc::ptr_eq(socket, &failed_socket));
                     if is_current {
                         warn!(%interface, index, %error, "detaching failed Babel interface");
                         sockets.remove(&interface);
@@ -242,12 +243,12 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status, engine.handle(Event::Withdraw { key, now_ms: now() })) ;
                     let _ = reply.send(());
                 },
-                Command::AddInterface(interface, configured_policy, reply) => {
+                Command::AddInterface(interface, configured_policy, mac, reply) => {
                     let result = if sockets.contains_key(&interface) {
                         Ok(())
                     } else {
                         let policy = configured_policy.unwrap_or_else(|| default_policy.clone());
-                        match InterfaceSocket::open(&interface, policy.control_transport) {
+                        match InterfaceSocket::open_authenticated(&interface, policy.control_transport, mac, limits.max_neighbors) {
                             Ok(socket) => {
                                 let socket = Arc::new(socket);
                                 let (stop, stop_rx) = watch::channel(false);
@@ -388,8 +389,20 @@ pub(super) fn interface_status(
                     .collect(),
                 control_transport: socket.transport,
                 mtu,
-                udp_payload_budget: payload_budget_for_transport(mtu, socket.transport)
-                    .unwrap_or_default(),
+                udp_payload_budget: socket.payload_budget().unwrap_or_default(),
+                mac_mode: socket
+                    .authentication
+                    .lock()
+                    .expect("MAC lock")
+                    .as_ref()
+                    .map_or("disabled", |mac| {
+                        if mac.is_strict() {
+                            "strict"
+                        } else {
+                            "migration"
+                        }
+                    })
+                    .into(),
                 metric: policy.metric.name(),
                 hello_interval_ms: u64::from(policy.hello_interval_cs) * 10,
                 update_interval_ms: u64::from(policy.update_interval_cs) * 10,

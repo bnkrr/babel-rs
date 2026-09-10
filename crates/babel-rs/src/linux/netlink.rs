@@ -9,7 +9,14 @@ impl LinuxExporter {
         snapshot: RouteSnapshot,
         retain_rules: bool,
     ) -> Result<(), LinuxError> {
+        let mut resolved = export.clone();
+        resolved.views =
+            projection::source_views(export, &snapshot, &mut *self.source_tables.lock().await)?;
+        let export = &resolved;
         let projected = project_routes(&export.views, &snapshot);
+        // A released table may be reused for a different source. Remove obsolete
+        // rules before changing its contents; activate new views only when full.
+        self.remove_stale_rules(export, retain_rules).await?;
         debug!(
             generation = snapshot.generation,
             selected = snapshot.routes.len(),
@@ -108,7 +115,7 @@ impl LinuxExporter {
                 .filter_map(|view| {
                     Some(RuleIdentity {
                         table: view.table,
-                        priority: view.effective_rule_priority(),
+                        priority: export.rule_priority(*view),
                         source: view.source?,
                     })
                 })
@@ -123,6 +130,24 @@ impl LinuxExporter {
         }
         for message in current {
             if rule_identity(&message).is_none_or(|identity| !desired.contains(&identity)) {
+                self.handle.rule().del(message).execute().await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn remove_stale_rules(&self, export: &Export, retain: bool) -> Result<(), LinuxError> {
+        for message in self.owned_rules(export.protocol).await? {
+            let keep = retain
+                && export.manage_rules
+                && rule_identity(&message).is_some_and(|rule| {
+                    export.views.iter().any(|v| {
+                        v.source == Some(rule.source)
+                            && v.table == rule.table
+                            && export.rule_priority(*v) == rule.priority
+                    })
+                });
+            if !keep {
                 self.handle.rule().del(message).execute().await?;
             }
         }

@@ -29,6 +29,7 @@ pub struct LinuxExporter {
     state: Arc<RwLock<ExportState>>,
     apply_lock: Arc<Mutex<()>>,
     reconcile_notify: Arc<Notify>,
+    source_tables: Arc<Mutex<std::collections::BTreeMap<IpNet, u32>>>,
 }
 
 #[derive(Clone)]
@@ -143,6 +144,7 @@ impl LinuxExporter {
             })),
             apply_lock: Arc::new(Mutex::new(())),
             reconcile_notify: Arc::new(Notify::new()),
+            source_tables: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         })
     }
 
@@ -292,4 +294,5 @@ mod identity;
 mod netlink;
 mod projection;
 use identity::{route_identity, route_table, rule_identity};
+pub(crate) use projection::SourcePolicy;
 use projection::project_routes;

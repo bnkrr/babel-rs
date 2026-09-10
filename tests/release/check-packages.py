@@ -94,6 +94,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let actions = engine.try_handle(Event::ReplaceRoutePolicy { policy: Arc::new(Rules), now_ms: 1 })?;
     assert!(matches!(actions[0], babel_protocol::Action::InvalidatePendingSends));
     assert_eq!(Ipv4NextHop::default(), Ipv4NextHop::Auto);
+    let mac = babel_router::MacConfig::new(vec![babel_router::MacKey::new(
+        babel_router::MacAlgorithm::HmacSha256, vec![7; 32])?])?;
+    // Fixed entropy is a deterministic local fixture, never a network session.
+    let mut entropy = || Ok([42; 16]);
+    let mut authentication = babel_protocol::mac::MacSession::new(mac, 4, &mut entropy)?;
+    let endpoints = babel_protocol::mac::DatagramEndpoints {
+        source: "[fe80::1]:6696".parse()?, destination: "[ff02::1:6]:6696".parse()? };
+    assert_eq!(authentication.sign(&[42, 2, 0, 0], endpoints, &mut entropy)?.len(), 60);
     let router = BabelRouter::builder().router_id(id).sequence_number(100)
         .route_policy(Arc::new(Rules)).start().await?;
     let handle = router.handle();

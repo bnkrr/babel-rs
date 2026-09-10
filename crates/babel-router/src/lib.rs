@@ -56,3 +56,5 @@ pub use router::{
     BabelRouter, BabelRouterBuilder, RouteStream, RouterError, RouterHandle, RouterInterfaceStatus,
     RouterStatus,
 };
+
+pub use babel_protocol::mac::{MacAlgorithm, MacConfig, MacError, MacKey};

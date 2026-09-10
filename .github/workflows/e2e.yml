@@ -31,6 +31,8 @@ jobs:
         run: cargo build --locked --release --package babel-router --example route_policy
       - name: Test runtime import/export policy replacement
         run: sudo python3 tests/e2e/netns-route-policy.py "$PWD/target/release/babel-rs" "$PWD/target/release/examples/route_policy"
+      - name: Test MAC authentication and overlapping SADR transit
+        run: sudo python3 tests/e2e/netns-mac-sadr.py "$PWD/target/release/babel-rs"
       - name: Test babeld interoperability
         run: sudo sh tests/e2e/netns-babeld.sh "$PWD/target/release/babel-rs"
       - name: Test BIRD interoperability

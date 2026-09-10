@@ -222,3 +222,12 @@ cargo run -p babel-router --example embedded -- wg0 /var/lib/my-router/state 010
 
 The host retains responsibility for privileges, domain-wide identity uniqueness,
 external-state recovery and any detached I/O its callbacks start.
+
+## MAC authentication
+
+`MacKey`/`MacConfig` configure a keyed interface with `interface_with_mac` or
+`add_interface_with_mac`. Authentication is active before its first packet.
+Remove and reattach to replace keys; the socket instance changes, invalidating
+old queued input/output and forcing a fresh challenge. See [MAC.md](MAC.md).
+Custom forwarding backends must implement RFC 9079 destination-first semantics
+or gate unsupported source prefixes through `RoutePolicy`; see [SADR.md](SADR.md).

@@ -5,6 +5,7 @@ use std::path::Path;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
+use babel_protocol::mac::{DatagramEndpoints, MacConfig, MacError, MacReception, MacSession};
 use babel_protocol::{ControlTransport, wire::PORT};
 
 const IPV6_HEADER_BYTES: u32 = 40;
@@ -19,10 +20,16 @@ pub struct InterfaceSocket {
     pub addresses: std::sync::RwLock<Vec<IpAddr>>,
     pub mtu: u32,
     pub socket: UdpSocket,
+    pub authentication: std::sync::Mutex<Option<MacSession>>,
 }
 
 impl InterfaceSocket {
-    pub fn open(name: &str, transport: ControlTransport) -> io::Result<Self> {
+    pub fn open_authenticated(
+        name: &str,
+        transport: ControlTransport,
+        mac: Option<MacConfig>,
+        max_peers: usize,
+    ) -> io::Result<Self> {
         if !cfg!(target_os = "linux") {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -54,6 +61,19 @@ impl InterfaceSocket {
             ControlTransport::Ipv4 => Domain::IPV4,
         };
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+        #[cfg(target_os = "linux")]
+        match transport {
+            ControlTransport::Ipv6 => nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv6RecvPacketInfo,
+                &true,
+            )?,
+            ControlTransport::Ipv4 => nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv4PacketInfo,
+                &true,
+            )?,
+        }
         socket.set_reuse_address(true)?;
         #[cfg(target_os = "linux")]
         socket.bind_device(Some(name.as_bytes()))?;
@@ -86,6 +106,11 @@ impl InterfaceSocket {
             addresses: std::sync::RwLock::new(addresses),
             mtu,
             socket,
+            authentication: std::sync::Mutex::new(
+                mac.map(|config| MacSession::new(config, max_peers, &mut random))
+                    .transpose()
+                    .map_err(io::Error::other)?,
+            ),
         })
     }
 
@@ -104,7 +129,61 @@ impl InterfaceSocket {
     }
 
     pub fn payload_budget(&self) -> io::Result<usize> {
-        payload_budget_for_transport(self.current_mtu()?, self.transport)
+        let budget = payload_budget_for_transport(self.current_mtu()?, self.transport)?;
+        let overhead = self
+            .authentication
+            .lock()
+            .expect("MAC lock")
+            .as_ref()
+            .map_or(0, MacSession::overhead);
+        budget
+            .checked_sub(overhead)
+            .filter(|b| *b >= 198)
+            .ok_or_else(|| io::Error::other("MTU cannot accommodate MAC overhead"))
+    }
+
+    pub fn authenticate(
+        &self,
+        bytes: &[u8],
+        endpoints: DatagramEndpoints,
+        now_ms: u64,
+    ) -> MacReception {
+        self.authentication
+            .lock()
+            .expect("MAC lock")
+            .as_mut()
+            .map_or_else(
+                || MacReception {
+                    accepted: true,
+                    controls: Vec::new(),
+                },
+                |mac| mac.receive(bytes, endpoints, now_ms, &mut random),
+            )
+    }
+}
+
+fn random() -> Result<[u8; 16], MacError> {
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|_| MacError::Entropy)?;
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+mod datagrams;
+
+#[cfg(not(target_os = "linux"))]
+impl InterfaceSocket {
+    pub async fn receive(&self, _: &mut [u8]) -> io::Result<(usize, DatagramEndpoints)> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Linux transport required",
+        ))
+    }
+    pub async fn send(&self, _: &[u8], _: IpAddr) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Linux transport required",
+        ))
     }
 }
 

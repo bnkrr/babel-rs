@@ -73,16 +73,19 @@ installs them as unreachable routes until Babel's hold time ends, so a removed
 specific route cannot fall through to a covering route and form the transient
 loop described by RFC 8966 section 3.5.4.
 
-Linux export is expressed as policy views. An ordinary view receives ordinary
-routes. A source view receives ordinary fallbacks plus matching RFC 9079
-routes, with an exact source route winning at the same destination. Both IPv4
-and IPv6 are projected as destination-only routes in the view table; an
-optional `from S` rule selects that table. This avoids relying on unsupported
-IPv4 source-prefix route attributes. Dynamic route priorities start at 65535,
-after the complete 0..65534 static metric range.
-Because Linux policy rules choose a source table before destination lookup,
-the daemon rejects overlapping nonzero source views; within that admitted
-subset, source-first and RFC 9079 destination-first lookup are equivalent.
+Linux export materializes complete source views: ordinary routes and every
+covering source route are inherited; equal destinations keep the most-specific
+source. IPv4 and IPv6 both use destination-only tables and source rules ordered
+by prefix length. This preserves RFC 9079 destination-first selection even with
+overlapping sources. Dynamic priorities start at 65535, after static metrics.
+Automatic views are allocated for selected/held sources; static configurations
+filter unsupported source keys at the engine policy boundary. See [SADR.md](SADR.md).
+
+RFC 8967 authentication is a separate sans-I/O per-interface state machine.
+Linux transport supplies real UDP endpoints, verifies MAC/replay state before
+normal decoding, and signs after RTT stamping with an explicitly chosen source.
+Workers and their queued input are tied to the socket instance, so reattachment
+cannot consume input from the previous authentication session. See [MAC.md](MAC.md).
 
 ## Route model
 

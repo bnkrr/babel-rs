@@ -15,5 +15,10 @@ default-target = "x86_64-unknown-linux-gnu"
 targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
+blake2 = "0.10.6"
+hmac = "0.12.1"
+sha2.workspace = true
+subtle = "2.6"
+zeroize = "1.8"
 ipnet.workspace = true
 thiserror.workspace = true

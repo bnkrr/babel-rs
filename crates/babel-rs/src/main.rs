@@ -202,7 +202,8 @@ async fn run_daemon(
         .sequence_store(state.store.with_ownership(Arc::clone(&protocol_ownership)))
         .route_selection(active_config.route_selection.into())
         .limits(active_config.limits.effective())
-        .exporter(exporter.clone());
+        .exporter(exporter.clone())
+        .route_policy(Arc::new(linux::SourcePolicy(active_config.export.clone())));
     for origin in &active_config.origins {
         builder = builder.originate(origin.key()?, origin.metric);
     }
@@ -452,6 +453,9 @@ async fn reload(
         .replace_origins(new_origins.into_iter().collect())
         .await?;
     if active.export != candidate.export {
+        router
+            .replace_route_policy(Arc::new(linux::SourcePolicy(candidate.export.clone())))
+            .await?;
         exporter.update_export(candidate.export.clone()).await;
     }
     config_tx
