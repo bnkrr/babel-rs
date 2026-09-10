@@ -42,8 +42,9 @@ the babel-rs peer. Ordinary numbered-interface exchange still includes babeld.
 
 ## Network CI
 
-Every push and pull request runs the eight interoperability/lifecycle/RTT/MTU
-regressions and five independent robustness jobs:
+Every branch push and pull request runs the eight interoperability/lifecycle/RTT/MTU
+regressions and five independent robustness jobs. Release tags run the same checks
+through the release workflow before publication:
 
 | Job | Checks |
 | --- | --- |

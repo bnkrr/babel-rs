@@ -54,3 +54,66 @@ No upload is performed by the verification script.
 
 Cargo references: [Publishing](https://doc.rust-lang.org/cargo/reference/publishing.html),
 [Package archives](https://doc.rust-lang.org/cargo/commands/cargo-package.html).
+
+## Local credentials and CI Trusted Publishing
+
+Local `cargo login` can use a token scoped to the exact three crate names with
+`publish-new` and `publish-update`. `yank` and `change-owners` are not required
+for publishing. Configuring trusted publishers through the crates.io website
+also does not require `trusted-publishing` on that local token. Keep login and
+publish on the same `CARGO_HOME` (this development checkout uses `.local/cargo`).
+
+Publish the initial version of each crate manually first. Then, on each crate's
+Settings / Trusted Publishing page, register the following GitHub publisher:
+
+| Field | Value |
+| --- | --- |
+| Repository owner | `bnkrr` |
+| Repository | `babel-rs` |
+| Workflow filename | `release.yml` |
+| Environment | `crates-io` |
+
+Create the GitHub repository environment named `crates-io` and allow the `v*`
+release tags to deploy to it. This environment needs no crates.io secret. Do not
+copy the local token into GitHub Actions: the official `crates-io-auth-action`
+exchanges the workflow's OIDC identity for a short-lived token and revokes it
+when the job completes. Only the publish job has `id-token: write`; test jobs
+have read-only repository permissions. Local token publication remains available
+unless the crate's separate "Require trusted publishing" setting is enabled.
+
+## Automated releases
+
+`.github/workflows/release.yml` triggers on `v*` tag pushes. Before tagging, bump
+the workspace version and versioned dependencies, update Cargo.lock, set the
+changelog release date, and commit the release. Push the reviewed commit and a
+tag matching the version (for example `v0.5.1` for version `0.5.1`).
+
+The workflow validates the tag/version match, runs the reusable CI, E2E and
+120-second steady-state workflows, and only publishes after all pass. This
+includes the archive consumer, Windows/macOS protocol, Linux MSRV, network and
+recovery checks. Ordinary branch/PR workflows still run independently; tag
+pushes run these checks through the release workflow rather than twice.
+
+Actions / release / Run workflow defaults to `dry_run: true`. That runs the same
+checks on the selected branch or tag without requesting OIDC credentials or
+uploading packages. A tag selected for rehearsal must still match the source
+version. For a real manual dispatch, select the matching release tag and set
+`dry_run: false`; real publication from a branch is rejected.
+
+Publication runs `babel-protocol`, `babel-router`, then `babel-rs`, waiting for
+each exact version in the registry index. A partial release can be rerun at the
+same tag: an existing version is skipped only if its packaged Git commit matches
+the current clean source and it is not yanked. Different source metadata,
+authentication errors and registry failures fail the job. Never move a published
+release tag to a different commit. Initial manual publication should use the
+same clean release commit if its tag will later be used to exercise this flow.
+
+After upload, a temporary unpatched project compiles against both registry
+libraries, and the daemon is installed from crates.io with the exact version;
+its version and example config are checked. This final registry verification
+cannot run successfully until the versions exist. Local test coverage mocks
+registry/upload operations; it does not claim a real OIDC exchange occurred.
+
+References: [Official authentication Action](https://github.com/rust-lang/crates-io-auth-action),
+[Trusted Publishing](https://crates.io/docs/trusted-publishing),
+[Token scope definitions](https://rust-lang.github.io/rfcs/2947-crates-io-token-scopes.html).

@@ -2,9 +2,15 @@ name: steady-state
 
 on:
   push:
+    branches: ['**']
   pull_request:
   schedule:
     - cron: '0 4 * * 0'
+  workflow_call:
+    inputs:
+      seconds:
+        type: string
+        default: '120'
   workflow_dispatch:
     inputs:
       seconds:

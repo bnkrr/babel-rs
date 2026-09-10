@@ -2,8 +2,10 @@ name: ci
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -49,6 +51,7 @@ jobs:
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
       - run: python3 -m unittest discover -s tests/endless -p 'test_*.py'
+      - run: python3 -m unittest discover -s tests/release -p 'test_*.py'
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
