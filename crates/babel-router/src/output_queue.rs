@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use babel_protocol::{OutboundPacket, OutboundTlv, SubTlv};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::time::Instant;
 use tracing::warn;
 
@@ -50,6 +50,7 @@ struct QueueCounters {
 }
 
 pub(crate) struct QueuedIntent {
+    pub generation: u64,
     pub intent: OutboundIntent,
     pub expires_ms: u64,
     pub reservation: OwnedSemaphorePermit,
@@ -57,6 +58,7 @@ pub(crate) struct QueuedIntent {
 
 #[derive(Clone)]
 pub(crate) struct OutputQueue {
+    generation: watch::Sender<u64>,
     send: mpsc::Sender<QueuedIntent>,
     budget: Arc<Semaphore>,
     budget_bytes: usize,
@@ -73,8 +75,10 @@ impl OutputQueue {
         started: Arc<Instant>,
     ) -> (Self, mpsc::Receiver<QueuedIntent>) {
         let (send, receive) = mpsc::channel(capacity);
+        let (generation, _) = watch::channel(0);
         (
             Self {
+                generation,
                 send,
                 budget: Arc::new(Semaphore::new(budget_bytes)),
                 budget_bytes,
@@ -103,6 +107,7 @@ impl OutputQueue {
                 .max(now_ms)
                 .saturating_add(OUTPUT_EXPIRY_GRACE_MS);
             let queued = QueuedIntent {
+                generation: self.generation(),
                 intent,
                 expires_ms,
                 reservation,
@@ -123,6 +128,31 @@ impl OutputQueue {
         self.counters
             .expired_batches
             .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        *self.generation.borrow()
+    }
+
+    /// Keep the generation read guard through one synchronous socket poll.
+    /// Invalidation cannot complete between checking policy and sending bytes.
+    /// The callback must not await or attempt to invalidate this queue itself.
+    pub(crate) fn with_generation<T>(
+        &self,
+        generation: u64,
+        poll: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let current = self.generation.borrow();
+        (*current == generation).then(poll)
+    }
+
+    pub(crate) fn subscribe_generation(&self) -> watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
+
+    pub(crate) fn invalidate(&self) {
+        self.generation
+            .send_modify(|value| *value = value.wrapping_add(1));
     }
 
     pub(crate) fn drop_datagram(&self, expired: bool, timed_out: bool) {

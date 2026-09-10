@@ -27,6 +27,14 @@ stamp Hello timestamps at transmission. `InterfacePolicy::ipv4_next_hop`
 defaults to `Auto`: ordinary IPv4 when the host supplies a usable IPv4 address,
 otherwise RFC 9229. Address changes are explicit engine events.
 
+`EngineConfig::route_policy` defaults to `AllowAllRoutes`. Implement `RoutePolicy`
+to accept/reject learned routes and allow/retract announcements per interface,
+without changing protocol fields. Replace immutable rules with
+`Event::ReplaceRoutePolicy`; hosts must execute its first
+`Action::InvalidatePendingSends` before queueing subsequent output. Feasibility
+history is retained, and retractions bypass policy. Callbacks are synchronous
+and must not block or silently change behavior between explicit replacements.
+
 Implements RFC 8966, source-specific routes (RFC 9079), IPv4 routes with IPv6
 next hops (RFC 9229), and RTT metrics (RFC 9616). MAC/DTLS authentication is
 absent: the host must provide a protected link or authentication boundary.

@@ -66,6 +66,129 @@ async fn settle_tasks() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn policy_change_cancels_channel_scheduled_and_in_flight_output() {
+    use babel_protocol::{INFINITY, OutboundPacket, OutboundTlv, OutboundUpdate, SendTiming};
+    // Exercise both unencoded scheduler work and a packetized burst whose
+    // first datagram is in flight while the rest are ready to send.
+    for block_in_send in [false, true] {
+        let started = Arc::new(Instant::now());
+        let (queue, receive) = OutputQueue::new(
+            16,
+            OUTPUT_BUDGET_BYTES,
+            Arc::new(OutputCounters::default()),
+            started.clone(),
+        );
+        let transport = Arc::new(TestTransport::default());
+        transport.blocked.store(block_in_send, Ordering::Relaxed);
+        transport
+            .missing_mtu
+            .store(!block_in_send, Ordering::Relaxed);
+        let (stop, stop_rx) = watch::channel(false);
+        let task = tokio::spawn(run_sender(
+            transport.clone(),
+            stop_rx,
+            started.clone(),
+            queue.clone(),
+            receive,
+            1,
+        ));
+        let route = RouteKey::new("2001:db8::/64".parse().unwrap(), None).unwrap();
+        let submit = |metric, delayed, copies| {
+            queue.submit(OutboundIntent {
+                destination: "ff02::1:6".parse().unwrap(),
+                packet: OutboundPacket {
+                    tlvs: vec![
+                        OutboundTlv::Update(OutboundUpdate {
+                            key: Some(route),
+                            router_id: Some(RouterId::new([1; 8]).unwrap()),
+                            next_hop: None,
+                            interval_cs: 1600,
+                            seqno: 1,
+                            metric,
+                            v4_via_v6: false,
+                            sub_tlvs: vec![],
+                        });
+                        copies
+                    ],
+                },
+                timing: if delayed {
+                    SendTiming {
+                        deadline_ms: 2000,
+                        max_jitter_ms: 1900,
+                    }
+                } else {
+                    SendTiming::immediate(elapsed_ms(&started))
+                },
+            });
+        };
+        submit(0, true, 1); // Remains in the jitter scheduler.
+        settle_tasks().await;
+        submit(1, false, 128); // More than one packet; stalls at MTU lookup or send().
+        settle_tasks().await;
+        assert_eq!(
+            transport.attempts.load(Ordering::Relaxed),
+            u64::from(block_in_send)
+        );
+        submit(2, false, 1); // Remains in the input channel while output is blocked.
+        queue.invalidate();
+        submit(INFINITY, false, 1);
+        transport.blocked.store(false, Ordering::Relaxed);
+        transport.missing_mtu.store(false, Ordering::Relaxed);
+        transport.wake.notify_waiters();
+        settle_tasks().await;
+        tokio::time::advance(Duration::from_millis(2500)).await;
+        settle_tasks().await;
+        let packets = transport.sent.lock().unwrap().clone();
+        assert_eq!(
+            packets.len(),
+            1,
+            "only the new policy's withdrawal may reach the socket"
+        );
+        let decoded = decode_packet(
+            &packets[0],
+            DecodeContext {
+                source: "fe80::1".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        assert!(decoded.tlvs.iter().any(|t| matches!(t, babel_protocol::Tlv::Update(u) if u.key == Some(route) && u.metric == INFINITY)));
+        assert_eq!(queue.status().used_bytes, 0);
+        stop.send(true).unwrap();
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn public_route_policy_replacement_acknowledges_engine_and_reports_stopped() {
+    struct RejectAll;
+    impl RoutePolicy for RejectAll {
+        fn accept(&self, _: &babel_protocol::ImportContext<'_>) -> bool {
+            false
+        }
+        fn announce(&self, _: &babel_protocol::ExportContext<'_>) -> bool {
+            false
+        }
+    }
+    let router = BabelRouter::builder()
+        .router_id(RouterId::new([1; 8]).unwrap())
+        .route_policy(Arc::new(RejectAll))
+        .start()
+        .await
+        .unwrap();
+    let handle = router.handle();
+    handle
+        .replace_route_policy(Arc::new(AllowAllRoutes))
+        .await
+        .unwrap();
+    assert!(handle.status().await.unwrap().interfaces.is_empty());
+    router.shutdown().await.unwrap();
+    assert!(matches!(
+        handle.replace_route_policy(Arc::new(RejectAll)).await,
+        Err(RouterError::Stopped)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn stalled_send_times_out_recovers_and_cancels_on_interface_removal() {
     let started = Arc::new(Instant::now());
     let (queue, receive) = OutputQueue::new(
@@ -192,6 +315,7 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
     // No privileged sockets: the real engine and command loop run against
     // independently controlled sender transports, on one runtime thread.
     let router = tokio::spawn(run_loop(Runtime {
+        route_policy: Arc::new(AllowAllRoutes),
         workers: HashMap::new(),
         export_worker: None,
         shutdown_timeout: Duration::from_secs(5),

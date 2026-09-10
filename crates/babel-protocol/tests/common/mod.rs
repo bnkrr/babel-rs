@@ -32,6 +32,7 @@ impl ConformanceHarness {
         Self {
             engine: Engine::new(EngineConfig {
                 ipv4_via_ipv6: true,
+                route_policy: Arc::new(babel_protocol::AllowAllRoutes),
                 limits,
                 router_id,
                 metric: Arc::new(WiredMetric::new(96, 1, 1).unwrap()),

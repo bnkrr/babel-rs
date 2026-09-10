@@ -80,6 +80,7 @@ is dropped. The live socket backend supports Linux; see [SUPPORT.md](SUPPORT.md)
 | --- | --- |
 | `originate`, `withdraw` | The validated change was applied by the serialized engine |
 | `replace_origins` | The complete replacement was applied by the serialized engine |
+| `replace_route_policy` | Candidates were reevaluated and older queued sends were invalidated; replacement announcements were queued |
 | Add/update/remove interface | The socket/engine operation completed |
 | `status` | Earlier commands in that queue have been processed and status was sampled |
 | `subscribe_routes` | A watch receiver for complete selected learned-route snapshots was created |
@@ -96,6 +97,81 @@ Command completion and route snapshots do not acknowledge packet delivery or
 kernel export. Snapshot readers may skip intermediate generations. A snapshot
 contains selected **learned** routes and exact unreachable hold state; local
 origins are advertised separately.
+
+## Route admission and announcement policy
+
+`RoutePolicy` belongs to the protocol engine and is reexported by `babel-router`.
+`accept(&ImportContext) -> bool` controls finite learned candidates;
+`announce(&ExportContext) -> bool` controls finite announcements on each outgoing
+interface. `AllowAllRoutes` is the default. Fixed protocol checks, including
+dangerous destinations and forwarding capability, still apply.
+
+```rust
+use std::sync::Arc;
+use babel_router::{BabelRouter, ExportContext, ImportContext, RoutePolicy, RouterId};
+
+struct SitePolicy;
+impl RoutePolicy for SitePolicy {
+    fn accept(&self, route: &ImportContext<'_>) -> bool {
+        // Example: learn this exact destination only from the trusted interface.
+        route.key.destination != "2001:db8:42::/64".parse().unwrap()
+            || route.interface == "trusted"
+    }
+    fn announce(&self, route: &ExportContext<'_>) -> bool {
+        // On uplink, announce only routes originated by this engine.
+        route.interface != "uplink" || route.locally_originated
+    }
+}
+let builder = BabelRouter::builder()
+    .router_id(RouterId::new([1; 8]).unwrap())
+    .route_policy(Arc::new(SitePolicy));
+```
+
+Import context includes the complete destination/source key, interface, sending
+neighbor, advertised next hop, origin Router-ID, sequence and advertised metric.
+The neighbor and next hop can differ. Export context includes the complete key,
+outgoing interface, Router-ID and whether it is locally originated. Export rules
+apply per interface even to unicast request replies; a multicast packet cannot
+have different export decisions for its individual recipients. Callbacks cannot
+rewrite protocol fields. Import filtering does not remove local origins, while
+export filtering does not remove selected routes from the local RIB.
+
+Install an initial policy with `EngineConfig::route_policy` or the builder method.
+For live changes, create a new immutable policy and send
+`Event::ReplaceRoutePolicy { policy, now_ms }`, or await
+`handle.replace_route_policy(Arc::new(new_policy))`. Callbacks are synchronous,
+must return promptly without blocking I/O, and must stay deterministic for each
+context throughout that version's lifetime. Do not silently change a shared map
+or atomic flag read by the callbacks. Parse and validate host configuration before
+replacement. This version exposes the library API; the daemon has no TOML route
+filter language yet.
+
+Replacement removes newly rejected candidates, reselects allowed alternatives,
+refreshes announcements and repeats important updates. It preserves feasibility
+history. Discarded routes are recovered through wildcard Route Requests and normal
+periodic Updates when rules are relaxed; recovery can require a new sequence if
+the old advertisement is infeasible. Policy changes do not reset neighbor state.
+
+Retractions bypass callbacks in both directions. Export denial can produce an
+unreachable Update, including on a split-horizon interface that previously sent
+a finite unicast reply. It does not promise prefix-existence confidentiality.
+Periodic, triggered, repeated and requested output all apply the same rules.
+
+Direct engine hosts **must** implement `Action::InvalidatePendingSends`: discard
+older queued output before processing subsequent actions and cancel unsent socket
+operations where possible. The Tokio runtime does this for channel entries,
+scheduled datagrams and pending sends. Already transmitted packets cannot be
+recalled, and command completion is not a network or exporter barrier. Output
+remains bounded and UDP delivery remains best effort.
+
+The packaged `route_policy` example uses a memory RIB, advertises the supplied
+origin, and accepts `allow`, `deny-import`, `deny-export`, `status` and `quit` on
+stdin. It does not install kernel routes or persist identity/sequence state;
+use a fresh domain-unique example identity for each run.
+
+```sh
+cargo run -p babel-router --example route_policy -- wg0 0102030405060708 2001:db8:42::/64
+```
 
 ## Export and shutdown responsibilities
 

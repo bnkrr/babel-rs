@@ -93,6 +93,8 @@ pub struct NeighborStatus {
 /// [`Engine::try_new`] to validate overrides before creating state.
 #[derive(Clone)]
 pub struct EngineConfig {
+    /// Immutable route admission/announcement rules (default: allow all).
+    pub route_policy: Arc<dyn RoutePolicy>,
     /// Host forwarding capability: never select IPv4 routes via IPv6 when false.
     pub ipv4_via_ipv6: bool,
     /// Admission limits for learned state; zero refuses all new entries of that kind.
@@ -218,6 +220,7 @@ impl EngineConfig {
     pub fn recommended(router_id: RouterId) -> Self {
         Self {
             ipv4_via_ipv6: true,
+            route_policy: Arc::new(AllowAllRoutes),
             router_id,
             limits: ResourceLimits::default(),
             metric: Arc::new(WiredMetric::default()),
@@ -235,6 +238,13 @@ impl EngineConfig {
 /// while idle, and decodes received datagrams before delivering them.
 #[derive(Clone, Debug)]
 pub enum Event {
+    /// Replace rules, remove rejected candidates, reselect and refresh output.
+    /// Rejected candidates are discarded; wildcard Route Requests ask peers to
+    /// refill newly permitted routes. Feasibility history is retained.
+    ReplaceRoutePolicy {
+        policy: Arc<dyn RoutePolicy>,
+        now_ms: u64,
+    },
     /// Attach or replace an interface using engine-wide defaults.
     InterfaceUp {
         interface: String,
@@ -300,6 +310,10 @@ pub enum Event {
 /// Ordered side effects for the host. Engine state has already changed when these return.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
+    /// Discard all previously queued sends before applying subsequent actions.
+    /// Policy replacement emits this first. Hosts must also cancel pending
+    /// socket operations where possible; packets already sent cannot be recalled.
+    InvalidatePendingSends,
     /// Queue semantic output, preserving timing and repeating context at packet boundaries.
     Send {
         interface: String,

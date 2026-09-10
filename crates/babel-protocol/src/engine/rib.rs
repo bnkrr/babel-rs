@@ -56,6 +56,24 @@ impl Engine {
         let Some(neighbour) = self.neighbours.get(neighbour_key) else {
             return (false, Vec::new());
         };
+        if !self.config.route_policy.accept(&ImportContext {
+            key,
+            interface: &neighbour_key.interface,
+            neighbor: neighbour_key.address,
+            next_hop,
+            router_id,
+            seqno: update.seqno,
+            advertised_metric: update.metric,
+        }) {
+            let removed = self.candidates.remove(&candidate_key).is_some();
+            if removed {
+                self.neighbours
+                    .get_mut(neighbour_key)
+                    .expect("known neighbor")
+                    .candidates -= 1;
+            }
+            return (removed, Vec::new());
+        }
         let is_new = !self.candidates.contains_key(&candidate_key);
         if is_new {
             let per_neighbor =

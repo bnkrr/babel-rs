@@ -1,14 +1,14 @@
 # RFC conformance and audit map
 
-This is the central implementation-status register for unreleased 0.5.0.
+This is the central implementation-status register for 0.5.0.
 The 2026-09-10 source audit examined commit
 `b403ad8168269bbe49e7296df99018ae41d971c8` and reproduced A01–A08. The current
-working-tree follow-up fixes those defects and adds maintained regressions.
+follow-up commit `d60b4ac` fixes those defects and adds maintained regressions.
 No crate publication has occurred as part of the audit or fixes.
 
 This is an implementation and evidence map, not a formal proof of conformance.
 MAC, DTLS and general SADR are explicitly deferred to the next version.
-General import/export filtering remains an API-design discussion. The existing
+General import/export filtering is available through `RoutePolicy`. The existing
 restricted SADR projection is retained, with its precedence bug repaired.
 
 ## Sources and interpretation
@@ -66,7 +66,7 @@ A08's original 43-byte reproduction is retained here for traceability:
 | C02 | Next version | RFC 8966 §6 SHOULD implement Babel-MAC; RFC 8967 authentication, replay and challenge machinery is absent. This recommendation remains unfulfilled. |
 | C03 | Next version | RFC 8968 DTLS, credentials, sessions and protected transport are absent. No claim of implementing its conditional MUST rules. |
 | C04 | Next version | General RFC 9079 forwarding, overlapping source views, and gating uncovered source routes remain absent. Only configured non-overlapping exact-source views are supported. |
-| C05 | Discussion | General import/export route filtering would let hosts control accepted/advertised prefixes per interface/neighbor. Minimum dangerous-destination filtering exists; no new general filter API is included. |
+| C05 | Implemented | Read-only `RoutePolicy` accepts/rejects imports using prefix/interface/neighbor/Router-ID metadata and allows/retracts exports per interface. Defaults preserve protocol-valid routes. Explicit replacement reselects, refreshes/retracts, requests newly permitted routes and invalidates queued old sends without clearing feasibility history. No metric rewriting or per-neighbor multicast export. The daemon has no TOML filter language yet. Evidence: `crates/babel-protocol/tests/route_policy.rs`, runtime queue-cancellation tests and `tests/e2e/netns-route-policy.py`. |
 | R01 | Implemented | Important changes get an initial copy and two repeats, separated by one second; latest state is read for each repeat. This uses RFC 8966 §3.7.2's bounded-repeat alternative. |
 | R02 | Implemented | Sequence-only and insignificant metric changes do not trigger advertisements. Requests still receive current values. Withdrawals keep the current sequence; origin metric increases still advance it for feasibility. |
 | R03 | Default corrected; selection policy documented | RTT defaults to per-sample EMA alpha 0.836. `half_life_ms`/`RttMetric::new` explicitly select elapsed-time smoothing. Route selection retains configurable 5%/8-unit margins and 8 s continuous improvement; this is a tested alternative hysteresis policy, not the exact Appendix A.3 algorithm. |
@@ -135,6 +135,7 @@ establish interoperability by themselves.
 | BABEL-REQ-04 | 8966 §3.2.7, §3.8.2, Appendix B | Pending requests retain the requester, forward satisfying replies, and retry after 2/4/8 seconds before expiry | `rfc8966_appendix_b_pending_request_uses_bounded_exponential_retries` and engine response tests |
 | BABEL-REQ-05 | 8966 §3.8.2.1–3 | Starvation keeps a Seqno Request active and a selected route is queried by unicast shortly before expiry | `rfc8966_3_8_2_1_starvation_keeps_a_seqno_request_active`, `rfc8966_3_8_2_3_selected_route_is_refreshed_before_expiry` |
 | BABEL-FILTER-01 | 8966 Appendix C | The minimum dangerous destinations are not learned | `rfc8966_appendix_c_minimum_dangerous_destinations_are_filtered` |
+| BABEL-FILTER-02 | 8966 Appendix C, §3.7.2/§3.7.3 | Host allow/deny policy covers admission and every finite output path; explicit replacement retracts and recovers without resetting feasibility | `route_policy.rs`, `policy_change_cancels_channel_scheduled_and_in_flight_output`, runtime policy netns E2E |
 | SADR-WIRE-01 | 9079 §7 | Source Prefix validation and wildcard handling have raw fixtures; malformed sub-TLV framing can reject a whole packet | source-specific wire tests and `rfc9079_wildcard_retraction_with_source_prefix_is_ignored` |
 | SADR-MODEL-01 | 9079 §2–3 | Destination plus source forms every route/source/request key; `/0` source is the ordinary SADR domain | `rfc9079_zero_source_prefix_is_the_ordinary_sadr_domain` |
 | SADR-FIB-01 | 9079 §4 | Configured overlapping views are rejected; finite/tombstone specificity is tested. Uncovered learned sources remain deferred (C04) | config overlap rejection and Linux projection tests |

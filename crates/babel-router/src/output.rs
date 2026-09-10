@@ -73,6 +73,7 @@ impl OutputScheduler {
             intent,
             expires_ms,
             reservation,
+            ..
         } = queued;
         let remaining = intent.timing.deadline_ms.saturating_sub(now_ms);
         let latest_delay = remaining
@@ -333,8 +334,8 @@ mod tests {
         assert_eq!(sent[1], 103, "deadline overrides the 5ms pacing gap");
     }
 
-    #[test]
-    fn budget_covers_channel_pending_ready_and_in_flight_until_release() {
+    #[tokio::test(start_paused = true)]
+    async fn budget_covers_channel_pending_ready_and_in_flight_until_release() {
         use crate::output_queue::{OutputCounters, OutputQueue, packet_charge};
         let packet = OutboundPacket {
             tlvs: (0..20).map(|nonce| OutboundTlv::Ack { nonce }).collect(),
@@ -370,8 +371,8 @@ mod tests {
         assert_eq!(queue.status().used_bytes, 0);
     }
 
-    #[test]
-    fn expiry_does_not_slide_when_new_work_merges_and_encode_error_releases_budget() {
+    #[tokio::test(start_paused = true)]
+    async fn expiry_does_not_slide_when_new_work_merges_and_encode_error_releases_budget() {
         use crate::output_queue::{OUTPUT_BUDGET_BYTES, OutputCounters, OutputQueue};
         let (queue, mut receive) = OutputQueue::new(
             2,

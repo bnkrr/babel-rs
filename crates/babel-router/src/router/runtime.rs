@@ -24,6 +24,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         metric,
         metric_algebra,
         route_selection,
+        route_policy,
         limits,
         sequence_number,
         sequence_store,
@@ -40,6 +41,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
     };
     let mut engine = Engine::try_new(EngineConfig {
         ipv4_via_ipv6: exporter.supports_ipv4_via_ipv6(),
+        route_policy,
         limits,
         router_id,
         metric: Arc::clone(&metric),
@@ -213,6 +215,11 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 }
             },
             Some(command) = commands.recv() => match command {
+                Command::ReplaceRoutePolicy(policy, reply) => {
+                    apply_actions_with_status(&outbound, &export_updates, &route_updates, &mut status,
+                        engine.handle(Event::ReplaceRoutePolicy { policy, now_ms: now() }));
+                    let _ = reply.send(());
+                },
                 Command::ReplaceOrigins(origins, reply) => {
                     apply_actions_with_status(
                         &outbound,
@@ -434,6 +441,11 @@ pub(super) fn apply_actions_with_status(
 ) {
     for action in batch_send_actions(actions) {
         match action {
+            Action::InvalidatePendingSends => {
+                for sender in outbound.values() {
+                    sender.invalidate();
+                }
+            }
             Action::Send {
                 interface,
                 destination,

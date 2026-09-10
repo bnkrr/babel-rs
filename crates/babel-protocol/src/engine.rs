@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
-use crate::{ResourceLimits, ResourceStatus};
+use crate::{
+    AllowAllRoutes, ExportContext, ImportContext, ResourceLimits, ResourceStatus, RoutePolicy,
+};
 
 use crate::metric::{
     AdditiveMetric, HelloHistories, HelloHistoryUpdate, MetricAlgebra, MetricProfile,
@@ -27,6 +29,7 @@ mod api;
 mod interfaces;
 mod neighbors;
 mod output;
+mod policy;
 mod rib;
 mod sources;
 mod timers;
@@ -353,6 +356,9 @@ impl Engine {
                 actions
             }
             Event::ReplaceOrigins { origins, now_ms } => self.replace_origins(origins, now_ms),
+            Event::ReplaceRoutePolicy { policy, now_ms } => {
+                self.replace_route_policy(policy, now_ms)
+            }
             Event::Tick { now_ms } => self.tick(now_ms),
         }
     }

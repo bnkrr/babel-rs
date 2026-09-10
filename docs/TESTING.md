@@ -229,3 +229,15 @@ round-trip link, and ICMPv4 TTL/fragmentation errors on unnumbered links. ICMP
 is checked both with and without a usable IPv4 address on the forwarding router.
 PMTU probes bypass the sender's cached PMTU so each phase reaches the router.
 Run the VM wrapper with `rfc-boundaries`; `all` and network CI include it.
+
+`tests/e2e/netns-route-policy.py` runs the packaged `babel-router` route policy
+example against a real daemon in isolated namespaces. It checks initial
+bidirectional learning, acknowledged import removal, continued neighbor state,
+relearning after relaxation, prompt withdrawal from the peer's kernel table,
+suppression through periodic output and recovery after export is permitted.
+Build with `cargo build --release -p babel-router --example route_policy` and run
+the VM wrapper with `route-policy`; `all` and network CI include it. Protocol
+tests additionally cover alternate selection, source-prefix contexts, unicast
+and forwarded request replies, repeated withdrawals and retained feasibility.
+The runtime's injected blocked socket test covers cancellation of stale channel,
+scheduler and in-flight output without needing network timing assumptions.

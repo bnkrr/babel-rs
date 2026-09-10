@@ -42,6 +42,11 @@ configuration types. Applications may embed `babel-router`, subscribe to
 selected-route snapshots, or implement `RouteExporter`; only standalone daemon
 users opt into the Linux backend.
 
+Embedding applications can implement `RoutePolicy` to accept learned routes and
+control announcements per interface. Rules are read-only and replaced explicitly
+through the engine or runtime; replacement reselects routes and retracts denied
+announcements. See [route policy contracts and examples](docs/EMBEDDING.md#route-admission-and-announcement-policy).
+
 ## Current scope
 
 The v0.5 implementation includes RFC 8966 base TLVs, neighbour maintenance,

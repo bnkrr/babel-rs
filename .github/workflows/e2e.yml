@@ -27,6 +27,10 @@ jobs:
           sudo apt-get install --yes babeld bird2 iproute2 iputils-ping
       - name: Build daemon
         run: cargo build --locked --release --package babel-rs
+      - name: Build public route policy example
+        run: cargo build --locked --release --package babel-router --example route_policy
+      - name: Test runtime import/export policy replacement
+        run: sudo python3 tests/e2e/netns-route-policy.py "$PWD/target/release/babel-rs" "$PWD/target/release/examples/route_policy"
       - name: Test babeld interoperability
         run: sudo sh tests/e2e/netns-babeld.sh "$PWD/target/release/babel-rs"
       - name: Test BIRD interoperability

@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.5.0 — unreleased
+## 0.5.0 — 2026-09-10
+
+- Add read-only `RoutePolicy` import/export hooks, defaulting to `AllowAllRoutes`.
+  Explicit engine/runtime replacement reevaluates candidates, retracts denied
+  announcements, requests newly allowed routes and preserves feasibility history.
+  Invalidate old queued/pending sends before replacement output. Add a packaged
+  interactive example and real-socket runtime/FIB policy transition regression.
 
 - Repair the RFC audit defects: compressed-prefix panic/ignore behavior,
   specific/sequence request replies, unicast feasibility history, urgent
@@ -39,7 +45,10 @@
 
 Migration: add `control_transport: ControlTransport::Ipv6` and
 `ipv4_next_hop: Ipv4NextHop::Auto` to existing `InterfacePolicy` literals. Set
-`EngineConfig::ipv4_via_ipv6` according to host forwarding capability. Custom
+`EngineConfig::ipv4_via_ipv6` according to host forwarding capability. Add
+`route_policy: Arc::new(AllowAllRoutes)` to `EngineConfig` literals (or start
+from `recommended`). Direct hosts must handle `Event::ReplaceRoutePolicy` and
+execute `Action::InvalidatePendingSends` by cancelling older queued output. Custom
 exporters must opt in via `supports_ipv4_via_ipv6()` to select those routes. Keep the owning `BabelRouter` (or its `wait` future) alive;
 dropping it no longer leaves routing running. Handle shutdown requests do not
 wait: use the owner's `shutdown().await` or request then await `wait`. Expect

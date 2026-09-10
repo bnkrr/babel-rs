@@ -79,15 +79,25 @@ tokio = {{ version = "{tokio_version}", features = ["rt-multi-thread", "macros"]
 ''')
         (consumer / "src/main.rs").write_text('''use babel_protocol::{Engine, EngineConfig, Event, RouteKey, RouterId};
 use babel_router::{BabelRouter, Ipv4NextHop};
+use std::sync::Arc;
+struct Rules;
+impl babel_router::RoutePolicy for Rules {
+    fn accept(&self, route: &babel_router::ImportContext<'_>) -> bool { route.key.source.is_none() }
+    fn announce(&self, route: &babel_router::ExportContext<'_>) -> bool { route.locally_originated }
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id = RouterId::new([7;8]).unwrap();
     let key = RouteKey::new("2001:db8::/64".parse()?, None).unwrap();
     let mut engine = Engine::try_new(EngineConfig::recommended(id))?;
     engine.try_handle(Event::Originate {key, metric:0, now_ms:0})?;
+    let actions = engine.try_handle(Event::ReplaceRoutePolicy { policy: Arc::new(Rules), now_ms: 1 })?;
+    assert!(matches!(actions[0], babel_protocol::Action::InvalidatePendingSends));
     assert_eq!(Ipv4NextHop::default(), Ipv4NextHop::Auto);
-    let router = BabelRouter::builder().router_id(id).sequence_number(100).start().await?;
+    let router = BabelRouter::builder().router_id(id).sequence_number(100)
+        .route_policy(Arc::new(Rules)).start().await?;
     let handle = router.handle();
+    handle.replace_route_policy(Arc::new(babel_router::AllowAllRoutes)).await?;
     handle.originate(key,0).await?;
     handle.withdraw(key).await?;
     handle.replace_origins(vec![(key,0)]).await?;

@@ -6,9 +6,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use babel_protocol::{
-    Action, AdditiveMetric, DecodeContext, Engine, EngineConfig, Event, InterfacePolicy,
-    Ipv4NextHop, MetricAlgebra, MetricProfile, NeighborStatus, ResourceLimits, ResourceStatus,
-    RouteKey, RouteSelectionConfig, RouterId, WiredMetric, decode_packet, stamp_hello_timestamps,
+    Action, AdditiveMetric, AllowAllRoutes, DecodeContext, Engine, EngineConfig, Event,
+    InterfacePolicy, Ipv4NextHop, MetricAlgebra, MetricProfile, NeighborStatus, ResourceLimits,
+    ResourceStatus, RouteKey, RoutePolicy, RouteSelectionConfig, RouterId, WiredMetric,
+    decode_packet, stamp_hello_timestamps,
 };
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -105,6 +106,7 @@ pub struct RouterStatus {
 pub type RouteStream = watch::Receiver<RouteSnapshot>;
 
 enum Command {
+    ReplaceRoutePolicy(Arc<dyn RoutePolicy>, oneshot::Sender<()>),
     Originate(RouteKey, u16, oneshot::Sender<()>),
     Withdraw(RouteKey, oneshot::Sender<()>),
     ShutdownTimeout(Duration, oneshot::Sender<()>),
@@ -163,6 +165,7 @@ struct Runtime {
     route_updates: watch::Sender<RouteSnapshot>,
     metric: Arc<dyn MetricProfile>,
     metric_algebra: Arc<dyn MetricAlgebra>,
+    route_policy: Arc<dyn RoutePolicy>,
     route_selection: RouteSelectionConfig,
     limits: ResourceLimits,
     sequence_number: u16,
@@ -207,6 +210,22 @@ pub struct RouterHandle {
 }
 
 impl RouterHandle {
+    /// Replace immutable route rules and wait for engine application. Reevaluate
+    /// candidates, refresh advertisements and invalidate older queued output.
+    /// Success is not a packet-delivery or exporter-completion barrier; packets
+    /// already handed to the network cannot be recalled.
+    pub async fn replace_route_policy(
+        &self,
+        policy: Arc<dyn RoutePolicy>,
+    ) -> Result<(), RouterError> {
+        let (reply, done) = oneshot::channel();
+        self.commands
+            .send(Command::ReplaceRoutePolicy(policy, reply))
+            .await
+            .map_err(|_| RouterError::Stopped)?;
+        done.await.map_err(|_| RouterError::Stopped)
+    }
+
     /// Apply a finite local origin. Success acknowledges engine application, not delivery/export.
     pub async fn originate(&self, key: RouteKey, metric: u16) -> Result<(), RouterError> {
         validate_origin(key, metric)?;
@@ -411,6 +430,7 @@ pub struct BabelRouterBuilder {
     exporter: Option<Arc<dyn RouteExporter>>,
     metric: Option<Arc<dyn MetricProfile>>,
     metric_algebra: Option<Arc<dyn MetricAlgebra>>,
+    route_policy: Option<Arc<dyn RoutePolicy>>,
     route_selection: Option<RouteSelectionConfig>,
     limits: ResourceLimits,
     sequence_number: u16,
@@ -418,6 +438,13 @@ pub struct BabelRouterBuilder {
 }
 
 impl BabelRouterBuilder {
+    /// Install immutable import/export rules before any interfaces or origins
+    /// become active. Default: [`AllowAllRoutes`].
+    pub fn route_policy(mut self, policy: Arc<dyn RoutePolicy>) -> Self {
+        self.route_policy = Some(policy);
+        self
+    }
+
     /// Total orderly-cleanup budget, default five seconds; must be nonzero.
     pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = Some(timeout);
@@ -609,6 +636,9 @@ impl BabelRouterBuilder {
                 .metric_algebra
                 .unwrap_or_else(|| Arc::new(AdditiveMetric)),
             route_selection: self.route_selection.unwrap_or_default(),
+            route_policy: self
+                .route_policy
+                .unwrap_or_else(|| Arc::new(AllowAllRoutes)),
             limits: self.limits,
             sequence_number: self.sequence_number,
             sequence_store: self

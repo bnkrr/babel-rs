@@ -31,6 +31,8 @@
 /// Engine configuration, events, actions and synchronous protocol state.
 pub mod engine;
 mod limits;
+pub mod policy;
+pub use policy::{AllowAllRoutes, ExportContext, ImportContext, RoutePolicy};
 mod validation;
 pub use validation::ConfigError;
 /// Link-quality profiles, Hello histories and metric composition.

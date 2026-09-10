@@ -206,6 +206,7 @@ fn route_requires_neighbour_and_exports_generation() {
 fn unfeasible_alternate_is_not_acquired() {
     let mut engine = Engine::new(EngineConfig {
         ipv4_via_ipv6: true,
+        route_policy: Arc::new(AllowAllRoutes),
         limits: crate::ResourceLimits::default(),
         router_id: id(1),
         metric: Arc::new(WiredMetric::new(96, 1, 1).unwrap()),

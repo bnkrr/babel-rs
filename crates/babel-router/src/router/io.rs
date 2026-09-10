@@ -129,9 +129,16 @@ pub(super) async fn run_sender(
     seed: u64,
 ) {
     let mut scheduler = OutputScheduler::new(seed);
+    let mut generations = queue.subscribe_generation();
+    let mut generation = *generations.borrow_and_update();
     loop {
         if *stop.borrow() {
             return;
+        }
+        let current = *generations.borrow_and_update();
+        if generation != current {
+            scheduler = OutputScheduler::new(seed);
+            generation = current;
         }
         let now_ms = elapsed_ms(&started);
         let (expired_batches, expired_datagrams) = scheduler.expire(now_ms);
@@ -146,6 +153,7 @@ pub(super) async fn run_sender(
                     // Retry locally, but continue expiry and observe interface removal.
                     tokio::select! {
                         _ = stop.changed() => return,
+                        _ = generations.changed() => {},
                         _ = tokio::time::sleep(Duration::from_millis(SEND_TIMEOUT_MS)) => {}
                     }
                     continue;
@@ -180,15 +188,20 @@ pub(super) async fn run_sender(
                         // arming a timer. A ready socket may otherwise run
                         // before the timer driver notices a runtime stall.
                         let fresh_send = std::future::poll_fn(|cx| {
-                            if Instant::now() >= send_deadline {
-                                std::task::Poll::Ready(None)
-                            } else {
-                                send.as_mut().poll(cx).map(Some)
-                            }
+                            queue
+                                .with_generation(generation, || {
+                                    if Instant::now() >= send_deadline {
+                                        std::task::Poll::Ready(None)
+                                    } else {
+                                        send.as_mut().poll(cx).map(Some)
+                                    }
+                                })
+                                .unwrap_or(std::task::Poll::Ready(None))
                         });
                         tokio::select! {
                             biased;
                             _ = stop.changed() => return,
+                            _ = generations.changed() => continue,
                             _ = tokio::time::sleep_until(send_deadline) => None,
                             result = fresh_send => result,
                         }
@@ -216,8 +229,19 @@ pub(super) async fn run_sender(
         let wake_ms = scheduler.next_wake_ms();
         tokio::select! {
             _ = stop.changed() => return,
+            _ = generations.changed() => {},
             item = receive.recv() => {
                 let Some(item) = item else { return; };
+                // Invalidation can race with receipt of fresh work. Reset before
+                // enqueueing, so the next loop cannot discard the new withdrawal.
+                let current = *generations.borrow_and_update();
+                if generation != current {
+                    scheduler = OutputScheduler::new(seed);
+                    generation = current;
+                }
+                if item.generation != generation {
+                    continue;
+                }
                 let now_ms = elapsed_ms(&started);
                 if now_ms >= item.expires_ms {
                     queue.expired_batches(1);

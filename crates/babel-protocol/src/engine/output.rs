@@ -26,7 +26,18 @@ impl Engine {
         let unavailable = (is_v4 && ipv4.is_none() && !self.config.ipv4_via_ipv6)
             || (is_v4 && policy == Ipv4NextHop::Ipv4 && ipv4.is_none())
             || (transport == ControlTransport::Ipv4 && needs_v6 && ipv6.is_none());
-        let metric = if unavailable { INFINITY } else { metric };
+        let denied = metric != INFINITY
+            && !self.config.route_policy.announce(&ExportContext {
+                key,
+                interface,
+                router_id,
+                locally_originated: router_id == self.config.router_id,
+            });
+        let metric = if unavailable || denied {
+            INFINITY
+        } else {
+            metric
+        };
         OutboundUpdate {
             key: Some(key),
             router_id: Some(router_id),
@@ -199,11 +210,7 @@ impl Engine {
                     }
                 }
                 for route in &selected {
-                    // Split horizon: never advertise a selected route back on
-                    // the interface from which its next hop was learned.
-                    if (!split_horizon || route.interface != interface)
-                        && only.is_none_or(|wanted| wanted == route.key)
-                    {
+                    if only.is_none_or(|wanted| wanted == route.key) {
                         let update = self.advertisement(
                             &interface,
                             route.key,
@@ -211,6 +218,14 @@ impl Engine {
                             route.seqno,
                             route.metric,
                         );
+                        // A previous specific unicast reply on this link may
+                        // need retracting, even though multicast uses split horizon.
+                        if split_horizon
+                            && route.interface == interface
+                            && update.metric != INFINITY
+                        {
+                            continue;
+                        }
                         if update.metric != INFINITY {
                             self.maintain_source(
                                 route.key,
@@ -306,20 +321,19 @@ impl Engine {
         learned_interface: Option<&str>,
         now_ms: u64,
     ) -> Vec<Action> {
-        let interfaces: Vec<_> = self
-            .interfaces
-            .iter()
-            .filter(|(interface, state)| {
-                !state.policy.split_horizon || learned_interface != Some(interface.as_str())
-            })
-            .map(|(interface, _)| interface.clone())
-            .collect();
+        let interfaces: Vec<_> = self.interfaces.keys().cloned().collect();
         interfaces
             .into_iter()
-            .map(|interface| {
+            .filter_map(|interface| {
                 let update =
                     self.advertisement(&interface, route.key, route.router_id, route.seqno, metric);
-                Action::Send {
+                if self.interfaces[&interface].policy.split_horizon
+                    && learned_interface == Some(interface.as_str())
+                    && update.metric != INFINITY
+                {
+                    return None;
+                }
+                Some(Action::Send {
                     destination: self
                         .interfaces
                         .get(interface.as_str())
@@ -333,7 +347,7 @@ impl Engine {
                         tlvs: vec![OutboundTlv::Update(update)],
                     },
                     timing: SendTiming::urgent(now_ms),
-                }
+                })
             })
             .collect()
     }

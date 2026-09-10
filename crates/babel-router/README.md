@@ -38,6 +38,13 @@ Exporters receive coalesced full desired-state snapshots. The runtime waits for
 in-flight reconciliation before final cleanup. Exporters must yield during I/O
 and be cancellation-safe; detached work remains their responsibility.
 
+Use `RoutePolicy` for read-only import/export allow/deny rules, independently of
+`RouteExporter`. Install it with `.route_policy(Arc::new(policy))` and replace it
+explicitly using `handle.replace_route_policy(...).await`. Replacement reselects
+routes, retracts denied announcements and cancels older queued output. Export
+rules apply per interface; callbacks must be deterministic and nonblocking. The
+packaged `route_policy` example demonstrates live replacement with a memory RIB.
+
 The host owns stable identity and initial sequence state. `SequenceStore` is an
 orderly-exit checkpoint, not crash-safe runtime persistence. The initial sequence
 defaults to zero; do not repeatedly reuse it for a persistent identity. Abrupt
