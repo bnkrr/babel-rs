@@ -5,6 +5,9 @@ scope is maintained in [Protocol coverage](../development/conformance.md), user-
 observations in [Support](../guide/support.md), and run results in
 [0.6.0 validation](0.6.0-validation.md).
 
+Commit IDs here refer to the original audit snapshots before repository-history
+sanitization; they may no longer resolve in the rewritten repository.
+
 The 2026-09-10 source audit examined `b403ad8168269bbe49e7296df99018ae41d971c8`
 and reproduced A01–A08. Commit `d60b4ac` repaired those findings; `5e3b564` added
 route-policy APIs and `8b9a416` added MAC and overlapping Linux SADR. The tables

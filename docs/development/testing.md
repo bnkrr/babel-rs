@@ -33,7 +33,9 @@ BABEL_RS_E2E_HOST=router-test-vm tests/e2e/run-on-linux-vm.sh mac-sadr
 ```
 
 `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN`, and `BABEL_RS_E2E_REMOTE_ROOT`
-customize the wrapper. Each scenario creates disposable namespaces and cleans
+customize the wrapper; remote assets default to `/tmp/babel-rs-e2e`. Builds
+honor the caller's Cargo configuration, cache, target directory and toolchain.
+Each scenario creates disposable namespaces and cleans
 its owned processes/links on exit. Failed tests preserve or print diagnostics;
 inspect cleanup outcomes before reusing the host.
 

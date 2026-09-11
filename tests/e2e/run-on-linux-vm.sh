@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "${repo_root}"
 cargo_bin=${BABEL_RS_CARGO_BIN:-cargo}
 ssh_host=${BABEL_RS_E2E_HOST:?set BABEL_RS_E2E_HOST to an SSH-accessible Linux VM}
 remote_root=${BABEL_RS_E2E_REMOTE_ROOT:-/tmp/babel-rs-e2e}
@@ -17,14 +18,14 @@ if [[ ${1:-all} == steady-state ]] && { [[ ! $steady_seconds =~ ^[0-9]+$ ]] || (
   exit 2
 fi
 
-CARGO_HOME="${repo_root}/.local/cargo" RUSTUP_TOOLCHAIN=stable \
-  "${cargo_bin}" build --release --package babel-rs
+"${cargo_bin}" build --locked --release --package babel-rs
+target_dir=$("${cargo_bin}" metadata --no-deps --format-version 1 |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 
 test_assets=()
 if [[ ${1:-all} == all || ${1:-all} == route-policy ]]; then
-  CARGO_HOME="${repo_root}/.local/cargo" RUSTUP_TOOLCHAIN=stable \
-    "${cargo_bin}" build --locked --release --package babel-router --example route_policy
-  test_assets+=("${repo_root}/target/release/examples/route_policy")
+  "${cargo_bin}" build --locked --release --package babel-router --example route_policy
+  test_assets+=("${target_dir}/release/examples/route_policy")
 fi
 if [[ ${1:-all} == all || ${1:-all} == shutdown-recovery ]]; then
   fixture_dir="${repo_root}/.local/experiments/shutdown-recovery"
@@ -36,7 +37,7 @@ fi
 
 ssh "${ssh_args[@]}" "${ssh_host}" "mkdir -p '${remote_root}'"
 scp "${ssh_args[@]}" \
-  "${repo_root}/target/release/babel-rs" \
+  "${target_dir}/release/babel-rs" \
   "${repo_root}/tests/e2e/netns-babeld.sh" \
   "${repo_root}/tests/e2e/netns-bird.sh" \
   "${repo_root}/tests/e2e/netns-lifecycle.sh" \

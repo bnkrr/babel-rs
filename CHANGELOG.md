@@ -20,6 +20,9 @@ snapshot is recorded in [0.6.0 validation](docs/history/0.6.0-validation.md).
   The daemon example now generates its Router-ID and uses generic interfaces.
   Installation documents the host-owned lookup rules needed for its dedicated
   ordinary table; source-rule ownership remains unchanged.
+- Remove workstation-specific paths and deployment references from repository
+  history. VM test wrappers use generic remote directories and honor the caller's
+  Cargo environment and target directory.
 - Organize documentation into user guides, development references, and dated
   evidence, with a [task-oriented index](docs/README.md). Consolidate peer support
   and remove duplicated architecture, test, and release-status material.

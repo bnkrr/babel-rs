@@ -36,7 +36,11 @@ It also accepts `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN` and
 `BABEL_RS_ENDLESS_REMOTE_ROOT`. The default remote asset directory is
 `/tmp/babel-rs-endless`. Use separate asset
 roots for concurrent wrapper invocations, so a running binary is not overwritten.
-Artifacts are on the VM. Keep the SSH session open; the wrapper allocates a PTY
+The build uses your Cargo configuration and toolchain, including `CARGO_HOME`,
+`CARGO_TARGET_DIR`, and `RUSTUP_TOOLCHAIN`; the wrapper does not replace them.
+Local artifact defaults are relative to the test working directory. Remote
+artifacts are on the VM; set `BABEL_RS_ENDLESS_REMOTE_ROOT` to persistent storage
+when they must survive temporary-directory cleanup. Keep the SSH session open; the wrapper allocates a PTY
 so terminal interrupt/disconnect can request cleanup. For unattended operation,
 run within a persistent session on the test host. SIGINT/SIGTERM/SIGHUP stop the
 run, save diagnostics and clean up (exit 130). SIGKILL or host failure cannot
