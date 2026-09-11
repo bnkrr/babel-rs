@@ -174,7 +174,7 @@ def main():
         return
     validate_ref(args.ref, version, args.dry_run)
     commit = None
-    if not args.dry_run:
+    if not args.dry_run or args.ref.startswith("refs/tags/publish/"):
         commit = checked_commit(ROOT)
         require_source_tag(ROOT, version, commit)
     if args.command == "check":

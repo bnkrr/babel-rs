@@ -81,6 +81,14 @@ class ReleaseTests(unittest.TestCase):
             publish.main()
         upload.assert_not_called()
 
+    def test_publication_tag_rehearsal_still_requires_matching_source_tag(self):
+        with patch("sys.argv", ["publish.py", "check", "--ref", "refs/tags/publish/v0.5.0", "--dry-run"]), \
+             patch.object(publish, "workspace_version", return_value="0.5.0"), \
+             patch.object(publish, "checked_commit", return_value="abc"), \
+             patch.object(publish.subprocess, "check_output", return_value="different-source-tag"), \
+             self.assertRaises(ValueError):
+            publish.main()
+
     def test_version_overrides_and_internal_dependencies_must_match(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
