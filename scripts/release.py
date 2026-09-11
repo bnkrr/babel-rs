@@ -127,7 +127,11 @@ def build(target, output, version, commit):
              else shlex.split(env.get("RUSTFLAGS", "")))
     # Release artifacts should not embed build-host source/cache paths.
     cargo_home = Path(env.get("CARGO_HOME", Path.home() / ".cargo")).resolve()
-    flags += [f"--remap-path-prefix={ROOT}=.", f"--remap-path-prefix={cargo_home}=cargo"]
+    sysroot = subprocess.check_output([env.get("RUSTC", "rustc"), "--print", "sysroot"],
+                                      cwd=ROOT, env=env, text=True).strip()
+    prefixes = [(str(Path.home()), "home"), (str(ROOT), "."),
+                (str(cargo_home), "cargo"), (sysroot, "rust")]
+    flags += [f"--remap-path-prefix={source}={replacement}" for source, replacement in prefixes]
     env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
     result = subprocess.check_output([CARGO, "build", "--release", "--locked", "-p", "babel-rs",
                                       "--target", target, "--message-format=json-render-diagnostics"],
@@ -137,6 +141,9 @@ def build(target, output, version, commit):
     dynamic = subprocess.check_output(["readelf", "-d", str(binary)], text=True)
     if "INTERP" in headers or "(NEEDED)" in dynamic:
         raise ValueError("musl binary unexpectedly requires a dynamic loader or library")
+    binary_bytes = binary.read_bytes()
+    if any(source.encode() in binary_bytes for source, _ in prefixes):
+        raise ValueError("binary still contains a build-host source, cache or toolchain path")
     run_binary(binary, ROOT / "examples/babel-rs.toml", version)
     timestamp = int(subprocess.check_output(["git", "show", "-s", "--format=%ct", commit], cwd=ROOT))
     bundle = pack(binary, ROOT, output, version, target, commit, timestamp)

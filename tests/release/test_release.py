@@ -102,6 +102,22 @@ Older.
         with self.assertRaises(ValueError):
             release.cargo_executable(json.dumps(report[0]))
 
+    def test_build_rejects_embedded_toolchain_paths_before_packaging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "babel-rs"
+            toolchain = str(root / "toolchain")
+            binary.write_bytes(b"ELF payload: " + toolchain.encode() + b"/library/core/src/ops.rs")
+            message = {"reason": "compiler-artifact", "target": {"name": "babel-rs", "kind": ["bin"]},
+                       "executable": str(binary)}
+            with patch.object(release.subprocess, "check_output",
+                              side_effect=[toolchain, json.dumps(message), "no interpreter", "no dynamic dependencies"]), \
+                 patch.object(release, "run_binary") as run, patch.object(release, "pack") as pack, \
+                 self.assertRaisesRegex(ValueError, "toolchain path"):
+                release.build(release.TARGETS[0], root / "output", "0.6.0", "abc")
+            run.assert_not_called()
+            pack.assert_not_called()
+
     def bundles(self, root):
         for source in release.FILES.values():
             path = root / source
