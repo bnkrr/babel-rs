@@ -21,11 +21,17 @@ breaking API or behavior changes use a new 0.x minor version.
 
 ## Install and run
 
-Linux and Rust 1.90 or newer are required. For a published version:
+Linux is required. For a published crate, install with Rust 1.90 or newer:
 
 ```sh
 cargo install babel-rs --version '=0.6.0' --locked
 ```
+
+Alternatively, published [GitHub Releases](https://github.com/bnkrr/babel-rs/releases)
+provide static Linux x86_64/ARM64 binaries. Follow the
+[binary installation guide](https://github.com/bnkrr/babel-rs/blob/main/packaging/README.md);
+these bundles do not require a Rust toolchain. GitHub binaries and crates.io
+packages have independent publication schedules.
 
 The dated [validation record](https://github.com/bnkrr/babel-rs/blob/main/docs/history/0.6.0-validation.md)
 records the last publication check. Before publication, build from the repository with

@@ -23,6 +23,13 @@ identifies tested source, kernels and peer versions; it is not live CI status.
 Other kernels, architectures, and network arrangements need validation in the
 target environment.
 
+Binary release jobs target Linux x86_64 and ARM64 with static musl linking.
+Each native runner checks the packaged executable and three-node forwarding
+before publication. A bundle needs no Rust toolchain or system musl installation;
+static linking does not remove the kernel and network requirements below.
+See [binary installation](../../packaging/README.md) and the selected version's
+workflow result for artifact availability and completed architecture checks.
+
 The runtime needs privileges to bind sockets to interfaces and use UDP/6696.
 The standalone daemon also modifies routes and policy rules. IPv6 control is
 the default and requires a link-local address; IPv4 control needs an interface

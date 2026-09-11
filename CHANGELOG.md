@@ -1,11 +1,16 @@
 # Changelog
 
-## 0.6.0 — Local freeze, 2026-09-11
+## 0.6.0
 
-This version is usable within the documented support scope. This date identifies
-the local source freeze, not a crates.io publication. A dated registry and hosted-CI
+This version is usable within the documented support scope. GitHub binaries and
+crates.io packages are published independently. A dated registry and hosted-CI
 snapshot is recorded in [0.6.0 validation](docs/history/0.6.0-validation.md).
 
+- Separate automated publication: `vX.Y.Z` runs full checks and produces a GitHub
+  Release from this changelog with static Linux x86_64/ARM64 bundles and checksums;
+  `publish/vX.Y.Z` independently publishes the three crates from the same commit.
+  Manual workflow runs are rehearsals only. Trusted Publishing now uses
+  `publish.yml`; see the [release guide](docs/development/releasing.md).
 - Implement optional RFC 8967 MAC authentication (HMAC-SHA256/BLAKE2s-128),
   RFC 9467 split replay counters, challenge/restart handling, and live key rotation.
   Add safe UDP packet-info reception/source-pinned transmission and MTU reservation.

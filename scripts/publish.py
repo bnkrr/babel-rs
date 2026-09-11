@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -19,11 +20,14 @@ import urllib.request
 PACKAGES = ("babel-protocol", "babel-router", "babel-rs")
 ROOT = Path(__file__).resolve().parents[1]
 CARGO = os.environ.get("CARGO", "cargo")
+VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 
 
 def workspace_version(root):
     workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
     version = workspace["package"]["version"]
+    if not VERSION.fullmatch(version):
+        raise ValueError("release automation requires a numeric MAJOR.MINOR.PATCH version")
     for name in PACKAGES:
         package = tomllib.loads((root / "crates" / name / "Cargo.toml").read_text())["package"]
         if package["name"] != name or package["version"] not in (version, {"workspace": True}):
@@ -35,9 +39,39 @@ def workspace_version(root):
 
 
 def validate_ref(ref, version, dry_run=False):
-    expected = f"refs/tags/v{version}"
-    if ref != expected and (not dry_run or ref.startswith("refs/tags/")):
-        raise ValueError(f"release requires {expected}; got {ref}")
+    expected = f"refs/tags/publish/v{version}"
+    if ref == expected:
+        return
+    if dry_run and (ref == f"refs/tags/v{version}" or ref.startswith("refs/heads/")):
+        return
+    raise ValueError(f"crate publication requires {expected}; got {ref}")
+
+
+def checked_commit(root):
+    if subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip():
+        raise ValueError("release artifacts require a clean checkout")
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+
+def require_source_tag(root, version, commit):
+    source = subprocess.check_output(
+        ["git", "rev-parse", "--verify", f"refs/tags/v{version}^{{commit}}"], cwd=root, text=True).strip()
+    if source != commit:
+        raise ValueError(f"v{version} must identify the checked-out source commit")
+
+
+def require_ci_tag_push(ref, commit):
+    if (os.environ.get("GITHUB_EVENT_NAME") != "push"
+            or os.environ.get("GITHUB_REF") != ref
+            or os.environ.get("GITHUB_SHA") != commit):
+        raise ValueError("uploads require the CI job's tag-push ref and checked-out commit")
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not event_path:
+        raise ValueError("missing CI push event")
+    event = json.loads(Path(event_path).read_text())
+    if (event.get("ref") != ref or event.get("created") is not True
+            or event.get("deleted") is not False or event.get("forced") is not False):
+        raise ValueError("uploads require a newly created tag, not a moved or deleted tag")
 
 
 def get(url, missing_ok=False):
@@ -130,7 +164,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("check", "publish", "verify"))
     parser.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
-    parser.add_argument("--dry-run", action="store_true", help="allow checking a branch without publishing")
+    parser.add_argument("--dry-run", action="store_true", help="check a branch or version tag without publishing")
     args = parser.parse_args()
     if args.dry_run and args.command != "check":
         parser.error("--dry-run is only valid for check; publishing requires the explicit publish command")
@@ -139,14 +173,14 @@ def main():
         verify_consumers(version)
         return
     validate_ref(args.ref, version, args.dry_run)
+    commit = None
+    if not args.dry_run:
+        commit = checked_commit(ROOT)
+        require_source_tag(ROOT, version, commit)
     if args.command == "check":
         print(f"Release version: {version}; ref: {args.ref}; uploads: disabled")
         return
-    if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip():
-        parser.error("publish requires a clean checkout")
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    if commit != os.environ.get("GITHUB_SHA"):
-        parser.error("publish requires the CI job's checked-out commit")
+    require_ci_tag_push(args.ref, commit)
     publish(version, commit)
 
 

@@ -26,9 +26,11 @@ def archive(commit="abc", dirty=False):
 
 class ReleaseTests(unittest.TestCase):
     def test_upload_requires_matching_tag_and_dry_run_checks_tag_too(self):
-        publish.validate_ref("refs/tags/v0.5.0", "0.5.0")
+        publish.validate_ref("refs/tags/publish/v0.5.0", "0.5.0")
         publish.validate_ref("refs/heads/main", "0.5.0", dry_run=True)
-        for ref, dry in [("refs/heads/main", False), ("refs/tags/v0.4.0", False), ("refs/tags/v0.4.0", True)]:
+        publish.validate_ref("refs/tags/v0.5.0", "0.5.0", dry_run=True)
+        for ref, dry in [("refs/heads/main", False), ("refs/tags/v0.5.0", False),
+                         ("refs/tags/v0.4.0", True), ("refs/tags/publish/v0.4.0", True), ("", False)]:
             with self.assertRaises(ValueError):
                 publish.validate_ref(ref, "0.5.0", dry)
 
@@ -40,15 +42,44 @@ class ReleaseTests(unittest.TestCase):
         request.assert_not_called()
 
     def test_dirty_or_wrong_commit_cannot_upload(self):
-        for git_output in [[" M file"], ["", "unexpected-commit"]]:
-            with patch("sys.argv", ["publish.py", "publish", "--ref", "refs/tags/v0.5.0"]), \
+        for git_output in [[" M file"], ["", "expected-commit", "different-source-tag"]]:
+            with patch("sys.argv", ["publish.py", "publish", "--ref", "refs/tags/publish/v0.5.0"]), \
                  patch.object(publish, "workspace_version", return_value="0.5.0"), \
                  patch.object(publish.subprocess, "check_output", side_effect=git_output), \
                  patch.dict(publish.os.environ, {"GITHUB_SHA": "expected-commit"}), \
                  patch.object(publish, "publish") as upload, \
-                 patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+                 self.assertRaises(ValueError):
                 publish.main()
             upload.assert_not_called()
+
+    def test_upload_requires_new_tag_push_and_exact_ci_commit(self):
+        ref, commit = "refs/tags/publish/v0.5.0", "tested-commit"
+        event = {"ref": ref, "created": True, "deleted": False, "forced": False}
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            env = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": ref,
+                   "GITHUB_SHA": commit, "GITHUB_EVENT_PATH": str(event_path)}
+            event_path.write_text(json.dumps(event))
+            with patch.dict(publish.os.environ, env, clear=True):
+                publish.require_ci_tag_push(ref, commit)
+            for override in ({"GITHUB_EVENT_NAME": "workflow_dispatch"}, {"GITHUB_SHA": "other"},
+                             {"GITHUB_REF": "refs/heads/main"}, {"GITHUB_EVENT_PATH": ""}):
+                with patch.dict(publish.os.environ, env | override, clear=True), self.assertRaises(ValueError):
+                    publish.require_ci_tag_push(ref, commit)
+            for override in ({"created": False}, {"deleted": True}, {"forced": True}, {"ref": "other"}):
+                event_path.write_text(json.dumps(event | override))
+                with patch.dict(publish.os.environ, env, clear=True), self.assertRaises(ValueError):
+                    publish.require_ci_tag_push(ref, commit)
+
+    def test_manual_dispatch_cannot_upload_even_with_a_valid_publish_tag(self):
+        with patch("sys.argv", ["publish.py", "publish", "--ref", "refs/tags/publish/v0.5.0"]), \
+             patch.object(publish, "workspace_version", return_value="0.5.0"), \
+             patch.object(publish, "checked_commit", return_value="abc"), \
+             patch.object(publish, "require_source_tag"), \
+             patch.dict(publish.os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch"}, clear=True), \
+             patch.object(publish, "publish") as upload, self.assertRaises(ValueError):
+            publish.main()
+        upload.assert_not_called()
 
     def test_version_overrides_and_internal_dependencies_must_match(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -65,6 +96,10 @@ class ReleaseTests(unittest.TestCase):
             member.write_text(original.replace('version.workspace = true', 'version = "0.4.0"'))
             with self.assertRaises(ValueError):
                 publish.workspace_version(root)
+            for version in ("01.5.0", "0.5.0-rc.1", "0.5", "0.5.0+build"):
+                (root / "Cargo.toml").write_text(root_manifest.replace("0.5.0", version))
+                with self.assertRaises(ValueError):
+                    publish.workspace_version(root)
             member.write_text(original)
             (root / "Cargo.toml").write_text(root_manifest.replace('babel-router = { version = "0.5.0" }', 'babel-router = { version = "0.4.0" }'))
             with self.assertRaises(ValueError):

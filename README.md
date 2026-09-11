@@ -55,6 +55,11 @@ filter language; embedders use `RoutePolicy`.
 
 ## Run the daemon
 
+Published [GitHub Releases](https://github.com/bnkrr/babel-rs/releases) provide
+static Linux x86_64 and ARM64 bundles with checksums. Follow the
+[binary installation guide](packaging/README.md); no Rust toolchain is needed.
+If the desired version has no binary bundle yet, build it from source.
+
 Build from a checkout on Linux:
 
 ```sh

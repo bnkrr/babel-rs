@@ -19,6 +19,13 @@ It builds actual archives and verifies external consumption, library tests/docs,
 and daemon installation without publishing. Local archive checks and actual
 crates.io consumption are separate stages.
 
+The [binary release rehearsal](releasing.md#verify-before-uploading) checks static
+musl bundles and runs the archived daemon through the three-node network fixture
+on native Linux x86_64 and ARM64 runners. The release-tool Python regressions
+cover tag/event gates, changelog extraction, archive provenance and checksums,
+partial upload recovery, and refusal to overwrite published artifacts. They mock
+external publication; they do not upload or establish a hosted workflow result.
+
 ## Linux network suite
 
 Use a disposable Linux host with root privileges, iproute2, ping, Python 3, and
@@ -59,8 +66,9 @@ inspect cleanup outcomes before reusing the host.
 Fixtures are under [tests/e2e](../../tests/e2e). `all` includes these regression groups
 and a 120-second steady-state smoke run; it excludes the optional endless harness.
 The [E2E workflow](../../.github/workflows/e2e.yml) runs network/interop checks and
-five separate robustness jobs on branches/PRs. Release tags call the same checks
-through the release workflow. Robustness jobs retain their logs as artifacts.
+five separate robustness jobs on branches/PRs. Both ordinary version tags and
+crate publication tags call the same checks through their independent workflows.
+Robustness jobs retain their logs as artifacts.
 
 The stale-checkpoint and combined-crash fixtures allow 240 seconds for recovery;
 partition/merge allows 90 seconds. These are regression deadlines, not deployment
