@@ -14,8 +14,8 @@ and runs the examples with `cargo test --workspace --doc`.
 Public configuration structs retain editable fields. Their `validate()`
 methods are side-effect-free and return `babel_protocol::ConfigError`.
 `babel-router` reexports that error and reports shared configuration failures
-through `RouterError::InvalidConfig`. Its existing `InvalidInterfacePolicy`
-and `InvalidOriginMetric` variants remain available for those specific errors.
+through `RouterError::InvalidConfig`. `InvalidInterfacePolicy` and
+`InvalidOriginMetric` report interface-policy and origin-metric errors.
 
 | Input | Constraint |
 | --- | --- |
@@ -40,12 +40,9 @@ A failed origin replacement leaves the previous set intact. Local events
 reject noncanonical `RouteKey` struct literals; construct the canonical key
 before sending an event.
 
-`Engine::new` and `Engine::handle` retain their existing signatures as
-convenience methods for known-valid inputs. They now call the same validation
-and panic on invalid local configuration. Applications accepting user input
-should use the fallible methods. Valid configuration and events keep their
-previous behavior. Existing public paths, including `babel_protocol::engine::*`
-and `babel_protocol::wire::*`, remain available.
+`Engine::new` and `Engine::handle` are convenience methods for known-valid
+inputs. They perform the same validation and panic on invalid local input;
+applications accepting user input should use the fallible methods.
 
 For the runtime, builder setters store pending values.
 `BabelRouterBuilder::validate()` checks the entire configuration without I/O;
@@ -180,9 +177,13 @@ its forwarding backend supports RFC 9229 routes and ICMPv4 generation on
 unnumbered links; unsupported routes are excluded before selection. A direct
 protocol host makes the same decision with `EngineConfig::ipv4_via_ipv6`.
 
+Source-specific routes require destination-first forwarding in the exporter;
+gate unsupported source prefixes with `RoutePolicy`. See [SADR](sadr.md).
+
 `InterfacePolicy::control_transport` defaults to IPv6; select IPv4 for links
-without IPv6. Runtime policy updates that change this field require interface
-removal and reattachment. `PacketReceivedWithTimestamp` lets a protocol host
+without IPv6. A direct policy update changing this field returns
+`TransportChangeRequiresReattach`; remove and reattach the interface.
+`PacketReceivedWithTimestamp` lets a protocol host
 preserve microsecond arrival time while supplying current processing time for
 timers. All event processing clocks must remain nondecreasing.
 
@@ -225,9 +226,4 @@ external-state recovery and any detached I/O its callbacks start.
 
 ## MAC authentication
 
-`MacKey`/`MacConfig` configure a keyed interface with `interface_with_mac` or
-`add_interface_with_mac`. Authentication is active before its first packet.
-Remove and reattach to replace keys; the socket instance changes, invalidating
-old queued input/output and forcing a fresh challenge. See [MAC](mac.md).
-Custom forwarding backends must implement RFC 9079 destination-first semantics
-or gate unsupported source prefixes through `RoutePolicy`; see [SADR](sadr.md).
+See [MAC](mac.md) for keyed runtime interfaces and direct `MacSession` integration.

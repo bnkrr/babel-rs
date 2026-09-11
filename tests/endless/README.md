@@ -57,7 +57,7 @@ from a fresh full topology with `seed + 1`. For example:
 ```sh
 sudo env PYTHONDONTWRITEBYTECODE=1 python3 tests/endless/netns.py \
   "$PWD/target/release/babel-rs" --nodes 32 --min-nodes 16 --avg-degree 4 \
-  --graph bottleneck --seed 20260908 --on-failure next-seed
+  --graph bottleneck --seed 1 --on-failure next-seed
 ```
 
 The artifact root then contains `campaign.json` (current child, seed and failure
@@ -139,7 +139,7 @@ supervisor can run babel-rs, BIRD (2.x/3.x with Babel) and babeld together:
 sudo env PYTHONDONTWRITEBYTECODE=1 python3 tests/endless/netns.py \
   "$PWD/target/release/babel-rs" \
   --min-nodes 16 --max-nodes 32 --avg-degree 4 --graph bottleneck \
-  --mix babel-rs=2,bird=1,babeld=1 --seed 20260908 --on-failure next-seed
+  --mix babel-rs=2,bird=1,babeld=1 --seed 1 --on-failure next-seed
 ```
 
 Weights are sampling probabilities, not exact counts or per-implementation
@@ -270,9 +270,14 @@ scheduling and network timing remain nondeterministic, so this reproduces the
 scenario, not an identical execution. Preserve the manifest, recent events,
 failed observations and tested binary when investigating a failure.
 
-The small model/oracle test suite deliberately supplies missing routes, FIB
-mismatches, stale destinations and forwarding loops, and accepts a valid
-non-shortest path. Run it explicitly; it is not registered with regular CI:
+For a single-round replay, `tests/endless/replay.py --replay-round N` reconstructs
+the seeded topology just before N, starts fresh processes, verifies it, and
+applies that round's changes. It does not restore previous route, sequence or
+feasibility history, so it cannot reproduce accumulated state by itself.
+
+The model/oracle unit suite covers missing routes, stale destinations, forwarding
+loops, export progress and valid non-shortest paths. These tests run in CI and
+can also be run locally without root:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/endless -v

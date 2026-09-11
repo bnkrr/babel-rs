@@ -63,8 +63,3 @@ Embedders construct `MacKey`/`MacConfig` and use
 its keys. Sans-I/O hosts use `babel_protocol::mac::MacSession`: supply CSPRNG
 bytes, monotonic time, actual UDP endpoints, and promptly transmit returned
 challenge controls. Never clone/reuse a session's outgoing Index/PC state.
-
-Evidence lives in `crates/babel-protocol/src/mac/tests.rs` and
-`tests/e2e/netns-mac-sadr.py`: independent digest vectors, tamper/replay rejection,
-challenge expiry/rate limits, counter rollover, restart, rotation, malformed
-framing, both IP control families, and independent babeld authentication.

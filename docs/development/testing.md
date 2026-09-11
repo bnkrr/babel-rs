@@ -1,18 +1,15 @@
 # Testing babel-rs
 
 Run commands from the repository root. This guide maps changes to reproducible
-checks; dated outcomes belong in [validation records](../history/0.6.0-validation.md).
-Use the target commit's CI result rather than inferring success from a workflow
-file. Network fixtures declare interval overrides; many recovery tests use the
-normal 4-second Hello / 16-second Update intervals.
+checks. Network fixtures declare interval overrides; many recovery tests use
+the normal 4-second Hello / 16-second Update intervals.
 
 ## Local source and package checks
 
 [CONTRIBUTING.md](../../CONTRIBUTING.md#local-checks) lists format, Clippy, workspace,
-rustdoc, and Python checks. Protocol regressions run through Cargo; the main
-public suites include prefix/request/withdrawal RFC regressions, IPv4 policy,
-sequence recovery, source-history churn, route policy, capacity, and runtime
-lifecycle. Keep new tests with the affected module or public integration suite.
+rustdoc, and Python checks. [Protocol coverage](conformance.md#regression-map)
+indexes the RFC regressions. Keep new tests with the affected module or public
+integration suite.
 
 For distribution changes, run the [archive-consumer check](releasing.md#verify-before-uploading).
 It builds actual archives and verifies external consumption, library tests/docs,
@@ -106,21 +103,10 @@ do not substitute for longer runs.
 
 ## Endless topology testing and replay
 
-The [endless harness](../../tests/endless/README.md) owns the CLI reference for seeded
-node/link churn, bounded node pools, graphs, implementation mixes, artifacts,
-retry policy, and cleanup. It is opt-in and excluded from normal CI. Its oracle
-checks graph reachability, kernel routes and forwarding for every implementation;
-babel-rs also supplies RIB/export status. A campaign that retries after failure
-must retain and report that failure separately from later verified rounds.
-
-### Bounded mixed-round replay
-
-`tests/endless/replay.py --replay-round N` reconstructs the seeded topology just
-before N, starts fresh processes, verifies it, and applies that round's changes.
-It does not restore earlier route, sequence, or feasibility history. A successful
-fresh-state replay therefore cannot explain a failure from accumulated state.
-The [0.6.0 record](../history/0.6.0-validation.md) includes the closed historical
-round-170 observation and the separate 7.5-hour mixed campaign.
+The opt-in [endless harness](../../tests/endless/README.md) tests seeded node/link
+churn with babel-rs, babeld and BIRD. Its README covers graph and mix parameters,
+verification, replay, artifacts and cleanup. Network campaigns are excluded from
+normal CI; the harness's model and wrapper unit tests run in CI.
 
 ## Capacity experiments
 
@@ -142,4 +128,3 @@ without concurrent compilation. For direct fixture runs, load duration/rate
 can be set with
 `BABEL_RS_CAPACITY_SECONDS` and `BABEL_RS_CAPACITY_PPS` (defaults 45 seconds and
 250 target packets/second); these are offered-load settings, not received rates.
-Fuzz experiments are excluded from this maintained test/release scope.

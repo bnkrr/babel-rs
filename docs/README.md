@@ -1,8 +1,7 @@
 # babel-rs documentation
 
 Choose the task you need to perform. The [project README](../README.md) provides
-the introduction and a first-run example. Guides describe the current software;
-records preserve evidence from a particular version and date.
+the introduction and a first-run example.
 
 ## Use and integrate
 
@@ -17,10 +16,6 @@ records preserve evidence from a particular version and date.
 | Size and monitor routing workloads | [Capacity](guide/capacity.md) | Admission, queue budgets, overload behavior and sizing limits |
 | Check compatibility and deployment scope | [Support](guide/support.md) | Platforms, versions, tested peers, known observations and operational limits |
 
-For daemon deployment, read Configuration and Support first; consult Control
-when diagnosing a running instance. Embedders should start with Embedding and
-Support. MAC, SADR, and Capacity are focused references when those features matter.
-
 ## Develop and maintain
 
 | Task | Guide |
@@ -32,15 +27,3 @@ Support. MAC, SADR, and Capacity are focused references when those features matt
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for contribution expectations and basic
 checks, and [CHANGELOG.md](../CHANGELOG.md) for version changes and migration.
-
-## Historical evidence
-
-- [0.6.0 validation](history/0.6.0-validation.md): source commits, scoped Linux
-  results, the mixed campaign, earlier replay, and the dated publication snapshot.
-- [September 2026 RFC audit](history/rfc-audit-2026-09.md): repaired defects,
-  original reproduction, historical decision IDs, and regression inventory.
-
-Historical records are not live status pages or active feature checklists.
-Keep instructions and contracts in the relevant guide; add dated results to a
-record instead of copying them into several guides. Current peer observations
-belong in Support, RFC scope in Protocol coverage, and release steps in Releasing.

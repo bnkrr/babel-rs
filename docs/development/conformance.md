@@ -41,19 +41,24 @@ extensions. It is an implementation map, not a formal conformance certificate.
 Conditional requirements apply when an extension is enabled. An authenticated
 or encrypted carrier does not itself implement Babel MAC or Babel DTLS.
 
-## Evidence and unresolved observations
+## Regression map
 
 Protocol regressions include independent raw wire fixtures, structured prefix
 matrices, sequence-recovery simulations, and a destination-first SADR oracle.
 Linux tests exercise forwarding, peer exchange, authentication, restart, and
 owned-state cleanup. [Testing](testing.md) describes how to reproduce them.
 
-The [0.6.0 validation record](../history/0.6.0-validation.md) distinguishes tested
-commits and completed checks from remaining publication steps. In particular,
-the mixed campaign verified 511 mutation rounds across two attempts and retained
-one unattributed babeld kernel-FIB mismatch; it was not a clean campaign pass.
-Current peer observations are in [Support](../guide/support.md#known-observations).
+| Specification area | Maintained regressions |
+| --- | --- |
+| RFC 8966 §4: framing, context and prefix compression | [Wire fixtures](../../crates/babel-protocol/tests/rfc_wire.rs), [decoder and request regressions](../../crates/babel-protocol/tests/rfc_audit_regressions.rs) |
+| RFC 8966 §§3.4–3.8: neighbors, feasibility, requests and withdrawals | [Engine behavior](../../crates/babel-protocol/tests/rfc8966_engine.rs), [sequence recovery](../../crates/babel-protocol/tests/seqno_recovery.rs), [source-history churn](../../crates/babel-protocol/tests/source_churn.rs) |
+| RFC 8966 Appendix C: route filtering | [Route policy](../../crates/babel-protocol/tests/route_policy.rs), [live runtime policy replacement](../../tests/e2e/netns-route-policy.py) |
+| RFC 9079: source-specific encoding and destination-first forwarding | [Wire fixtures](../../crates/babel-protocol/tests/rfc_wire.rs), [Linux projection tests](../../crates/babel-rs/src/linux/tests.rs), [IPv4/IPv6 transit](../../tests/e2e/netns-mac-sadr.py) |
+| RFC 8967 / 9467: authentication and replay protection | [MAC vectors and state machine](../../crates/babel-protocol/src/mac/tests.rs), [rotation and peer interoperability](../../tests/e2e/netns-mac-sadr.py) |
+| RFC 9229: next-hop selection and unnumbered ICMPv4 | [IPv4 policy](../../crates/babel-protocol/tests/ipv4_policy.rs), [Linux boundary tests](../../tests/e2e/netns-rfc-boundaries.py) |
+| RFC 9616: timestamp groups and RTT selection | [Packetization regressions](../../crates/babel-protocol/tests/rfc_audit_regressions.rs), [RTT exchange](../../tests/e2e/netns-rtt.sh), [multipath selection](../../tests/e2e/netns-rtt-multipath.sh) |
 
-The [September 2026 audit record](../history/rfc-audit-2026-09.md) preserves the
-A01–A08 fixes, original decoder reproduction, historical decision IDs, and test
-index. It is historical evidence; this page defines the current scope.
+These tests cover the named scenarios; round trips through the same codec alone
+do not establish interoperability. Deployments still need to verify Router-ID
+uniqueness, effective MTU, split-horizon link assumptions, forwarding policy and
+timing under load. [Support](../guide/support.md) describes platform and peer scope.

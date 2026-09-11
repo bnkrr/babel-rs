@@ -27,20 +27,20 @@ pushes do not publish. Do not move version tags after sharing them.
 1. Update the workspace version, all versioned path dependencies and Cargo.lock
    together. Add a nonempty `## X.Y.Z` changelog section with changes and migration
    guidance. An optional date suffix or `[X.Y.Z]` heading is accepted.
-2. Review user documentation, support boundaries and known observations. Commit
+2. Review user documentation, support boundaries and migration guidance. Commit
    the candidate. Validate a clean checkout; use a detached worktree if needed
    to keep unrelated work separate.
 3. Run the applicable source, archive and binary checks below. Record the commit,
    toolchains, results, Cargo.lock checksum and artifact checksums locally.
-4. Create an annotated local freeze tag, for example `freeze/0.6.0-20260911-4`.
+4. Create an annotated local freeze tag, for example `freeze/0.6.0-candidate.1`.
    Keep its source and artifacts available for review. A content change requires
    a new candidate/tag and the affected checks; preserve existing freeze tags.
 
 Runtime network evidence can be reused when Rust implementation and runtime
 fixtures are unchanged. Packaging changes still require fresh artifact checks.
 A local freeze is separate from a hosted-CI result or an external publication.
-The dated [0.6.0 validation record](../history/0.6.0-validation.md) describes prior
-evidence, not live registry state.
+Keep per-candidate results and local investigation notes with ignored artifacts;
+public documentation describes the maintained behavior and procedures.
 
 ## Verify before uploading
 

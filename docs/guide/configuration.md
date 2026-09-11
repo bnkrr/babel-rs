@@ -137,8 +137,7 @@ deep-merged. Set `half_life_ms` to opt into elapsed-time smoothing instead.
 `"ipv4"` uses multicast 224.0.0.111 with an IPv4 interface address. IPv4 mode
 works without IPv6. A configuration reload that changes the control family
 reattaches the interface and acquires fresh neighbors. Metric/timing changes
-remain live; MAC-key changes also reattach the affected interface. The public runtime API returns `TransportChangeRequiresReattach`
-for a direct policy update changing this field; remove and add the interface.
+remain live; MAC-key changes also reattach the affected interface.
 This is separate from `ipv4_next_hop`, which controls announced route next hops.
 On IPv4 control links, an IPv6 route or IPv4-via-IPv6 announcement requires an
 explicit local IPv6 link-local next hop; otherwise that announcement is retracted.

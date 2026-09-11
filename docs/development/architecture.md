@@ -112,5 +112,5 @@ callback obligations, and returned errors are specified in
 
 Tests beside private modules cover local invariants; crate-level integration
 tests exercise public APIs and wire behavior. [Testing](testing.md) maps commands
-to network fixtures. Historical defect reproductions are in the
-[audit record](../history/rfc-audit-2026-09.md).
+to network fixtures; [Protocol coverage](conformance.md#regression-map) maps RFC
+areas to their maintained regressions.

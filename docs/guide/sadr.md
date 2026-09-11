@@ -70,6 +70,4 @@ implement RFC 9079 itself, or use `RoutePolicy` to reject unsupported sources.
 Materialization costs grow with inherited route/view pairs, up to quadratic in
 the number of source prefixes and routes. Kernel changes are reconciled through
 individual netlink operations, not an atomic FIB transaction; errors are exposed
-in export health and retried. Tests compare projected IPv4/IPv6 lookups to a
-destination-first oracle and exercise real transit packets, crossing prefixes,
-same-destination overrides, withdrawal holds, recovery, and cleanup on Linux.
+in export health and retried.

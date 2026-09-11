@@ -112,7 +112,6 @@ universal capacity guarantees. Size budgets for the number of alternate paths
 and source prefixes as well as destinations; rejected entries recover through
 normal later protocol exchanges rather than a retained backlog.
 
-An exploratory 4,096-candidate run with 200 ms Hellos showed transient adjacency
-and forwarding loss during initial learning. Shortened timers need their own
-load validation. The tests use ordinary timers for capacity isolation and do not
-promise lossless forwarding for every valid timer/load combination.
+Capacity isolation tests use ordinary timers. Shortened Hello intervals need
+their own load validation; valid timer values alone do not establish lossless
+forwarding for a given workload.

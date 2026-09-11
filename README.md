@@ -10,13 +10,8 @@ belong to the host. babeld and BIRD are interoperability peers, not dependencies
 
 ## Status
 
-Version **0.6.0 is usable for routing and embedding within the supported scope**.
-It has passed local protocol/runtime tests, package-consumer checks, and Linux
-forwarding and recovery tests. A 7.5-hour mixed run with babeld and BIRD verified
-511 topology-change rounds across two attempts; one attempt ended with an
-unresolved kernel-route mismatch on a babeld node. See the
-[validation record](docs/history/0.6.0-validation.md) and
-[known limitations](docs/guide/support.md#known-observations) before deploying.
+Version **0.6.0 is usable for routing and embedding** within the documented
+[platform support and operational limits](docs/guide/support.md).
 
 Most of this project's code was written by **OpenAI Codex**. Tests and RFC review
 provide evidence, not a guarantee of correctness or an independent security
@@ -47,11 +42,9 @@ daemon. See [platform support](docs/guide/support.md) for the tested scope.
   bounded resource queues, and status inspection.
 - Library hooks for route admission, announcements, metrics, persistence, and export.
 
-The implementation covers RFC 8966, 9079, 9229, 9616, and MAC authentication from
-RFC 8967/9467 within the boundaries in the [protocol coverage](docs/development/conformance.md).
-DTLS is not implemented. Kernel routes are not automatically redistributed;
-local origins are explicit. The daemon does not yet expose a general TOML route
-filter language; embedders use `RoutePolicy`.
+See [protocol coverage](docs/development/conformance.md) for supported RFCs and
+implementation choices. DTLS is not implemented. Local origins are explicit;
+kernel routes are not automatically redistributed.
 
 ## Run the daemon
 
@@ -130,8 +123,7 @@ sudo target/release/babel-rs shutdown
 Control commands use `/run/babel-rs/babel-rs.ctl` by default. For a supervised
 installation, use the supplied [systemd unit](packaging/systemd/babel-rs.service)
 and the [installation instructions](docs/guide/configuration.md#systemd-installation).
-Versioned `cargo install` and publication instructions are in
-[Releasing](docs/development/releasing.md).
+For installation through Cargo, see the [daemon crate](crates/babel-rs/README.md).
 
 ## Embed the libraries
 
@@ -154,14 +146,9 @@ identity, restart sequence policy, and their forwarding backend.
 
 ## Documentation
 
-Start with the [documentation index](docs/README.md) to choose a guide by task:
-
-- **Run and operate:** [Configuration](docs/guide/configuration.md),
-  [Control commands](docs/guide/control.md), and [Support / tested peers](docs/guide/support.md).
-- **Embed:** [Library contracts](docs/guide/embedding.md) and
-  [protocol coverage](docs/development/conformance.md).
-- **Contribute or release:** [Testing](docs/development/testing.md),
-  [release procedure](docs/development/releasing.md), and [changelog](CHANGELOG.md).
+The [documentation index](docs/README.md) links to configuration, control,
+embedding, protocol coverage, testing and release guides.
+See [CHANGELOG.md](CHANGELOG.md) for version changes and migration instructions.
 
 ## Help and contributions
 

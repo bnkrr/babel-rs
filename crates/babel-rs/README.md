@@ -33,8 +33,7 @@ provide static Linux x86_64/ARM64 binaries. Follow the
 these bundles do not require a Rust toolchain. GitHub binaries and crates.io
 packages have independent publication schedules.
 
-The dated [validation record](https://github.com/bnkrr/babel-rs/blob/main/docs/history/0.6.0-validation.md)
-records the last publication check. Before publication, build from the repository with
+To build a repository checkout, run
 `cargo build --release --locked -p babel-rs` and use `target/release/babel-rs`.
 
 Start from the packaged `examples/babel-rs.toml` or the
@@ -83,7 +82,7 @@ and leaves other protocols' routes alone.
 - [Control commands and health fields](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/control.md)
 - [MAC authentication](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/mac.md)
 - [Source-specific routing](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/sadr.md)
-- [Tested peers and known observations](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/support.md)
+- [Platform support and tested peers](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/support.md)
 - [Changelog](https://github.com/bnkrr/babel-rs/blob/main/CHANGELOG.md)
 - [Issues](https://github.com/bnkrr/babel-rs/issues)
 

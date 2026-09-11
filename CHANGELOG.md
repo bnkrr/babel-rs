@@ -2,10 +2,6 @@
 
 ## 0.6.0
 
-This version is usable within the documented support scope. GitHub binaries and
-crates.io packages are published independently. A dated registry and hosted-CI
-snapshot is recorded in [0.6.0 validation](docs/history/0.6.0-validation.md).
-
 - Separate automated publication: `vX.Y.Z` runs full checks and produces a GitHub
   Release from this changelog with static Linux x86_64/ARM64 bundles and checksums;
   `publish/vX.Y.Z` independently publishes the three crates from the same commit.
@@ -17,36 +13,21 @@ snapshot is recorded in [0.6.0 validation](docs/history/0.6.0-validation.md).
 - Support overlapping IPv4/IPv6 SADR sources through inherited destination tables,
   automatic source-view allocation, withdrawal holds, and unsupported-source
   filtering in static configurations. Source rule priorities now follow prefix
-  specificity; existing overrides must be migrated as described in docs/guide/sadr.md.
+  specificity; existing overrides must be migrated as described in [SADR](docs/guide/sadr.md).
 - Add independent digest/babeld interop, MAC rotation/restart, destination-first
   oracle, and actual source-specific transit forwarding regressions. DTLS is deferred.
-- Rewrite project and crate introductions for standalone routing and library
-  consumers, with consistent AI authorship, compatibility, and operational notes.
-  The daemon example now generates its Router-ID and uses generic interfaces.
-  Installation documents the host-owned lookup rules needed for its dedicated
-  ordinary table; source-rule ownership remains unchanged.
-- Remove workstation-specific paths and deployment references from repository
-  history. VM test wrappers use generic remote directories and honor the caller's
-  Cargo environment and target directory.
-- Organize documentation into user guides, development references, and dated
-  evidence, with a [task-oriented index](docs/README.md). Consolidate peer support
-  and remove duplicated architecture, test, and release-status material.
-- Record the 7.5-hour mixed campaign: 511 verified mutation rounds across two
-  attempts, one unresolved babeld internal-state/kernel-FIB mismatch, and clean
-  termination. This is not a clean full-campaign pass.
+- The daemon example generates its Router-ID and uses generic interfaces.
+  Installation documents the host-owned lookup rules for ordinary export tables.
+- VM test wrappers honor the caller's Cargo environment and target directory.
 
 Migration from 0.5: overlapping source views no longer need disjoint prefixes.
 Automatic source views are enabled when the daemon manages rules; review table
 allocation and source-rule priorities in [SADR](docs/guide/sadr.md). MAC is optional;
 keyed interfaces start in strict mode, and changing keys reattaches the affected
-interface. Existing ordinary export tables continue to work when their host-owned lookup
-rules are configured. Example/documentation changes do not change how an
-existing configuration is interpreted.
+interface. Existing ordinary export tables continue to work when their host-owned
+lookup rules are configured.
 
 ## 0.5.0 — 2026-09-10
-
-Repository version; the crates.io publish attempt stopped at authentication
-before any upload.
 
 - Add read-only `RoutePolicy` import/export hooks, defaulting to `AllowAllRoutes`.
   Explicit engine/runtime replacement reevaluates candidates, retracts denied

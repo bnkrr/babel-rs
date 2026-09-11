@@ -38,8 +38,6 @@ and Linux daemon configuration/export in `babel-rs`. Public API, configuration,
 and behavioral changes follow [Support](docs/guide/support.md#api-compatibility).
 Document user-visible changes in [CHANGELOG.md](CHANGELOG.md).
 
-Release preparation and local freezes follow [Releasing](docs/development/releasing.md).
-A frozen candidate records its source and validation evidence. Any later change
-requires a new candidate and the checks affected by that change.
+Release preparation follows [Releasing](docs/development/releasing.md).
 
 Contributions are made under the repository's [MIT license](LICENSE).
