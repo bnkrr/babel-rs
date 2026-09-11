@@ -191,11 +191,13 @@ switch_margin_metric = 8
 better_for_ms = 8000
 ```
 
-Once a selected path has settled, an alternative must beat both margins for
-the full dwell interval. Loss of the current path and initial discovery bypass
-that delay. A sufficient recovery of the current path cancels a pending switch.
-These settings require a restart. The complete algorithm is described in
-[Architecture](../development/architecture.md#route-selection-and-export).
+Once a path has remained selected for a full dwell interval, an alternative
+must beat both margins for the full `better_for_ms` interval. Falling below
+either margin or choosing a different alternative resets that interval.
+Recovery of the current path by the same margins from its worst metric during the pending switch also resets it. Initial
+discovery and loss of the selected candidate bypass the delay. These settings
+require a restart. [Architecture](../development/architecture.md#route-selection-and-export)
+explains how metric observations, selection and route export fit together.
 
 ## Router identity and restart state
 
