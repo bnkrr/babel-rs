@@ -76,7 +76,7 @@ shutdown; the running state file contains no sequence number.
 `status` also reports effective admission `limits`, current `candidates`,
 `sources`, `pending_requests`, `unreachable_routes`, and cumulative rejection
 counters. Each neighbor reports its candidate occupancy and rejected Update
-count. See [CAPACITY.md](CAPACITY.md) for exact counting and recovery semantics.
+count. See [Capacity](capacity.md) for exact counting and recovery semantics.
 `dropped_outbound_datagrams` counts encoding failures and datagrams discarded
 on send error, timeout or expiry, while
 `missed_outbound_deadlines` detects runtime stalls that violate a protocol
@@ -125,14 +125,8 @@ babel-rs shutdown --socket /run/babel-rs/babel-rs.ctl
 The protocol is local administration, not a Babel wire extension. File-system
 permissions are its authorization boundary.
 
-`cargo test -p babel-rs control::tests` covers idle reads, trickled requests,
-blocked response writes and fresh budgets after complete frames with a
-controlled clock and bounded duplex transport. The VM runner's `control-clients`
-mode exercises the real daemon with one active client plus 21 idle, 21 slow
-request writers and 21 blocked response readers. It fills all 64 slots, checks
-that extra clients are refused, and reuses all 63 timed-out slots before closing
-the old client sockets. It also checks disconnect reuse and shutdown while
-clients remain connected. The `all` suite includes this mode.
+Timeout and connection-slot behavior is covered by the `control-clients`
+scenario described in [Testing](../development/testing.md#linux-network-suite).
 
 Interface inspection includes `control_transport` (`ipv4`/`ipv6`), all IPv4/IPv6
 `local_addresses`, and `ipv4_next_hop` (configured auto/ipv4/ipv6),

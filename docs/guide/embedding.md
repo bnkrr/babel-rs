@@ -74,7 +74,7 @@ for `start`/`wait`.
 Dropping the owner or its wait future cancels the engine and its owned workers;
 it does not perform asynchronous retractions/checkpoints/export cleanup. Cloned
 control handles do not own the runtime and cannot keep it running after its owner
-is dropped. The live socket backend supports Linux; see [SUPPORT.md](SUPPORT.md).
+is dropped. The live socket backend supports Linux; see [Support](support.md).
 
 | Handle operation | Successful completion means |
 | --- | --- |
@@ -228,6 +228,6 @@ external-state recovery and any detached I/O its callbacks start.
 `MacKey`/`MacConfig` configure a keyed interface with `interface_with_mac` or
 `add_interface_with_mac`. Authentication is active before its first packet.
 Remove and reattach to replace keys; the socket instance changes, invalidating
-old queued input/output and forcing a fresh challenge. See [MAC.md](MAC.md).
+old queued input/output and forcing a fresh challenge. See [MAC](mac.md).
 Custom forwarding backends must implement RFC 9079 destination-first semantics
-or gate unsupported source prefixes through `RoutePolicy`; see [SADR.md](SADR.md).
+or gate unsupported source prefixes through `RoutePolicy`; see [SADR](sadr.md).

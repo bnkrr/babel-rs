@@ -13,7 +13,7 @@ Version 0.6.0 is usable within the documented support scope. Most project code
 was written by **OpenAI Codex**. Automated tests and RFC review do not guarantee
 correctness or replace an independent security audit. Pin deployed versions,
 validate upgrades on your topology, and review the
-[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md#api-compatibility):
+[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/support.md#api-compatibility):
 breaking API or behavior changes use a new 0.x minor version.
 
 ## Example
@@ -53,19 +53,19 @@ The packaged `packet` example demonstrates wire encoding and decoding.
 
 The engine supports base Babel, source-specific routes, IPv4 routes with IPv6
 next hops, and wired/ETX/RTT metrics. DTLS is not implemented. Exact coverage and
-validation evidence are in the [RFC audit](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFORMANCE.md).
+validation evidence are in the [protocol coverage](https://github.com/bnkrr/babel-rs/blob/main/docs/development/conformance.md).
 
 ## Documentation
 
-- [Embedding and host responsibilities](https://github.com/bnkrr/babel-rs/blob/main/docs/EMBEDDING.md)
-- [MAC authentication](https://github.com/bnkrr/babel-rs/blob/main/docs/MAC.md)
-- [Platform support and known limits](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md)
+- [Embedding and host responsibilities](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/embedding.md)
+- [MAC authentication](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/mac.md)
+- [Platform support and known limits](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/support.md)
 - [Changelog](https://github.com/bnkrr/babel-rs/blob/main/CHANGELOG.md)
 - [Issues](https://github.com/bnkrr/babel-rs/issues)
 
 Generate the API reference with `cargo doc -p babel-protocol --no-deps`.
-Registry availability is recorded in the
-[release guide](https://github.com/bnkrr/babel-rs/blob/main/docs/RELEASING.md).
+Publication instructions are in the
+[release guide](https://github.com/bnkrr/babel-rs/blob/main/docs/development/releasing.md).
 
 ## License
 

@@ -1,7 +1,7 @@
 # Configuration
 
 The standalone daemon reads strict TOML: unknown fields and invalid values are
-rejected. Start from the [annotated example](../examples/babel-rs.toml) and edit
+rejected. Start from the [annotated example](../../examples/babel-rs.toml) and edit
 interface names, origins, and export ownership for the host. Check the file
 without starting routing:
 
@@ -49,11 +49,11 @@ sudo ip -4 rule del priority 20000 table 20000
 sudo ip -6 rule del priority 20000 table 20000
 ```
 
-Source views and their ordering are described in [SADR.md](SADR.md).
+Source views and their ordering are described in [SADR](sadr.md).
 
 ## Systemd installation
 
-The supplied [unit](../packaging/systemd/babel-rs.service) expects the binary at
+The supplied [unit](../../packaging/systemd/babel-rs.service) expects the binary at
 `/usr/bin/babel-rs` and configuration at `/etc/babel-rs.toml`. After building and
 editing/validating `babel-rs.toml`:
 
@@ -90,7 +90,7 @@ forced-stop timeout should leave room beyond this budget.
 
 Optional `[limits]` controls global neighbors, global candidates, and candidates
 per neighbor. It uses built-in defaults when omitted and requires a restart to
-change. See [CAPACITY.md](CAPACITY.md) for all defaults and overload behavior.
+change. See [Capacity](capacity.md) for all defaults and overload behavior.
 
 ## Interface rules
 
@@ -195,7 +195,7 @@ Once a selected path has settled, an alternative must beat both margins for
 the full dwell interval. Loss of the current path and initial discovery bypass
 that delay. A sufficient recovery of the current path cancels a pending switch.
 These settings require a restart. The complete algorithm is described in
-[ARCHITECTURE.md](ARCHITECTURE.md#metric-model).
+[Architecture](../development/architecture.md#route-selection-and-export).
 
 ## Router identity and restart state
 
@@ -215,7 +215,7 @@ The daemon migrates old state files automatically. After a crash or a missing
 checkpoint it uses a random sequence number, so recovery may take several
 minutes while peers expire older feasibility history. If the entire file is
 lost, a configured `router_id` still preserves identity; otherwise a new ID is
-generated. See [ARCHITECTURE.md](ARCHITECTURE.md#persistence-and-failure).
+generated. See [Architecture](../development/architecture.md#persistence-and-failure).
 
 ## Cleanup after an interrupted exit
 
@@ -253,5 +253,5 @@ a later update; the local mode is not a remote delivery acknowledgement.
 
 ## Authentication and source-specific routing
 
-See [MAC.md](MAC.md) for per-interface `[interfaces.mac]`, key files and rotation,
-and [SADR.md](SADR.md) for automatic/explicit source tables and rule priorities.
+See [MAC](mac.md) for per-interface `[interfaces.mac]`, key files and rotation,
+and [SADR](sadr.md) for automatic/explicit source tables and rule priorities.

@@ -4,3 +4,5 @@
 *.pcap
 __pycache__/
 *.py[cod]
+
+fuzz/

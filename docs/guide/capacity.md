@@ -1,5 +1,11 @@
 # Capacity and overload isolation
 
+This guide defines resource budgets and behavior under load. Field-level
+status definitions are in [Control](control.md), test commands in
+[Testing](../development/testing.md#capacity-experiments).
+
+## Learned-state admission
+
 Admission limits protect learned neighbor and candidate state. Defaults are:
 
 ```toml
@@ -51,6 +57,8 @@ for the expected topology, accounting for alternate paths. Multiple neighbors
 can still fill the global budget, at which point all new candidates are
 refused. Admission is first-come, without route-priority eviction.
 
+## Input and output isolation
+
 Each interface can occupy at most four slots in the common receive queue,
 including an event being processed. Output actions for the same destination
 and timing are batched before enqueueing, preserving TLV order and sequence-change
@@ -96,97 +104,15 @@ allocate state. The operational target is to contain excess announcements and
 local output stalls while keeping healthy interfaces and forwarding working,
 with automatic recovery.
 
-## Validation
+## Sizing limits
 
-Output fault-injection tests use controlled transports and paused time to
-exercise send timeout, MTU failure, cancellation, expiry and recovery. The real
-engine/command loop is tested with a blocked sender beside a healthy sender;
-status and origin changes must finish before the blocked send times out.
-Separate accounting tests cover queued, pending, encoded and in-flight data,
-including oversized nested payloads. A complete 16,384-route dump is decoded
-at a 1,232-byte UDP budget twice to detect recurring missing prefixes.
+The defaults have regression coverage, including a full 16,384-candidate output
+dump and independent healthy-path forwarding under excess input. They are not
+universal capacity guarantees. Size budgets for the number of alternate paths
+and source prefixes as well as destinations; rejected entries recover through
+normal later protocol exchanges rather than a retained backlog.
 
-```sh
-cargo test -p babel-router
-```
-
-Small deterministic tests cover exact thresholds, alternate candidates,
-source prefixes, interface identity, Router-ID changes at capacity, mixed
-rejected/withdrawn TLVs, garbage collection, and interface recreation:
-
-```sh
-cargo test -p babel-protocol --test capacity
-```
-
-Sustained source churn is covered separately with public engine events:
-
-```sh
-cargo test -p babel-protocol --test source_churn
-```
-
-The test rotates 28,800 Router-ID/source-key pairs through 32 candidate slots
-over 15 minutes of simulated time, spanning five source-GC windows. IPv4/IPv6
-ordinary and source-specific routes share destinations; an independent healthy
-route stays selected throughout. Expected history is derived from finite
-outbound advertisements. The test checks retained feasibility against stale
-sources, bounded history at this fixed churn rate, full reclamation after a
-five-minute drain, and reuse of an expired identity with an older sequence.
-This validates history lifetime and selection, not a hard source-table or RSS
-limit under arbitrary churn rates.
-
-The release-mode engine workload takes the candidate count per neighbor. It
-creates four neighbors, learns routes in batches of 32 Updates, repeats a
-stable refresh, sends 1,000 rejected batches, retracts one whole neighbor's
-routes, and reannounces them. Output is JSON lines with event timings and
-state counts; generation and input cloning are outside event timing. The
-virtual protocol time is fixed to isolate those operations; timer behavior
-is covered separately by deterministic and network tests. This is a synthetic
-operation benchmark, not a convergence or packets-per-second guarantee.
-
-```sh
-cargo run --release -p babel-protocol --example capacity -- 1024
-cargo run --release -p babel-protocol --example capacity -- 4096
-```
-
-Run on an idle machine, record the build and machine, and compare the same
-batch size. Do not overlap compilation with measurement. Defaults are
-operational admission budgets, not a guarantee that every topology at those
-limits will meet every configured timer.
-
-The root-only VM test uses a separate raw Babel generator and three daemons:
-
-```text
-A (excess announcements) --> B <-- C (healthy origin)
-                            |
-                            D (downstream)
-```
-
-It checks B's per-neighbor bound while C can add and withdraw routes through B
-to D, all healthy B adjacencies stay reachable, and D can ping C over two hops.
-The daemons use the shipped wired 2-out-of-3 policy and default 4-second Hello /
-16-second Update timers. The faulty adjacency itself is allowed to fail.
-It records RSS and control latency, stops A to exercise neighbor expiry and
-capacity release, then starts A with different prefixes and verifies automatic
-multihop recovery. It also verifies rejection of limit changes on reload.
-
-```sh
-BABEL_RS_E2E_HOST=router-test-vm tests/e2e/run-on-linux-vm.sh capacity
-# Or directly on a disposable root test host with the binary and script:
-BABEL_RS_CAPACITY_SECONDS=200 BABEL_RS_CAPACITY_PPS=250 \
-  python3 netns-capacity.py ./babel-rs
-# Exercise the default per-neighbor budget (smoke runs use 256):
-BABEL_RS_CAPACITY_PER_NEIGHBOR=4096 \
-  python3 netns-capacity.py ./babel-rs
-```
-
-The default run lasts 45 seconds under excess announcements, with a target of
-250 packets/second and up to 32 Updates per packet. These are generator targets,
-not measured receive rates. Ordinary CI checks protocol invariants rather
-than wall-clock thresholds. Longer fixed-host runs are appropriate before
-raising production limits.
-
-An exploratory 4,096-candidate run with 200 ms Hellos showed transient
-adjacency/forwarding loss during initial learning, even after queue isolation.
-Those aggressive timers are not covered by this capacity validation; deployments
-that shorten them need their own load test. The admission limits do not promise
-lossless forwarding under every valid timer and offered-load combination.
+An exploratory 4,096-candidate run with 200 ms Hellos showed transient adjacency
+and forwarding loss during initial learning. Shortened timers need their own
+load validation. The tests use ordinary timers for capacity isolation and do not
+promise lossless forwarding for every valid timer/load combination.

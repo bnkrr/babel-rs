@@ -1,66 +1,26 @@
-# RFC conformance and audit map
+# September 2026 RFC audit record
 
-This is the implementation and verification register for babel-rs 0.6.0.
-Publication and local source freezes are tracked in [RELEASING.md](RELEASING.md).
-The 2026-09-10 source audit examined commit
-`b403ad8168269bbe49e7296df99018ae41d971c8` and reproduced A01–A08. The
-0.5.0 follow-up commit `d60b4ac` fixes those defects and adds maintained regressions.
-No crate publication has occurred as part of the audit or fixes.
+This is a historical record of the audit and fixes leading to 0.6.0. Current
+scope is maintained in [Protocol coverage](../development/conformance.md), user-facing peer
+observations in [Support](../guide/support.md), and run results in
+[0.6.0 validation](0.6.0-validation.md).
 
-This is an implementation and evidence map, not a formal proof of conformance.
-MAC authentication and general Linux SADR projection are implemented in this
-version. DTLS remains deferred. General import/export filtering is available
-through `RoutePolicy`; the daemon uses it to gate unsupported static source views.
+The 2026-09-10 source audit examined `b403ad8168269bbe49e7296df99018ae41d971c8`
+and reproduced A01–A08. Commit `d60b4ac` repaired those findings; `5e3b564` added
+route-policy APIs and `8b9a416` added MAC and overlapping Linux SADR. The tables
+below preserve the IDs and evidence as recorded at that stage, including the
+later closure of the historical round-170 investigation and the separate new
+round-64 observation. They are not a live release checklist.
 
-## 0.6.0 verification
-
-Stable and Rust 1.90 workspace/all-target runs each pass 180 tests. Strict
-Clippy, rustdoc examples and the nine release-tool tests pass. The three 0.6.0
-crate archives pass verification, archive-only external consumption (including
-the MAC API), library tests/docs, installation and example-config validation;
-no upload is performed. Linux VM evidence covers both MAC algorithms against
-babeld 1.13.1, IPv4/IPv6 rotation and restart, overlapping-source transit pings,
-withdrawal/recovery, static-source filtering and owned-state cleanup. Existing
-IPv4/control-family/RTT/ICMPv4, BIRD SADR and dynamic-MTU regressions also pass.
-The later [mixed campaign](TESTING.md#2026-09-11-mixed-campaign) provides 7.5 hours
-of aggregate running evidence with one unattributed peer kernel-FIB mismatch.
-The source used for those protocol/runtime checks is `8b9a416`; the local freeze
-adds documentation, package-description, and example-configuration changes.
-
-## Release verification and deferred scope — 2026-09-11
-
-| Item | Status / next step |
-| --- | --- |
-| Registry publication | The [v0.5.0 release run](https://github.com/bnkrr/babel-rs/actions/runs/34486917845) passed all validation jobs, then failed to acquire a crates.io token because no matching Trusted Publishing configuration existed. Upload and registry-consumer steps were skipped. The three crate names still returned HTTP 404 on 2026-09-11. Complete the initial publication and publisher setup described in [RELEASING.md](RELEASING.md). |
-| Hosted 0.6.0 verification | Local stable/MSRV, archive and scoped VM checks passed. The final frozen commit needs hosted CI, including Windows/macOS protocol tests and the full network suite, before publication. Older hosted successes do not validate the new MAC code. |
-| Accumulated-state testing | The 7.5-hour mixed campaign completed its runtime budget with 511 verified mutation rounds across two attempts. Seed 20260911 failed at round 64 on a babeld kernel-FIB mismatch; seed 20260912 verified 448 rounds before the planned stop. Both cleanups passed. The failure remains unattributed; this is not a clean campaign pass. See [TESTING.md](TESTING.md#2026-09-11-mixed-campaign) and V07. |
-| Daemon filter configuration | The public `RoutePolicy` API is implemented. A general TOML filter language, metric rewriting and per-neighbor export remain optional future features, with no release commitment (C05). |
-| DTLS | Deferred without a target version (C03). Revisit when deployment requirements and a suitable backend have been validated; it is not part of 0.6.0. |
-
-## Sources and interpretation
-
-The reviewed sources are [RFC 8966](https://www.rfc-editor.org/rfc/rfc8966.html),
-[RFC 9079](https://www.rfc-editor.org/rfc/rfc9079.html),
-[RFC 9229](https://www.rfc-editor.org/rfc/rfc9229.html),
-[RFC 9616](https://www.rfc-editor.org/rfc/rfc9616.html),
-[RFC 8967](https://www.rfc-editor.org/rfc/rfc8967.html), its update
-[RFC 9467](https://www.rfc-editor.org/rfc/rfc9467.html), and the deferred
-[RFC 8968](https://www.rfc-editor.org/rfc/rfc8968.html).
-The original six-RFC audit's RFC Editor errata snapshot returned only
-[7373](https://www.rfc-editor.org/errata/eid7373), **Held for Document Update**,
-for these six RFCs. Its §3.8.2.2 clarification includes recovery with no selected
-route; `receive_update` already covers that case. It does not replace the RFC.
-
-MUST rules, SHOULD recommendations and optional capabilities are distinct.
-IPv6 control is recommended; it is not mandatory for every Babel deployment.
-Both control families are now available, selected per interface. Conditional
-MUST rules apply when an extension is implemented. WireGuard is not Babel-MAC
-or DTLS, and source-prefix wire support alone is not complete SADR forwarding.
+The audit's errata snapshot found [7373](https://www.rfc-editor.org/errata/eid7373),
+Held for Document Update, among the six RFCs in its original comparison. Its
+recovery clarification was already covered by `receive_update`; this is a dated
+snapshot, not a claim about the current errata list.
 
 ## Repaired findings
 
 Protocol regressions are in
-[`rfc_audit_regressions.rs`](../crates/babel-protocol/tests/rfc_audit_regressions.rs)
+[`rfc_audit_regressions.rs`](../../crates/babel-protocol/tests/rfc_audit_regressions.rs)
 unless another path is named. Each of the original seven protocol defect
 regressions failed before the implementation fixes; A07 has a Linux projection
 regression. The structured prefix matrix reaches valid packet headers and
@@ -90,9 +50,9 @@ A08's original 43-byte reproduction is retained here for traceability:
 | ID | Status | Scope / decision |
 | --- | --- | --- |
 | C01 | Implemented | `ControlTransport::Ipv6` default or `Ipv4` per interface; matching multicast, source admission, IP header budget and daemon attach/reload. IPv4 works with IPv6 disabled. |
-| C02 | Implemented | RFC 8967 HMAC-SHA256/BLAKE2s-128, multi-key trailers, PC/challenge/restart/expiry/rate limiting, strict default and explicit migration mode. RFC 9467 §3.1 split receive counters; optional window verification is not selected. Linux packet-info transport binds actual endpoints, signs after RTT stamping, and reserves authentication overhead. Key changes reattach the affected interface without restarting the daemon. Evidence: `mac/tests.rs`, `netns-mac-sadr.py`; deployment/API details in [MAC.md](MAC.md). |
+| C02 | Implemented | RFC 8967 HMAC-SHA256/BLAKE2s-128, multi-key trailers, PC/challenge/restart/expiry/rate limiting, strict default and explicit migration mode. RFC 9467 §3.1 split receive counters; optional window verification is not selected. Linux packet-info transport binds actual endpoints, signs after RTT stamping, and reserves authentication overhead. Key changes reattach the affected interface without restarting the daemon. Evidence: `mac/tests.rs`, `netns-mac-sadr.py`; deployment/API details in [MAC](../guide/mac.md). |
 | C03 | Deferred; no target version | RFC 8968 DTLS, credentials, sessions and protected transport are absent. Backend selection and deployment requirements need validation before implementation. No claim of implementing its conditional MUST rules. |
-| C04 | Implemented for Linux Babel RIB | Overlapping IPv4/IPv6 views inherit all covering-source and ordinary routes; equal destinations use most-specific source, including withdrawal holds. Automatic managed views cover learned/held sources; static configurations gate unsupported prefixes with `RoutePolicy`. Source rules follow specificity and tables reconcile before activation. Tests compare against a destination-first oracle and exercise real transit packets, withdrawal and cleanup. External kernel policy and custom exporters still need integration; see [SADR.md](SADR.md). |
+| C04 | Implemented for Linux Babel RIB | Overlapping IPv4/IPv6 views inherit all covering-source and ordinary routes; equal destinations use most-specific source, including withdrawal holds. Automatic managed views cover learned/held sources; static configurations gate unsupported prefixes with `RoutePolicy`. Source rules follow specificity and tables reconcile before activation. Tests compare against a destination-first oracle and exercise real transit packets, withdrawal and cleanup. External kernel policy and custom exporters still need integration; see [SADR](../guide/sadr.md). |
 | C05 | Implemented | Read-only `RoutePolicy` accepts/rejects imports using prefix/interface/neighbor/Router-ID metadata and allows/retracts exports per interface. Defaults preserve protocol-valid routes. Explicit replacement reselects, refreshes/retracts, requests newly permitted routes and invalidates queued old sends without clearing feasibility history. No metric rewriting or per-neighbor multicast export. The daemon has no TOML filter language yet. Evidence: `crates/babel-protocol/tests/route_policy.rs`, runtime queue-cancellation tests and `tests/e2e/netns-route-policy.py`. |
 | R01 | Implemented | Important changes get an initial copy and two repeats, separated by one second; latest state is read for each repeat. This uses RFC 8966 §3.7.2's bounded-repeat alternative. |
 | R02 | Implemented | Sequence-only and insignificant metric changes do not trigger advertisements. Requests still receive current values. Withdrawals keep the current sequence; origin metric increases still advance it for feasibility. |
@@ -110,36 +70,13 @@ A08's original 43-byte reproduction is retained here for traceability:
 | V04 | Engine checks positive finite link cost, strict metric increase and infinity propagation even with custom algebras, on admission and recomputation. Arbitrary custom policy quality remains the host's responsibility. |
 | V05 | Maintained A01–A08 regressions, pure IPv4 E2E, live family switching and independent babeld RTT are added. MAC and overlapping-source transit coverage is added by `netns-mac-sadr.py`; DTLS remains deferred. |
 | V06 | Closed by maintainer decision on 2026-09-11; no further investigation of historical mixed-soak round 170 is planned. Its cause was not established, and closure does not mean a defect was reproduced or fixed. The old interrupted run and passing fresh-state replay remain historical evidence, separate from new campaigns. |
-| V07 | The 2026-09-11 mixed run observed babeld node 4 reporting three routes installed while its kernel FIB lacked them after a link flap. The 600-second limit expired; diagnostics and cleanup were preserved. The cause is unconfirmed and is not attributed to babel-rs. See [INTEROPERABILITY.md](INTEROPERABILITY.md#mixed-run-kernel-route-mismatch). |
+| V07 | The 2026-09-11 mixed run observed babeld node 4 reporting three routes installed while its kernel FIB lacked them after a link flap. The 600-second limit expired; diagnostics and cleanup were preserved. The cause is unconfirmed and is not attributed to babel-rs. See [Support](../guide/support.md#mixed-run-kernel-route-mismatch). |
 
-`tests/e2e/netns-rfc-boundaries.py` is included in network CI and the VM `all`
-wrapper. At the 0.5.0 audit-fix stage, stable and Rust 1.90 workspace tests passed
-157 cases; strict Clippy and the
-three-archive external-consumer/install check passed without upload. All 15 VM
-scenarios passed across the full run and targeted continuation. Results are recorded in
-[TESTING.md](TESTING.md) and [INTEROPERABILITY.md](INTEROPERABILITY.md).
-Cross-platform CI definitions are not evidence that those jobs ran for this
-unpublished tree. Packaging tests do not establish protocol conformance.
-
-## Coverage by specification
-
-| Specification | Implemented coverage / remaining boundary |
-| --- | --- |
-| 8966 §§3.1–3.4, §4 | Both control families, multicast/port/admission rules, packet format, bounded output, independent Hello histories, IHU, Ack replies. No general Ack controller. |
-| 8966 §§3.5–3.8 | Candidate/source/request tables, feasibility, selection, hold/expiry, periodic/urgent/repeated updates, request forwarding and bounded retries. Custom policy and identity are explicit host contracts. |
-| 8966 §5/§6, appendices | Assigned constants, wired/ETX/additive defaults and minimum filters. RFC 8967 MAC satisfies the authentication recommendation; DTLS is deferred. Configurable hysteresis is an implementation policy. |
-| 9079 | Source-specific wire model, canonical keys, wildcard/mandatory-sub-TLV behavior and overlapping IPv4/IPv6 Linux source views. Forwarding and integration boundaries are C04. |
-| 9229 | AE 4 context/next-hop handling, request/retraction semantics, ordinary IPv4 preference and overrides, capability gating and tested Linux ICMPv4 behavior. |
-| 9616 | Timestamp exchange, wrap/age validation, atomic packetization, boundary timestamps, default sample EMA and bounded delay penalty; independent peer exchange tested. |
-| 8967 / 9467 | HMAC-SHA256/BLAKE2s-128, challenge/restart handling, strict authentication and separate unicast/multicast receive counters. The optional replay-window alternative is not selected; see C02. |
-| 8968 | Deferred without a target version; no DTLS transport, credentials or sessions (C03). |
-
-## Existing regression index
+## Historical regression index
 
 These stable IDs preserve links to the previous test inventory. Each row is
 evidence for its tested subset, not an unconditional conformance result. The
-A/C/R/V register above takes precedence where a gap is identified. Some wire
-tests use independent raw fixtures; round-trip tests share the codec and cannot
+A/C/R/V register above records gaps identified in that audit. Some wire tests use independent raw fixtures; round-trip tests share the codec and cannot
 establish interoperability by themselves.
 
 | ID | RFC section | Tested subset / limitation | Evidence |

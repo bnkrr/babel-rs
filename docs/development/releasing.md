@@ -2,28 +2,13 @@
 
 This is the maintainer workflow for freezing source, verifying packages, and
 publishing the three crates. User installation and deployment instructions are
-in the [README](../README.md) and [configuration guide](CONFIGURATION.md).
+in the [README](../../README.md) and [configuration guide](../guide/configuration.md).
 
-## Current release state — 2026-09-11
-
-The local candidate is **0.6.0**, intended for use within the documented support
-scope. A local source freeze fixes the content to publish; it does not upload
-crates, create a remote release, or establish hosted-CI success.
-
-| Stage | Evidence / remaining action |
-| --- | --- |
-| Implementation | Protocol/runtime/daemon source at `8b9a416`; freeze preparation updates documentation, package description, and example configuration. |
-| Local validation | Stable and Rust 1.90 each passed 180 workspace tests; Clippy, doctests, release tooling, and scoped Linux MAC/SADR/IPv4 checks passed. Archive-only consumers and daemon installation passed before the documentation freeze; rerun package checks on the final clean candidate. |
-| Long-running mixed validation | 7.5-hour budget completed; 511 verified mutation rounds across two attempts, one unattributed babeld kernel-FIB mismatch, both cleanups passed. See [the full result](TESTING.md#2026-09-11-mixed-campaign). |
-| Hosted verification | The frozen 0.6.0 commit still needs CI, including Windows/macOS protocol checks and network workflows. The remote main branch was `5e3b564` when last checked. |
-| Registry | `babel-protocol`, `babel-router`, and `babel-rs` each returned HTTP 404 from the public crates.io API on 2026-09-11. No version of these crates was published by this preparation. |
-| Automated publishing | The [v0.5.0 workflow](https://github.com/bnkrr/babel-rs/actions/runs/34486917845) passed validation, then failed with `No Trusted Publishing config found for repository bnkrr/babel-rs`. Upload and registry verification were skipped. |
-
-A timed mixed campaign with a retained failure must not be described as a clean
-pass. The observed peer mismatch is documented in
-[INTEROPERABILITY.md](INTEROPERABILITY.md#mixed-run-kernel-route-mismatch); its
-cause is not established. DTLS and a general daemon filter language are outside
-this version's scope, not unfinished requirements for its local freeze.
+Version 0.6.0 uses ordinary 0.x compatibility rules and is intended for the
+[documented support scope](../guide/support.md). Completed checks and the last registry/CI
+snapshot are in the dated [validation record](../history/0.6.0-validation.md).
+Before any upload, check live external state and validate the final candidate;
+a previous local freeze is not a registry publication or hosted-CI result.
 
 ## Freeze a local candidate
 
@@ -37,7 +22,7 @@ this version's scope, not unfinished requirements for its local freeze.
    candidate. Record the exact commit, toolchains, test results, Cargo.lock
    checksum, package checksums, and installed binary checksum with the artifacts.
 4. Mark the validated commit with a local annotated freeze tag such as
-   `freeze/0.6.0-20260911`. Freeze tags are local bookkeeping and do not match the
+   `freeze/0.6.0-20260911-2`. Freeze tags are local bookkeeping and do not match the
    publishing workflow's `v*` trigger. Keep the source and artifacts available
    for review. A later content change requires a new candidate/tag and the
    checks affected by that change; do not move an existing freeze tag.
@@ -51,8 +36,8 @@ campaign solely because prose changed.
 
 Use Rust 1.90+ for source compatibility, Cargo 1.96+ for workspace packaging,
 and Python 3.11+ for the archive consumer. Run the appropriate checks from
-[CONTRIBUTING.md](../CONTRIBUTING.md) and the affected Linux suites from
-[TESTING.md](TESTING.md). Then, from a clean candidate checkout:
+[CONTRIBUTING.md](../../CONTRIBUTING.md) and the affected Linux suites from
+[Testing](testing.md). Then, from a clean candidate checkout:
 
 ```sh
 python3 tests/release/check-packages.py --output /tmp/babel-release-check

@@ -27,18 +27,18 @@ python3 -m unittest discover -s tests/release -p 'test_*.py'
 Run checks appropriate to the change. Protocol fixes should include a regression
 that fails on the old behavior, preferably with independent wire fixtures or
 an oracle. Network changes need the affected Linux forwarding/lifecycle checks;
-see [TESTING.md](docs/TESTING.md). Documentation changes need valid commands,
+see [Testing](docs/development/testing.md). Documentation changes need valid commands,
 configuration examples, and links. Package contents or public examples also
-need the [archive-consumer check](docs/RELEASING.md#verify-before-uploading).
+need the [archive-consumer check](docs/development/releasing.md#verify-before-uploading).
 
 ## Compatibility and releases
 
 Keep protocol decisions in `babel-protocol`, runtime ownership in `babel-router`,
 and Linux daemon configuration/export in `babel-rs`. Public API, configuration,
-and behavioral changes follow [SUPPORT.md](docs/SUPPORT.md#api-compatibility).
+and behavioral changes follow [Support](docs/guide/support.md#api-compatibility).
 Document user-visible changes in [CHANGELOG.md](CHANGELOG.md).
 
-Release preparation and local freezes follow [RELEASING.md](docs/RELEASING.md).
+Release preparation and local freezes follow [Releasing](docs/development/releasing.md).
 A frozen candidate records its source and validation evidence. Any later change
 requires a new candidate and the checks affected by that change.
 

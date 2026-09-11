@@ -69,7 +69,7 @@ device_only = false
 manage_rules = true
 
 # Ordinary routes use a dedicated table. The host must add IPv4/IPv6 lookup
-# rules for it; see docs/CONFIGURATION.md. Reserved tables 0/253/254/255 are rejected.
+# rules for it; see docs/guide/configuration.md. Reserved tables 0/253/254/255 are rejected.
 [[export.views]]
 table = 20000
 

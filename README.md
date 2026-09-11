@@ -15,12 +15,13 @@ It has passed local protocol/runtime tests, package-consumer checks, and Linux
 forwarding and recovery tests. A 7.5-hour mixed run with babeld and BIRD verified
 511 topology-change rounds across two attempts; one attempt ended with an
 unresolved kernel-route mismatch on a babeld node. See the
-[validation results and known limitations](docs/CONFORMANCE.md) before deploying.
+[validation record](docs/history/0.6.0-validation.md) and
+[known limitations](docs/guide/support.md#known-observations) before deploying.
 
 Most of this project's code was written by **OpenAI Codex**. Tests and RFC review
 provide evidence, not a guarantee of correctness or an independent security
 audit. Pin the version you deploy, test it on your topology, and keep a rollback
-path. The [compatibility policy](docs/SUPPORT.md#api-compatibility) describes which
+path. The [compatibility policy](docs/guide/support.md#api-compatibility) describes which
 updates may change public APIs, configuration, or behavior.
 
 ## Choose a component
@@ -32,7 +33,7 @@ updates may change public APIs, configuration, or behavior.
 | [`babel-rs`](crates/babel-rs) | Standalone daemon, TOML configuration, Linux routes and policy rules, local control commands | Linux |
 
 Rust **1.90 or newer** is required. The libraries do not depend on the standalone
-daemon. See [platform support](docs/SUPPORT.md) for the tested scope.
+daemon. See [platform support](docs/guide/support.md) for the tested scope.
 
 ## Capabilities
 
@@ -47,7 +48,7 @@ daemon. See [platform support](docs/SUPPORT.md) for the tested scope.
 - Library hooks for route admission, announcements, metrics, persistence, and export.
 
 The implementation covers RFC 8966, 9079, 9229, 9616, and MAC authentication from
-RFC 8967/9467 within the boundaries in the [RFC audit](docs/CONFORMANCE.md).
+RFC 8967/9467 within the boundaries in the [protocol coverage](docs/development/conformance.md).
 DTLS is not implemented. Kernel routes are not automatically redistributed;
 local origins are explicit. The daemon does not yet expose a general TOML route
 filter language; embedders use `RoutePolicy`.
@@ -101,7 +102,7 @@ sudo ip -6 rule add priority 20000 table 20000
 
 Choose unused table IDs and priorities appropriate for your host. The daemon
 manages source-specific rules separately; it does not create or remove these
-ordinary-table lookup rules. See [configuration](docs/CONFIGURATION.md#host-networking-and-export-tables)
+ordinary-table lookup rules. See [configuration](docs/guide/configuration.md#host-networking-and-export-tables)
 for ownership and cleanup.
 
 Validate and run:
@@ -123,9 +124,9 @@ sudo target/release/babel-rs shutdown
 
 Control commands use `/run/babel-rs/babel-rs.ctl` by default. For a supervised
 installation, use the supplied [systemd unit](packaging/systemd/babel-rs.service)
-and the [installation instructions](docs/CONFIGURATION.md#systemd-installation).
-Registry publication status and versioned `cargo install` instructions are in
-[RELEASING.md](docs/RELEASING.md).
+and the [installation instructions](docs/guide/configuration.md#systemd-installation).
+Versioned `cargo install` and publication instructions are in
+[Releasing](docs/development/releasing.md).
 
 ## Embed the libraries
 
@@ -142,26 +143,20 @@ cargo build --locked -p babel-router --examples
 
 Start with the [protocol example](crates/babel-protocol/README.md),
 [runtime example](crates/babel-router/README.md), and
-[embedding guide](docs/EMBEDDING.md). Retain the runtime owner for as long as
+[embedding guide](docs/guide/embedding.md). Retain the runtime owner for as long as
 routing should run, and await `shutdown()` for orderly cleanup. Hosts own stable
 identity, restart sequence policy, and their forwarding backend.
 
 ## Documentation
 
-| Topic | Guide |
-| --- | --- |
-| Configuration, installation, reload, and restart | [Configuration](docs/CONFIGURATION.md) |
-| Control commands and status fields | [Control API](docs/CONTROL.md) |
-| Shared-key authentication and rotation | [MAC authentication](docs/MAC.md) |
-| Overlapping source prefixes and policy tables | [Source-specific routing](docs/SADR.md) |
-| Public library lifecycle and extension points | [Embedding](docs/EMBEDDING.md) |
-| Platforms, compatibility, and deployment limits | [Support](docs/SUPPORT.md) |
-| RFC coverage and validation status | [Conformance](docs/CONFORMANCE.md) |
-| Tested peers and known interoperability observations | [Interoperability](docs/INTEROPERABILITY.md) |
-| Resource limits and overload behavior | [Capacity](docs/CAPACITY.md) |
-| Implementation structure | [Architecture](docs/ARCHITECTURE.md) |
-| Reproducing tests and package checks | [Testing](docs/TESTING.md) |
-| Version changes and migration | [Changelog](CHANGELOG.md) |
+Start with the [documentation index](docs/README.md) to choose a guide by task:
+
+- **Run and operate:** [Configuration](docs/guide/configuration.md),
+  [Control commands](docs/guide/control.md), and [Support / tested peers](docs/guide/support.md).
+- **Embed:** [Library contracts](docs/guide/embedding.md) and
+  [protocol coverage](docs/development/conformance.md).
+- **Contribute or release:** [Testing](docs/development/testing.md),
+  [release procedure](docs/development/releasing.md), and [changelog](CHANGELOG.md).
 
 ## Help and contributions
 

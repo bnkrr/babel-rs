@@ -14,7 +14,7 @@ Version 0.6.0 is usable within the documented support scope. Most project code
 was written by **OpenAI Codex**. Automated tests and RFC review do not guarantee
 correctness or replace an independent security audit. Pin deployed versions,
 validate upgrades on your topology, and review the
-[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md#api-compatibility):
+[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/support.md#api-compatibility):
 breaking API or behavior changes use a new 0.x minor version.
 
 ## Example
@@ -73,16 +73,16 @@ and reattaching the interface. DTLS is not implemented.
 
 ## Documentation
 
-- [Embedding API and completion contracts](https://github.com/bnkrr/babel-rs/blob/main/docs/EMBEDDING.md)
-- [MAC authentication](https://github.com/bnkrr/babel-rs/blob/main/docs/MAC.md)
-- [Source-specific forwarding](https://github.com/bnkrr/babel-rs/blob/main/docs/SADR.md)
-- [Validation and known limits](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFORMANCE.md)
+- [Embedding API and completion contracts](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/embedding.md)
+- [MAC authentication](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/mac.md)
+- [Source-specific forwarding](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/sadr.md)
+- [Validation and known limits](https://github.com/bnkrr/babel-rs/blob/main/docs/development/conformance.md)
 - [Changelog](https://github.com/bnkrr/babel-rs/blob/main/CHANGELOG.md)
 - [Issues](https://github.com/bnkrr/babel-rs/issues)
 
 Generate the API reference with `cargo doc -p babel-router --no-deps`.
-Registry availability is recorded in the
-[release guide](https://github.com/bnkrr/babel-rs/blob/main/docs/RELEASING.md).
+Publication instructions are in the
+[release guide](https://github.com/bnkrr/babel-rs/blob/main/docs/development/releasing.md).
 
 ## License
 

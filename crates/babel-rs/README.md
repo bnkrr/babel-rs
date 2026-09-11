@@ -16,7 +16,7 @@ Version 0.6.0 is usable within the documented support scope. Most project code
 was written by **OpenAI Codex**. Automated tests and RFC review do not guarantee
 correctness or replace an independent security audit. Pin deployed versions,
 validate upgrades on your topology, and review the
-[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md#api-compatibility):
+[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/support.md#api-compatibility):
 breaking API or behavior changes use a new 0.x minor version.
 
 ## Install and run
@@ -27,8 +27,8 @@ Linux and Rust 1.90 or newer are required. For a published version:
 cargo install babel-rs --version '=0.6.0' --locked
 ```
 
-Check the [publication status](https://github.com/bnkrr/babel-rs/blob/main/docs/RELEASING.md)
-for registry availability. Before publication, build from the repository with
+The dated [validation record](https://github.com/bnkrr/babel-rs/blob/main/docs/history/0.6.0-validation.md)
+records the last publication check. Before publication, build from the repository with
 `cargo build --release --locked -p babel-rs` and use `target/release/babel-rs`.
 
 Start from the packaged `examples/babel-rs.toml` or the
@@ -52,7 +52,7 @@ sudo babel-rs shutdown
 The default control socket is `/run/babel-rs/babel-rs.ctl`. The example exports
 ordinary routes to table 20000. Arrange host-owned IPv4/IPv6 policy rules that
 query that table before the main table; see
-[table setup](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFIGURATION.md#host-networking-and-export-tables).
+[table setup](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/configuration.md#host-networking-and-export-tables).
 Each daemon owns an exclusive route protocol number in its network namespace
 and leaves other protocols' routes alone.
 
@@ -73,11 +73,11 @@ and leaves other protocols' routes alone.
 
 ## Documentation
 
-- [Configuration and systemd installation](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFIGURATION.md)
-- [Control commands and health fields](https://github.com/bnkrr/babel-rs/blob/main/docs/CONTROL.md)
-- [MAC authentication](https://github.com/bnkrr/babel-rs/blob/main/docs/MAC.md)
-- [Source-specific routing](https://github.com/bnkrr/babel-rs/blob/main/docs/SADR.md)
-- [Tested peers and known observations](https://github.com/bnkrr/babel-rs/blob/main/docs/INTEROPERABILITY.md)
+- [Configuration and systemd installation](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/configuration.md)
+- [Control commands and health fields](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/control.md)
+- [MAC authentication](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/mac.md)
+- [Source-specific routing](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/sadr.md)
+- [Tested peers and known observations](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/support.md)
 - [Changelog](https://github.com/bnkrr/babel-rs/blob/main/CHANGELOG.md)
 - [Issues](https://github.com/bnkrr/babel-rs/issues)
 

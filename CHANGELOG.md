@@ -3,8 +3,8 @@
 ## 0.6.0 — Local freeze, 2026-09-11
 
 This version is usable within the documented support scope. This date identifies
-the local source freeze, not a crates.io publication. Registry and hosted-CI
-status are recorded in [RELEASING.md](docs/RELEASING.md).
+the local source freeze, not a crates.io publication. A dated registry and hosted-CI
+snapshot is recorded in [0.6.0 validation](docs/history/0.6.0-validation.md).
 
 - Implement optional RFC 8967 MAC authentication (HMAC-SHA256/BLAKE2s-128),
   RFC 9467 split replay counters, challenge/restart handling, and live key rotation.
@@ -12,7 +12,7 @@ status are recorded in [RELEASING.md](docs/RELEASING.md).
 - Support overlapping IPv4/IPv6 SADR sources through inherited destination tables,
   automatic source-view allocation, withdrawal holds, and unsupported-source
   filtering in static configurations. Source rule priorities now follow prefix
-  specificity; existing overrides must be migrated as described in docs/SADR.md.
+  specificity; existing overrides must be migrated as described in docs/guide/sadr.md.
 - Add independent digest/babeld interop, MAC rotation/restart, destination-first
   oracle, and actual source-specific transit forwarding regressions. DTLS is deferred.
 - Rewrite project and crate introductions for standalone routing and library
@@ -20,13 +20,16 @@ status are recorded in [RELEASING.md](docs/RELEASING.md).
   The daemon example now generates its Router-ID and uses generic interfaces.
   Installation documents the host-owned lookup rules needed for its dedicated
   ordinary table; source-rule ownership remains unchanged.
+- Organize documentation into user guides, development references, and dated
+  evidence, with a [task-oriented index](docs/README.md). Consolidate peer support
+  and remove duplicated architecture, test, and release-status material.
 - Record the 7.5-hour mixed campaign: 511 verified mutation rounds across two
   attempts, one unresolved babeld internal-state/kernel-FIB mismatch, and clean
   termination. This is not a clean full-campaign pass.
 
 Migration from 0.5: overlapping source views no longer need disjoint prefixes.
 Automatic source views are enabled when the daemon manages rules; review table
-allocation and source-rule priorities in [SADR.md](docs/SADR.md). MAC is optional;
+allocation and source-rule priorities in [SADR](docs/guide/sadr.md). MAC is optional;
 keyed interfaces start in strict mode, and changing keys reattaches the affected
 interface. Existing ordinary export tables continue to work when their host-owned lookup
 rules are configured. Example/documentation changes do not change how an
