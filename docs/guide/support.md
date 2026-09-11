@@ -24,7 +24,7 @@ Other kernels, architectures, and network arrangements need validation in the
 target environment.
 
 Binary release jobs target Linux x86_64 and ARM64 with static musl linking.
-Each native runner checks the packaged executable and three-node forwarding
+Each native runner checks the packaged executable and three-node route convergence
 before publication. A bundle needs no Rust toolchain or system musl installation;
 static linking does not remove the kernel and network requirements below.
 See [binary installation](../../packaging/README.md) and the selected version's

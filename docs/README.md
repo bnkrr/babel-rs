@@ -8,6 +8,7 @@ records preserve evidence from a particular version and date.
 
 | Task | Guide | What it covers |
 | --- | --- | --- |
+| Install a precompiled Linux daemon | [Binary bundles](../packaging/README.md) | Architecture selection, checksums, installation and upgrades |
 | Install or configure the daemon | [Configuration](guide/configuration.md) | Host networking, route-table ownership, systemd, interfaces, metrics, reload and restart |
 | Inspect or administer an instance | [Control](guide/control.md) | CLI commands, local protocol, health fields, counters and completion limits |
 | Embed a library | [Embedding](guide/embedding.md) | Validation, owner/handle lifetime, route policy, exporters and persistence |
@@ -27,7 +28,7 @@ Support. MAC, SADR, and Capacity are focused references when those features matt
 | Understand ownership and data flow | [Architecture](development/architecture.md) |
 | Check implemented RFC behavior and alternatives | [Protocol coverage](development/conformance.md) |
 | Reproduce local, network, steady-state or endless checks | [Testing](development/testing.md) |
-| Freeze source, verify archives or publish crates | [Releasing](development/releasing.md) |
+| Freeze source, release binaries or publish crates | [Releasing](development/releasing.md) |
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for contribution expectations and basic
 checks, and [CHANGELOG.md](../CHANGELOG.md) for version changes and migration.
