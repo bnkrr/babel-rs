@@ -13,7 +13,7 @@ and releases its client slot. This bounds client I/O, not command execution.
 Immediately after accept, the server sends:
 
 ```json
-{"type":"hello","api_version":1,"server_version":"0.5.0","capabilities":["status","interfaces","neighbors","routes","reload","shutdown"]}
+{"type":"hello","api_version":1,"server_version":"0.6.0","capabilities":["status","interfaces","neighbors","routes","reload","shutdown"]}
 ```
 
 A client then sends requests of this form:

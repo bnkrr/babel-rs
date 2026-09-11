@@ -1,6 +1,7 @@
 # RFC conformance and audit map
 
-This is the central implementation-status register for 0.6.0 (unreleased).
+This is the implementation and verification register for babel-rs 0.6.0.
+Publication and local source freezes are tracked in [RELEASING.md](RELEASING.md).
 The 2026-09-10 source audit examined commit
 `b403ad8168269bbe49e7296df99018ae41d971c8` and reproduced A01–A08. The
 0.5.0 follow-up commit `d60b4ac` fixes those defects and adds maintained regressions.
@@ -21,14 +22,18 @@ no upload is performed. Linux VM evidence covers both MAC algorithms against
 babeld 1.13.1, IPv4/IPv6 rotation and restart, overlapping-source transit pings,
 withdrawal/recovery, static-source filtering and owned-state cleanup. Existing
 IPv4/control-family/RTT/ICMPv4, BIRD SADR and dynamic-MTU regressions also pass.
+The later [mixed campaign](TESTING.md#2026-09-11-mixed-campaign) provides 7.5 hours
+of aggregate running evidence with one unattributed peer kernel-FIB mismatch.
+The source used for those protocol/runtime checks is `8b9a416`; the local freeze
+adds documentation, package-description, and example-configuration changes.
 
-## Remaining work — 2026-09-11
+## Release verification and deferred scope — 2026-09-11
 
 | Item | Status / next step |
 | --- | --- |
 | Registry publication | The [v0.5.0 release run](https://github.com/bnkrr/babel-rs/actions/runs/34486917845) passed all validation jobs, then failed to acquire a crates.io token because no matching Trusted Publishing configuration existed. Upload and registry-consumer steps were skipped. The three crate names still returned HTTP 404 on 2026-09-11. Complete the initial publication and publisher setup described in [RELEASING.md](RELEASING.md). |
-| Hosted 0.6.0 verification | Local stable/MSRV, archive and scoped VM checks above passed. The new commit still needs hosted CI, including Windows/macOS protocol tests and the full network suite; 0.5.0 hosted successes do not validate the new MAC code. |
-| Accumulated-state testing | Historical mixed-soak round 170 remains unattributed (V06). Retain this investigation and run the new version through a bounded long-duration mixed test with state/history diagnostics. A fresh-state replay or short regression cannot close it. |
+| Hosted 0.6.0 verification | Local stable/MSRV, archive and scoped VM checks passed. The final frozen commit needs hosted CI, including Windows/macOS protocol tests and the full network suite, before publication. Older hosted successes do not validate the new MAC code. |
+| Accumulated-state testing | The 7.5-hour mixed campaign completed its runtime budget with 511 verified mutation rounds across two attempts. Seed 20260911 failed at round 64 on a babeld kernel-FIB mismatch; seed 20260912 verified 448 rounds before the planned stop. Both cleanups passed. The failure remains unattributed; this is not a clean campaign pass. See [TESTING.md](TESTING.md#2026-09-11-mixed-campaign) and V07. |
 | Daemon filter configuration | The public `RoutePolicy` API is implemented. A general TOML filter language, metric rewriting and per-neighbor export remain optional future features, with no release commitment (C05). |
 | DTLS | Deferred without a target version (C03). Revisit when deployment requirements and a suitable backend have been validated; it is not part of 0.6.0. |
 
@@ -104,7 +109,8 @@ A08's original 43-byte reproduction is retained here for traceability:
 | V03 | Receive-boundary timestamps and send timestamps use microseconds. Queued receive events use current processing time for protocol timers, preserving clock order; an explicit timestamp event carries original arrival time. Atomic timestamp groups and existing queue/backpressure/deadline tests cover the identified paths. A heavily overloaded host can still miss deadlines; counters report this and cannot prove arbitrary-host timing. |
 | V04 | Engine checks positive finite link cost, strict metric increase and infinity propagation even with custom algebras, on admission and recomputation. Arbitrary custom policy quality remains the host's responsibility. |
 | V05 | Maintained A01–A08 regressions, pure IPv4 E2E, live family switching and independent babeld RTT are added. MAC and overlapping-source transit coverage is added by `netns-mac-sadr.py`; DTLS remains deferred. |
-| V06 | Historical mixed-soak round 170 remains unattributed. A fresh-state replay cannot explain an earlier state/history failure. New bounded network runs are regression evidence, not proof of its root cause. |
+| V06 | Closed by maintainer decision on 2026-09-11; no further investigation of historical mixed-soak round 170 is planned. Its cause was not established, and closure does not mean a defect was reproduced or fixed. The old interrupted run and passing fresh-state replay remain historical evidence, separate from new campaigns. |
+| V07 | The 2026-09-11 mixed run observed babeld node 4 reporting three routes installed while its kernel FIB lacked them after a link flap. The 600-second limit expired; diagnostics and cleanup were preserved. The cause is unconfirmed and is not attributed to babel-rs. See [INTEROPERABILITY.md](INTEROPERABILITY.md#mixed-run-kernel-route-mismatch). |
 
 `tests/e2e/netns-rfc-boundaries.py` is included in network CI and the VM `all`
 wrapper. At the 0.5.0 audit-fix stage, stable and Rust 1.90 workspace tests passed

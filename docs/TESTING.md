@@ -3,7 +3,9 @@
 The standard Rust workflow runs unit/integration tests, executable rustdoc
 examples, Clippy and documentation checks, plus the Rust 1.90 compatibility
 check. The network workflows build the release daemon and exercise it inside
-disposable Linux namespaces; the daemon uses production protocol defaults.
+disposable Linux namespaces. Fixtures declare any interval overrides; recovery
+and steady-state scenarios use the normal 4-second Hello / 16-second Update
+intervals unless explicitly configured otherwise.
 
 The [2026-09-10 audit follow-up](CONFORMANCE.md) adds maintained regressions in
 `crates/babel-protocol/tests/rfc_audit_regressions.rs`, covering structured prefix
@@ -220,8 +222,47 @@ completed rounds. At interruption BIRD node 17 lacked a route in both its RIB
 and FIB; that observation alone does not identify a babel-rs or kernel-export
 bug. The 2026-09-10 fresh-state replay (32 slots, minimum 16, degree 4,
 bottleneck, seed 20260908, mix babel-rs=2,bird=1,babeld=1) passed round 170 and
-cleanup. Historical accumulated-state behavior remains unproven; neither run
-is reported as a completed mixed endless pass.
+cleanup. The historical investigation was closed on 2026-09-11 without
+attribution. No further round-170 investigation is planned. Closure does not
+establish its cause or turn either historical run into a completed mixed
+endless pass. The later campaign below is independent evidence.
+
+## 2026-09-11 mixed campaign
+
+A 7.5-hour campaign ran from 2026-09-10 17:00:41 to 2026-09-11 00:30:41 UTC
+(01:00:41–08:30:41 on September 11 in UTC+08:00). It used babel-rs 0.6.0 from
+commit `8b9a4161c93156e35af4f494c71ce604c7772f4f`, with binary SHA-256
+`0f2c64931d82616da7d5ccd4b141af1f630832878ba20e820544cb993772298d`,
+babeld 1.13.1, BIRD 3.1.7, and Linux 6.12.96+deb13-amd64.
+
+Configuration: 16–32 active nodes, average degree 4, bottleneck topology, weighted
+implementation mix `babel-rs=2,bird=1,babeld=1`, two changes per round, 600-second
+settle limit, 10-second stable interval, and 16 rotating ping pairs. The harness
+checks graph reachability, all active kernel FIBs, forwarding loops, and actual
+IPv6 pings; babel-rs also exposes its selected RIB and exporter health.
+
+| Attempt | Seed | Initial babel-rs / BIRD / babeld | Verified mutation rounds | End condition | Cleanup |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 20260911 | 18 / 5 / 9 | 63 | Round 64: babeld node 4 kernel-FIB mismatch exceeded 600 seconds; exit 1 | PASS |
+| 2 | 20260912 | 17 / 11 / 4 | 448 | Scheduled stop during round 449; exit 130 | PASS |
+
+Both initial topology verifications also passed. The total is 511 verified
+mutation rounds across separate attempts, not a single uninterrupted 511-round
+pass. The new [interop observation](INTEROPERABILITY.md#mixed-run-kernel-route-mismatch)
+remains unattributed. This run did not identify a confirmed babel-rs defect,
+and it did not pass without failures.
+
+The VM service imposed a 27000-second runtime limit, including setup, and a
+110-second stop/cleanup allowance. Reaching that limit produced systemd
+`Result=timeout` and harness `operator requested stop`; that planned stop is
+separate from the first attempt's actual audit failure. Both outcomes report
+successful cleanup, and a later live check found no run processes or namespaces.
+Peak aggregate service memory was 141316096 bytes (about 135 MiB). That peak is
+an observation, not a memory-leak bound or a capacity guarantee.
+
+Manifests, events, failure snapshots, per-node diagnostics, and outcomes were
+retained. This campaign covered ordinary IPv6 /128 routing and churn. MAC,
+SADR, and IPv4 retain the focused validation described below.
 
 ## RFC boundary networks
 

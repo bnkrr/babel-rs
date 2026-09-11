@@ -1,45 +1,86 @@
 # babel-rs
 
-Independent Linux Babel routing daemon with dynamic interface attachment,
-IPv4/IPv6 routing, source-specific policy views, optional RTT costs, atomic
-configuration validation, a local control socket and reconciled netlink export.
+A Linux Babel routing daemon with IPv4/IPv6 routing, overlapping source-specific
+routes, optional MAC authentication, dynamic interfaces, and a local control API.
 
-Most of this project's code was written by **OpenAI Codex**. The project is
-**pre-1.0**: public APIs, configuration, and behavior may change in breaking ways
-between 0.x minor releases. Pin the version you deploy, review the
-[changelog](https://github.com/bnkrr/babel-rs/blob/main/CHANGELOG.md), and test
-upgrades in your own environment before production use. See the
-[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md#api-compatibility).
+The daemon runs over existing interfaces and reconciles learned routes through
+netlink. The host owns interface creation, addresses, forwarding, and firewall
+policy. babeld and BIRD are supported peers, not runtime dependencies.
 
-Install with `cargo install babel-rs --locked`. Start from the packaged
-`examples/babel-rs.toml` or the
+For library integration, use `babel-router` for Tokio or `babel-protocol` for
+a synchronous engine. See the [project overview](https://github.com/bnkrr/babel-rs).
+
+## Status and compatibility
+
+Version 0.6.0 is usable within the documented support scope. Most project code
+was written by **OpenAI Codex**. Automated tests and RFC review do not guarantee
+correctness or replace an independent security audit. Pin deployed versions,
+validate upgrades on your topology, and review the
+[compatibility policy](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md#api-compatibility):
+breaking API or behavior changes use a new 0.x minor version.
+
+## Install and run
+
+Linux and Rust 1.90 or newer are required. For a published version:
+
+```sh
+cargo install babel-rs --version '=0.6.0' --locked
+```
+
+Check the [publication status](https://github.com/bnkrr/babel-rs/blob/main/docs/RELEASING.md)
+for registry availability. Before publication, build from the repository with
+`cargo build --release --locked -p babel-rs` and use `target/release/babel-rs`.
+
+Start from the packaged `examples/babel-rs.toml` or the
 [configuration example](https://github.com/bnkrr/babel-rs/blob/main/examples/babel-rs.toml).
+Edit interface names and origin prefixes for the host before starting:
 
 ```sh
 babel-rs check --config babel-rs.toml
 sudo babel-rs run --config babel-rs.toml
-sudo babel-rs status --socket /run/babel-rs/babel-rs.ctl
 ```
 
-Linux is required. `control_transport = "ipv6"` defaults to link-local IPv6;
-`"ipv4"` uses an IPv4 interface address and works with IPv6 disabled. Both use
-UDP/6696 and can carry IPv4 and IPv6 routes when appropriate next hops exist. `ipv4_next_hop = "auto"` prefers ordinary IPv4 on numbered interfaces,
-otherwise RFC 9229; `ipv4` and `ipv6` override this per interface.
+From another terminal:
 
-This package is the executable. Embed `babel-router` for a Tokio runtime or
-`babel-protocol` for a sans-I/O engine. No babeld or BIRD runtime dependency.
+```sh
+sudo babel-rs status
+sudo babel-rs neighbors
+sudo babel-rs routes
+sudo babel-rs shutdown
+```
 
-Optional RFC 8967 MAC authentication supports HMAC-SHA256, BLAKE2s-128 and live
-key rotation; configuring keys enables strict reception. DTLS is deferred.
-Linux SADR supports overlapping source prefixes and automatically materializes
-complete source tables with destination-first forwarding. Static configurations
-filter uncovered sources. Kernel routes are not automatically redistributed:
-configure origins explicitly. Abrupt restarts may require minutes to recover
-retained sequence history.
+The default control socket is `/run/babel-rs/babel-rs.ctl`. The example exports
+ordinary routes to table 20000. Arrange host-owned IPv4/IPv6 policy rules that
+query that table before the main table; see
+[table setup](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFIGURATION.md#host-networking-and-export-tables).
+Each daemon owns an exclusive route protocol number in its network namespace
+and leaves other protocols' routes alone.
 
-[Configuration](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFIGURATION.md) ·
-[Control API](https://github.com/bnkrr/babel-rs/blob/main/docs/CONTROL.md) ·
-[Conformance](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFORMANCE.md) ·
-[Support](https://github.com/bnkrr/babel-rs/blob/main/docs/SUPPORT.md)
+## Deployment notes
 
-MIT licensed; see LICENSE.
+- Interfaces must be up. IPv6 control needs a link-local address; IPv4 control
+  needs an interface IPv4 address and works with IPv6 disabled. Peers must agree
+  on the control family and permit UDP/6696.
+- The host supplies routes to local origins and enables forwarding/firewall
+  policy for transit traffic. Kernel routes are not automatically redistributed.
+- Configured MAC keys enable strict authentication. MAC protects routing
+  messages, not data traffic or confidentiality. DTLS is not implemented.
+- Source views support overlapping prefixes and destination-first lookup.
+  Integration with connected/static routes and other Linux policy rules belongs
+  to the host. Netlink reconciliation is not an atomic FIB transaction.
+- Abrupt restart can require minutes to recover retained sequence history.
+  Await orderly shutdown where possible and monitor export health and forwarding.
+
+## Documentation
+
+- [Configuration and systemd installation](https://github.com/bnkrr/babel-rs/blob/main/docs/CONFIGURATION.md)
+- [Control commands and health fields](https://github.com/bnkrr/babel-rs/blob/main/docs/CONTROL.md)
+- [MAC authentication](https://github.com/bnkrr/babel-rs/blob/main/docs/MAC.md)
+- [Source-specific routing](https://github.com/bnkrr/babel-rs/blob/main/docs/SADR.md)
+- [Tested peers and known observations](https://github.com/bnkrr/babel-rs/blob/main/docs/INTEROPERABILITY.md)
+- [Changelog](https://github.com/bnkrr/babel-rs/blob/main/CHANGELOG.md)
+- [Issues](https://github.com/bnkrr/babel-rs/issues)
+
+## License
+
+MIT; see the packaged LICENSE.

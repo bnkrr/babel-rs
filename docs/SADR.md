@@ -20,7 +20,7 @@ source_table_base = 1000000
 source_rule_priority = 10000
 
 [[export.views]]
-table = 20000
+table = 20000 # ordinary routes; the host supplies lookup rules
 
 # Optional: pin one source's table. Other learned source prefixes allocate tables.
 [[export.views]]
@@ -28,7 +28,9 @@ table = 20001
 source = "192.168.0.0/16"
 ```
 
-The settings shown are defaults except the explicit ordinary table. Automatic
+The settings shown are defaults except the explicit view tables. An
+ordinary table needs a host-owned lookup rule; see
+[export table setup](CONFIGURATION.md#host-networking-and-export-tables). Automatic
 views cover every selected source prefix and retained withdrawal. New views
 are fully populated before activating their rules. Parent route changes and
 withdrawals update all descendant tables. An automatic view is retired only

@@ -1,284 +1,176 @@
 # babel-rs
 
-## Development status
+Babel routing in Rust, as a protocol library, an embeddable runtime, and a Linux daemon.
 
-Most of this project's code was written by **OpenAI Codex**.
+babel-rs exchanges routes over existing network interfaces and selects paths as
+links and neighbors change. Use it on Ethernet, wireless, or tunnel networks,
+or embed the routing engine in another application. It manages routing over
+those links; interface creation, address assignment, and tunnel encryption
+belong to the host. babeld and BIRD are interoperability peers, not dependencies.
 
-The project is **pre-1.0**: public APIs, configuration, and behavior may change
-in breaking ways between 0.x minor releases. Pin the version you deploy, review
-the [changelog](CHANGELOG.md), and test upgrades in your own environment before
-production use. See the [compatibility policy](docs/SUPPORT.md#api-compatibility)
-for the versioning contract.
+## Status
 
-## Purpose
+Version **0.6.0 is usable for routing and embedding within the supported scope**.
+It has passed local protocol/runtime tests, package-consumer checks, and Linux
+forwarding and recovery tests. A 7.5-hour mixed run with babeld and BIRD verified
+511 topology-change rounds across two attempts; one attempt ended with an
+unresolved kernel-route mismatch on a babeld node. See the
+[validation results and known limitations](docs/CONFORMANCE.md) before deploying.
 
-`babel-rs` is an independent Rust implementation of the standard Babel
-dynamic routing protocol. It speaks Babel on selected network interfaces,
-maintains neighbour and route state, selects feasible paths, and exposes the
-selected routing information either to an embedding application or to Linux
-routing tables.
+Most of this project's code was written by **OpenAI Codex**. Tests and RFC review
+provide evidence, not a guarantee of correctness or an independent security
+audit. Pin the version you deploy, test it on your topology, and keep a rollback
+path. The [compatibility policy](docs/SUPPORT.md#api-compatibility) describes which
+updates may change public APIs, configuration, or behavior.
 
-See [SUPPORT.md](docs/SUPPORT.md) for platform and compatibility contracts,
-[CHANGELOG.md](CHANGELOG.md) for migration, and [RELEASING.md](docs/RELEASING.md)
-for archive/consumer verification.
+## Choose a component
 
-The [current RFC audit](docs/CONFORMANCE.md) records confirmed implementation
-defects, missing capabilities and unverified cases. The current version is not
-claimed to be a complete RFC implementation; successful tests and packaging
-checks do not resolve those findings.
+| Component | Use it for | Platform |
+| --- | --- | --- |
+| [`babel-protocol`](crates/babel-protocol) | Synchronous packet codec and routing engine; the host supplies time and I/O | OS-independent Rust with `std` |
+| [`babel-router`](crates/babel-router) | Tokio runtime, live interface management, route subscriptions, and a custom exporter | Linux |
+| [`babel-rs`](crates/babel-rs) | Standalone daemon, TOML configuration, Linux routes and policy rules, local control commands | Linux |
 
-It interoperates on the wire with `babeld` and BIRD; neither is a runtime
-dependency.
+Rust **1.90 or newer** is required. The libraries do not depend on the standalone
+daemon. See [platform support](docs/SUPPORT.md) for the tested scope.
 
-The project can be used at three layers:
+## Capabilities
 
-- `babel-protocol` is a sans-I/O packet codec and deterministic protocol engine;
-- `babel-router` is an embeddable Tokio UDP runtime with a route-export API;
-- `babel-rs` is a Linux daemon that reconciles selected routes and policy rules
-  through netlink.
+- IPv4 and IPv6 routing with Babel feasibility, route selection, withdrawal,
+  and recovery; IPv6 or IPv4 control transport per interface.
+- Source-specific routing with overlapping source prefixes and
+  destination-first Linux forwarding.
+- Wired, ETX, and RTT-based link costs; configurable route-selection hysteresis.
+- Optional HMAC-SHA256 or BLAKE2s-128 authentication, replay protection, and key rotation.
+- Dynamic interface attachment, configuration reload, route-table reconciliation,
+  bounded resource queues, and status inspection.
+- Library hooks for route admission, announcements, metrics, persistence, and export.
 
-The protocol and runtime crates contain no Linux netlink or daemon
-configuration types. Applications may embed `babel-router`, subscribe to
-selected-route snapshots, or implement `RouteExporter`; only standalone daemon
-users opt into the Linux backend.
+The implementation covers RFC 8966, 9079, 9229, 9616, and MAC authentication from
+RFC 8967/9467 within the boundaries in the [RFC audit](docs/CONFORMANCE.md).
+DTLS is not implemented. Kernel routes are not automatically redistributed;
+local origins are explicit. The daemon does not yet expose a general TOML route
+filter language; embedders use `RoutePolicy`.
 
-Embedding applications can implement `RoutePolicy` to accept learned routes and
-control announcements per interface. Rules are read-only and replaced explicitly
-through the engine or runtime; replacement reselects routes and retracts denied
-announcements. See [route policy contracts and examples](docs/EMBEDDING.md#route-admission-and-announcement-policy).
+## Run the daemon
 
-## Current scope
-
-The v0.6 implementation includes RFC 8966 base TLVs, neighbour maintenance,
-feasibility, route selection, route and sequence-number requests, retractions,
-and multi-hop propagation. It also implements RFC 9079 source-specific routes
-and RFC 9229 IPv4 routes with IPv6 next hops.
-
-Link quality is policy rather than an engine constant. The built-in profiles
-implement RFC 8966 wired k-out-of-j sensing and ETX, plus RFC 9616 timestamp
-sampling and its recommended RTT cost policy. Wired 2-out-of-3 with nominal
-cost 96 is the default. Embedders can supply a different `MetricProfile` and
-`MetricAlgebra` without replacing the protocol engine. Optional RFC 8967 MAC
-authentication supports HMAC-SHA256 and BLAKE2s-128 with RFC 9467 replay protection.
-RFC 8968 DTLS remains deferred.
-
-The socket runtime and standalone daemon currently support Linux. The sans-I/O
-protocol engine is independent of the operating system. It exports selected routes plus the
-temporary exact unreachable routes required by RFC 8966 hold time. It owns only
-its configured protocol and does not automatically redistribute the kernel
-routing table; local origins come from configuration or the embedding API.
-
-Outbound TLVs carry explicit monotonic deadlines from the protocol engine.
-Each interface has an independent scheduler that adds bounded jitter,
-aggregates compatible TLVs, and paces datagrams unless doing so would miss a
-deadline. Packet boundaries are selected at release time from the live Linux
-interface MTU; changing MTU does not require restarting the daemon.
-
-See [CONFORMANCE.md](docs/CONFORMANCE.md) for exact protocol claims and
-[INTEROPERABILITY.md](docs/INTEROPERABILITY.md) for tested peers and
-topologies. The conformance document also lists requirements that cannot be
-proved by unit tests and must be checked in a deployment audit.
-
-## Quick start
-
-Build the daemon and validate the example configuration:
+Build from a checkout on Linux:
 
 ```sh
-cargo build --release -p babel-rs
-target/release/babel-rs check --config examples/babel-rs.toml
+git clone https://github.com/bnkrr/babel-rs.git
+cd babel-rs
+cargo build --release --locked -p babel-rs
+cp examples/babel-rs.toml babel-rs.toml
 ```
 
-Run it with the privileges required to bind sockets to interfaces and modify
-routes:
-
-```sh
-sudo target/release/babel-rs run --config examples/babel-rs.toml
-sudo target/release/babel-rs status --socket /run/babel-rs/babel-rs.ctl
-sudo target/release/babel-rs neighbors --socket /run/babel-rs/babel-rs.ctl
-sudo target/release/babel-rs routes --socket /run/babel-rs/babel-rs.ctl
-```
-
-Start from [examples/babel-rs.toml](examples/babel-rs.toml). Each participating
-interface must be administratively up. The default `control_transport = "ipv6"`
-uses an IPv6 link-local address and multicast `ff02::1:6`. Set
-`control_transport = "ipv4"` on a rule to use IPv4 UDP/6696 and `224.0.0.111`;
-that mode requires an IPv4 interface address and works with IPv6 disabled.
-Neither mode requires public IPv6 connectivity. Peers on a link must use the
-same control family; Linux interface names need not match. Control transport
-and the `ipv4_next_hop` route-announcement policy are independent.
-
-Structured interface rules are checked in order and the first matching rule
-wins. `link_type` supplies documented metric and split-horizon presets; timing
-defaults remain common across all link types. Explicit values override the
-preset for that interface:
+Edit `babel-rs.toml` for your interface names and the prefixes reachable through
+this node. Do not advertise the documentation prefixes unchanged. A minimal
+configuration has this shape:
 
 ```toml
 [[interfaces]]
-match = ["test-*"]
-link_type = "tunnel"
-ipv4_next_hop = "auto" # prefer numbered IPv4; ipv6 forces RFC 9229
+match = ["eth0"]
+link_type = "wired"
+
+[[origins]]
+destination = "2001:db8:100::/64" # replace with a prefix reachable through this node
+
+[export]
+protocol = 203 # reserve this protocol number for this daemon in the namespace
+
+[[export.views]]
+table = 20000 # a dedicated table for ordinary Babel routes
 ```
 
-An entry without metacharacters is an exact name. `*` and `?` match multiple
-names, and starting with no current matches is valid. The daemon continuously
-attaches new matches, withdraws routes when interfaces disappear, and rebinds
-a same-name interface created with a new ifindex. See
-[CONFIGURATION.md](docs/CONFIGURATION.md) for the complete default matrix,
-override rules, and interval constraints.
+The daemon generates and persists a Router-ID when none is configured. Each
+participating interface must already exist and be up. IPv6 control is the
+default and requires a link-local IPv6 address. For IPv4 control, set
+`control_transport = "ipv4"` in the interface rule and supply an interface IPv4
+address. Peers on a link must use the same control family and permit UDP/6696.
+The control family and advertised route family are separate choices.
 
-RTT is an RFC 9616 modifier over a wired or ETX base. Its timestamp exchange is
-backwards compatible with peers that do not implement the extension:
-
-```toml
-[interfaces.metric]
-type = "rtt"
-probe_interval_ms = 2000
-# Optional time-based override; omit for per-sample alpha 0.836.
-# half_life_ms = 6000
-min_rtt_ms = 10
-max_rtt_ms = 120
-max_penalty = 150
-
-[interfaces.metric.base]
-type = "wired"
-```
-
-RTT is sampled independently on every live adjacency; one link cost is shared
-by every route learned through that neighbour. The default filter uses the
-RFC-recommended per-sample weight; an explicit half-life override instead
-smooths by elapsed time. Route changes use a separate
-local policy: after a newly discovered prefix has settled, an alternative must
-clear both margins continuously for the configured dwell time. Initial
-candidate discovery and loss of the current route bypass this delay. A
-meaningful recovery of the current route cancels a pending switch, preventing
-the tail of the RTT filter from moving traffic after a transient has ended.
-
-```toml
-[route_selection]
-switch_margin_percent = 5
-switch_margin_metric = 8
-better_for_ms = 8000
-```
-
-ETX uses `type = "etx"` and an optional `window` in `1..=16` (default 6).
-
-## Daemon behaviour
-
-Learned state has default global neighbor/candidate limits and a per-neighbor
-candidate limit. Excess new entries are ignored while existing routes continue
-to update, retract and expire; freed capacity is reused automatically. Optional
-`[limits]` overrides require a restart. See [CAPACITY.md](docs/CAPACITY.md) for
-defaults, status counters, and overload-isolation tests.
-
-Selected-route generations are complete desired-state snapshots. A dedicated
-worker coalesces intermediate generations and the two-second safety pass
-reconciles the newest snapshot. Out-of-band deletion and stale owned state are
-repaired while routes and rules owned by other protocols remain untouched.
-Control status exposes the last successfully applied route and export-config
-generations, together with the last success age and export error.
-Export views support overlapping source prefixes with RFC 9079 destination-first
-forwarding. Source tables inherit ordinary and covering-source routes, with
-more-specific sources winning equal destinations. By default, managed export
-allocates views for newly learned source prefixes. Static/external configurations
-filter unsupported sources before selection and announcement. See [SADR.md](docs/SADR.md)
-for table ownership, rule priorities, and migration from 0.5.0.
-
-Optional per-interface [MAC authentication](docs/MAC.md) supports RFC 8967
-HMAC-SHA256 and BLAKE2s-128, RFC 9467 replay counters, and live key rotation.
-Configuring keys enables strict authentication; DTLS remains deferred.
-
-`SIGHUP` parses and validates a complete candidate before committing interface
-rules, origins, and export policy. An invalid candidate leaves the active
-configuration unchanged. A changed interface policy is applied in place;
-metric changes rebuild neighbour costs from retained Hello/IHU observations.
-Router-ID, `state_file`,
-route-selection policy, and the exclusive Linux route `protocol` identify live
-protocol state and cannot change during reload; changing them requires a
-restart. All locally originated routes are replaced in one serialized engine
-operation, so a valid reload does not expose a partially updated origin set.
-SIGINT and SIGTERM retract local origins and then reconcile an empty snapshot.
-
-`babel-rs --config ...` remains accepted for v0.1 compatibility, while the
-explicit `run` command enables the default control socket. Use
-`babel-rs check --config ...` for a side-effect-free configuration check. See
-[CONTROL.md](docs/CONTROL.md) for the bounded NDJSON API and all status,
-inspection, transactional reload, and graceful shutdown commands.
-
-A hardened standalone systemd unit is provided at
-[`packaging/systemd/babel-rs.service`](packaging/systemd/babel-rs.service). Do
-not enable it when another supervisor owns the daemon instance.
-
-## Embedding
-
-Run the compile-checked examples:
+The host must provide routes to its local origins and enable IP forwarding and
+appropriate firewall policy when carrying transit traffic. The example exports
+ordinary routes to table 20000. On a host with the usual Linux policy rules, add
+these host-owned lookups once so traffic can use that table before the main table:
 
 ```sh
-cargo run -p babel-protocol --example packet
-cargo run -p babel-router --example embedded -- wg0 /var/lib/my-router/state 0102030405060708
+sudo ip -4 rule add priority 20000 table 20000
+sudo ip -6 rule add priority 20000 table 20000
 ```
 
-`BabelRouter::builder().start().await` starts an owned runtime; `wait()` observes
-its result and `shutdown().await` performs bounded orderly cleanup. Dropping the
-owner cancels its tasks without asynchronous cleanup. The builder accepts typed Router-ID, interfaces, originated
-routes, a default `MetricProfile`, optional `MetricAlgebra`, `SequenceStore`,
-and `RouteExporter`. `interface_with_policy` and
-`RouterHandle::add_interface_with_policy` select metric, timing and split
-horizon per interface. A profile creates independent per-neighbour state and
-receives typed Hello, IHU, and RTT observations. `RouterHandle` also supports
-originate and withdraw operations, dynamic interface changes, status, route
-subscription, and graceful shutdown. The exporter receives a generation-tagged
-full desired-state snapshot rather than an unrecoverable stream of deltas.
+Choose unused table IDs and priorities appropriate for your host. The daemon
+manages source-specific rules separately; it does not create or remove these
+ordinary-table lookup rules. See [configuration](docs/CONFIGURATION.md#host-networking-and-export-tables)
+for ownership and cleanup.
 
-See [EMBEDDING.md](docs/EMBEDDING.md) for validation, command completion,
-exporter and shutdown contracts, and [ARCHITECTURE.md](docs/ARCHITECTURE.md)
-for the protocol, runtime, and exporter boundaries.
-
-## Development and testing
+Validate and run:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo test --workspace --doc
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+target/release/babel-rs check --config babel-rs.toml
+sudo target/release/babel-rs run --config babel-rs.toml
 ```
 
-The root-only black-box suite builds locally, copies only the binary and test
-scripts to an SSH-accessible Linux VM, and creates disposable network
-namespaces:
+In another terminal, inspect or stop the instance:
 
 ```sh
-BABEL_RS_E2E_HOST=router-test-vm tests/e2e/run-on-linux-vm.sh
+sudo target/release/babel-rs status
+sudo target/release/babel-rs interfaces
+sudo target/release/babel-rs neighbors
+sudo target/release/babel-rs routes
+sudo target/release/babel-rs shutdown
 ```
 
-Set `BABEL_RS_SSH_CONFIG`, `BABEL_RS_CARGO_BIN`, or
-`BABEL_RS_E2E_REMOTE_ROOT` when their defaults do not fit the local setup. The
-suite covers `babeld`, BIRD, IPv4-over-IPv6, IPv6, source-specific routes,
-RFC 9616 RTT sampling, delayed multipath selection and hysteresis, withdraw and
-reannounce, orderly-exit checkpoints, crash and lost-state recovery, stale-route cleanup, three-node
-propagation, link failure and recovery, plus live-MTU packetisation under a
-large route announcement.
+Control commands use `/run/babel-rs/babel-rs.ctl` by default. For a supervised
+installation, use the supplied [systemd unit](packaging/systemd/babel-rs.service)
+and the [installation instructions](docs/CONFIGURATION.md#systemd-installation).
+Registry publication status and versioned `cargo install` instructions are in
+[RELEASING.md](docs/RELEASING.md).
 
-The `shutdown-recovery` mode checks the total cleanup deadline and startup
-removal of leftover routes/rules. It builds a test-only netlink fault preload
-with `${CC:-cc}` locally and copies that fixture to the VM; the `all` suite
-includes this mode. Configure the deadline with the top-level, reloadable
-`shutdown_timeout_ms` (default 5000); see [CONFIGURATION.md](docs/CONFIGURATION.md).
+## Embed the libraries
 
-The `control-clients` mode verifies actual 30-second client deadlines and
-connection-slot reuse with 64 simultaneous Unix clients, including blocked
-response readers; `all` includes it. Deterministic source-history churn across
-multiple GC windows is part of `cargo test --workspace --all-targets`.
+Use `babel-protocol` when the application owns transport and scheduling. Use
+`babel-router` to let Tokio handle the sockets and runtime while your application
+consumes route snapshots or implements `RouteExporter`.
 
-Network CI also runs capacity isolation, restart recovery, shutdown deadlines
-and slow-client regressions as independent jobs. Combined-failure coverage
-checks partition/merge and simultaneous primary-link loss with a standby-relay
-crash, while an unaffected path continues forwarding. A separate steady-state job
-checks a healthy three-node forwarding path while a fourth leaf repeatedly
-fails and recovers: two minutes on pushes/PRs and one hour weekly or on demand.
-Run it explicitly with `tests/e2e/run-on-linux-vm.sh steady-state`; see
-[TESTING.md](docs/TESTING.md) for assertions, schedules and reproduction.
+The repository includes runnable examples:
+
+```sh
+cargo run --locked -p babel-protocol --example packet
+cargo build --locked -p babel-router --examples
+```
+
+Start with the [protocol example](crates/babel-protocol/README.md),
+[runtime example](crates/babel-router/README.md), and
+[embedding guide](docs/EMBEDDING.md). Retain the runtime owner for as long as
+routing should run, and await `shutdown()` for orderly cleanup. Hosts own stable
+identity, restart sequence policy, and their forwarding backend.
+
+## Documentation
+
+| Topic | Guide |
+| --- | --- |
+| Configuration, installation, reload, and restart | [Configuration](docs/CONFIGURATION.md) |
+| Control commands and status fields | [Control API](docs/CONTROL.md) |
+| Shared-key authentication and rotation | [MAC authentication](docs/MAC.md) |
+| Overlapping source prefixes and policy tables | [Source-specific routing](docs/SADR.md) |
+| Public library lifecycle and extension points | [Embedding](docs/EMBEDDING.md) |
+| Platforms, compatibility, and deployment limits | [Support](docs/SUPPORT.md) |
+| RFC coverage and validation status | [Conformance](docs/CONFORMANCE.md) |
+| Tested peers and known interoperability observations | [Interoperability](docs/INTEROPERABILITY.md) |
+| Resource limits and overload behavior | [Capacity](docs/CAPACITY.md) |
+| Implementation structure | [Architecture](docs/ARCHITECTURE.md) |
+| Reproducing tests and package checks | [Testing](docs/TESTING.md) |
+| Version changes and migration | [Changelog](CHANGELOG.md) |
+
+## Help and contributions
+
+Report bugs or propose changes through the
+[issue tracker](https://github.com/bnkrr/babel-rs/issues). Include the version or
+commit, OS/kernel, relevant configuration, expected behavior, and a bounded
+reproduction or diagnostic log. Remove keys and other credentials from reports.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and contribution scope.
 
 ## License
 
-Licensed under the MIT License. See [LICENSE](LICENSE).
+[MIT](LICENSE).

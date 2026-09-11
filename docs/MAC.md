@@ -5,10 +5,12 @@ strict reception from the first packet; omitting MAC configuration preserves
 plain Babel. Authentication protects routing messages, not their confidentiality.
 DTLS remains unimplemented.
 
-Generate a random 32-byte key, keep its file readable only by the daemon account,
-and distribute it to the authorized peers on the link:
+As the administrator, create `/etc/babel-rs` if needed and generate a random
+32-byte key there. Keep the file readable only by the daemon account and
+distribute it to the authorized peers on the link:
 
 ```sh
+install -d -m 0700 /etc/babel-rs
 umask 077
 openssl rand -hex 32 > /etc/babel-rs/link.key
 ```

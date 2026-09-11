@@ -1,5 +1,5 @@
 # Optional. If absent, generated once and persisted in state_file.
-router_id = "01:02:03:04:05:06:07:08"
+# router_id = "01:02:03:04:05:06:07:08" # unique within the routing domain
 
 # Optional. Parent directories are created; updates use fsync + atomic rename.
 state_file = "/var/lib/babel-rs/state.toml"
@@ -11,14 +11,20 @@ shutdown_timeout_ms = 5000
 # Exact names, `*`, and `?` are supported; zero current matches is valid.
 [[interfaces]]
 # control_transport = "ipv6" # Set "ipv4" for IPv4-only control links.
-match = ["test-special-*"]
-link_type = "tunnel"
-hello_interval_ms = 1000
+match = ["eth0"] # replace with a participating interface
+link_type = "wired"
+# hello_interval_ms = 1000
 # auto prefers an available IPv4 address; ipv4/ipv6 explicitly override it.
 ipv4_next_hop = "auto"
 
+# Optional authentication, attached inside the relevant [[interfaces]] section:
+# [interfaces.mac]
+# [[interfaces.mac.keys]]
+# algorithm = "hmac_sha256"  # or "blake2s128"
+# key_file = "/etc/babel-rs/link.key"  # hex-encoded random shared key
+
 [[interfaces]]
-match = ["test-*", "backbone0"]
+match = ["tun-*", "wg*"] # optional existing tunnel interfaces
 link_type = "tunnel"
 
 # An explicit nested metric replaces the link_type metric preset atomically:
@@ -40,7 +46,9 @@ switch_margin_percent = 5
 switch_margin_metric = 8
 better_for_ms = 8000
 
-# Optional, repeatable. source omitted means the family-wide default source.
+# Optional, repeatable. Replace these documentation prefixes with routes
+# reachable through this host. Origins do not create local addresses/routes.
+# source omitted means the family-wide default source.
 [[origins]]
 destination = "2001:db8:100::/64"
 
@@ -49,7 +57,7 @@ destination = "198.51.100.0/24"
 source = "10.0.0.0/8"
 metric = 0
 
-# Required Linux export policy.
+# Required Linux export policy. Reserve this protocol for this daemon only.
 [export]
 protocol = 203
 
@@ -60,7 +68,8 @@ device_only = false
 # Optional, default true. When false, another manager owns source policy rules.
 manage_rules = true
 
-# Ordinary routes are exported to this table.
+# Ordinary routes use a dedicated table. The host must add IPv4/IPv6 lookup
+# rules for it; see docs/CONFIGURATION.md. Reserved tables 0/253/254/255 are rejected.
 [[export.views]]
 table = 20000
 
@@ -71,9 +80,3 @@ table = 20000
 [[export.views]]
 table = 20001
 source = "10.0.0.0/8"
-
-# Optional authentication, attached inside the relevant [[interfaces]] section:
-# [interfaces.mac]
-# [[interfaces.mac.keys]]
-# algorithm = "hmac_sha256"  # or "blake2s128"
-# key_file = "/etc/babel-rs/link.key"  # hex-encoded random shared key

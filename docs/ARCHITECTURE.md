@@ -77,7 +77,10 @@ Linux export materializes complete source views: ordinary routes and every
 covering source route are inherited; equal destinations keep the most-specific
 source. IPv4 and IPv6 both use destination-only tables and source rules ordered
 by prefix length. This preserves RFC 9079 destination-first selection even with
-overlapping sources. Dynamic priorities start at 65535, after static metrics.
+overlapping sources. Linux route metrics start at 65535 plus the Babel metric,
+so lower-metric static routes for the same destination in the same table take
+precedence. Source-rule priorities use the separate specificity formula
+described in [SADR.md](SADR.md).
 Automatic views are allocated for selected/held sources; static configurations
 filter unsupported source keys at the engine policy boundary. See [SADR.md](SADR.md).
 
@@ -141,8 +144,9 @@ RFC 9616 wire behaviour remains in the engine: Timestamp sub-TLVs use the
 Hello/IHU Mills exchange, monotonic timestamps, modulo-32-bit arithmetic, and
 the recommended three-minute stale-sample bound. RTT profiles may request an
 independent per-neighbour unicast probe interval instead of waiting for the
-regular IHU timer. Time-based EWMA smoothing and bounded RTT-to-cost mapping
-belong to `RttMetric` and are therefore replaceable. Probe schedules use
+regular IHU timer. Per-sample EMA smoothing (the default), optional elapsed-time
+smoothing, and bounded RTT-to-cost mapping belong to `RttMetric` and are therefore
+replaceable. Probe schedules use
 per-neighbour jitter, enforce a 100 ms minimum interval, and cap work per
 engine tick.
 
@@ -176,9 +180,10 @@ failure leaves the selected RIB intact and is reported; the periodic reconciler
 retries its complete snapshot. SIGHUP validates a full candidate before
 replacing desired state; invalid input keeps the old active configuration.
 Origins are replaced as one engine event; interface and netlink state then
-converge asynchronously. A changed per-interface policy is applied in place;
-metric changes rebuild neighbour state from retained Hello/IHU observations,
-while socket and selected-route state remain attached. Router-ID, state-file location,
+converge asynchronously. Metric and timing changes are applied in place using
+retained neighbour observations. A control-family or MAC-key change detaches and
+reattaches the affected interface, discarding its old adjacency and socket queues.
+Router-ID, state-file location,
 route-selection policy, and Linux route protocol remain immutable during a
 process lifetime. The route protocol is an exclusive ownership token within
 one network namespace and is guarded by a process-life lock. Graceful shutdown
@@ -214,9 +219,9 @@ checkpoint is returned after cleanup; it may make the next restart converge more
 
 ## Internal module map
 
-The three-crate boundary and public module paths stay stable. Private modules
-split implementation responsibilities while the engine retains sole ownership
-of protocol state; the split introduces no new tasks, locks or queues.
+The public boundaries are the three crates and their documented APIs. Private
+modules divide implementation responsibilities while the engine retains sole
+ownership of protocol state.
 
 | Area | Private implementation responsibilities |
 | --- | --- |

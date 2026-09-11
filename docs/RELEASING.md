@@ -1,86 +1,124 @@
-# Release preparation
+# Releasing babel-rs
 
-Use Rust 1.90+ to build the product. Use Cargo 1.96+ for the release checks below,
-which package the three workspace crates together and stage their unpublished
-dependencies locally. Python 3.11+ runs the archive consumer verification.
+This is the maintainer workflow for freezing source, verifying packages, and
+publishing the three crates. User installation and deployment instructions are
+in the [README](../README.md) and [configuration guide](CONFIGURATION.md).
 
-## Publication status — 2026-09-11
+## Current release state — 2026-09-11
 
-The [v0.5.0 release workflow](https://github.com/bnkrr/babel-rs/actions/runs/34486917845)
-completed all validation jobs successfully, including archive consumers,
-Windows/macOS protocol tests, Linux tests, E2E and the short steady-state run.
-The publish job then failed during the crates.io credential exchange:
-`No Trusted Publishing config found for repository bnkrr/babel-rs`.
-No upload or post-upload registry verification ran in that workflow.
+The local candidate is **0.6.0**, intended for use within the documented support
+scope. A local source freeze fixes the content to publish; it does not upload
+crates, create a remote release, or establish hosted-CI success.
 
-The public crates.io API returned HTTP 404 for `babel-protocol`, `babel-router`
-and `babel-rs` on 2026-09-11. Initial publication and the per-crate Trusted
-Publishing setup below remain outstanding. The local 0.6.0 archive rehearsal
-passed without uploading; it does not establish hosted CI or registry success
-for that version. Current verification and follow-ups are in
-[CONFORMANCE.md](CONFORMANCE.md).
+| Stage | Evidence / remaining action |
+| --- | --- |
+| Implementation | Protocol/runtime/daemon source at `8b9a416`; freeze preparation updates documentation, package description, and example configuration. |
+| Local validation | Stable and Rust 1.90 each passed 180 workspace tests; Clippy, doctests, release tooling, and scoped Linux MAC/SADR/IPv4 checks passed. Archive-only consumers and daemon installation passed before the documentation freeze; rerun package checks on the final clean candidate. |
+| Long-running mixed validation | 7.5-hour budget completed; 511 verified mutation rounds across two attempts, one unattributed babeld kernel-FIB mismatch, both cleanups passed. See [the full result](TESTING.md#2026-09-11-mixed-campaign). |
+| Hosted verification | The frozen 0.6.0 commit still needs CI, including Windows/macOS protocol checks and network workflows. The remote main branch was `5e3b564` when last checked. |
+| Registry | `babel-protocol`, `babel-router`, and `babel-rs` each returned HTTP 404 from the public crates.io API on 2026-09-11. No version of these crates was published by this preparation. |
+| Automated publishing | The [v0.5.0 workflow](https://github.com/bnkrr/babel-rs/actions/runs/34486917845) passed validation, then failed with `No Trusted Publishing config found for repository bnkrr/babel-rs`. Upload and registry verification were skipped. |
+
+A timed mixed campaign with a retained failure must not be described as a clean
+pass. The observed peer mismatch is documented in
+[INTEROPERABILITY.md](INTEROPERABILITY.md#mixed-run-kernel-route-mismatch); its
+cause is not established. DTLS and a general daemon filter language are outside
+this version's scope, not unfinished requirements for its local freeze.
+
+## Freeze a local candidate
+
+1. Confirm all three crate versions, versioned path dependencies, and Cargo.lock
+   agree. Update the changelog, user documentation, support boundaries, and
+   known observations. Keep the version at 0.6.0 for this candidate.
+2. Commit the candidate content. If the working tree contains unrelated work,
+   validate a separate clean detached worktree at that commit; do not include
+   unrelated changes in the release.
+3. Run the applicable source checks and the archive checks below on that clean
+   candidate. Record the exact commit, toolchains, test results, Cargo.lock
+   checksum, package checksums, and installed binary checksum with the artifacts.
+4. Mark the validated commit with a local annotated freeze tag such as
+   `freeze/0.6.0-20260911`. Freeze tags are local bookkeeping and do not match the
+   publishing workflow's `v*` trigger. Keep the source and artifacts available
+   for review. A later content change requires a new candidate/tag and the
+   checks affected by that change; do not move an existing freeze tag.
+
+The runtime network evidence can be reused for unchanged protocol/runtime source;
+new packaged documentation and examples still require fresh package validation.
+Local freezing does not require uploading anything or rerunning a long network
+campaign solely because prose changed.
 
 ## Verify before uploading
 
-Run the normal format, Clippy, workspace tests, doctests, rustdoc and MSRV checks
-from the README, and the Linux network suite described in TESTING.md. Then run:
+Use Rust 1.90+ for source compatibility, Cargo 1.96+ for workspace packaging,
+and Python 3.11+ for the archive consumer. Run the appropriate checks from
+[CONTRIBUTING.md](../CONTRIBUTING.md) and the affected Linux suites from
+[TESTING.md](TESTING.md). Then, from a clean candidate checkout:
 
 ```sh
-python3 tests/release/check-packages.py
+python3 tests/release/check-packages.py --output /tmp/babel-release-check
 ```
 
-For an uncommitted local review use `--allow-dirty`. `--offline` uses cached
-registry dependencies; `--output PATH` retains archives and consumer artifacts.
-The check packages all crates, verifies unpacked builds, checks packaged README,
-MIT license and daemon example files, extracts the actual `.crate` archives, runs
-an independent consumer, runs library archive tests/examples/doctests/docs, and
-installs the daemon from its archive and checks its packaged example config.
+Use a fresh output directory per candidate. `--offline` uses cached registry
+dependencies. `--allow-dirty` is available for an intermediate review; the final
+freeze should be verified from a clean checkout.
 
-The independent consumer substitutes only extracted archive dependencies using
-a generated Cargo patch file. It never depends on the original workspace source
-paths. This verifies the distribution contents without claiming that unpublished
-names are already resolvable from crates.io. CI runs the same script.
+The check builds actual `.crate` archives, verifies README/license/example
+contents, extracts the archives, and runs an independent consumer. Library
+archive tests, examples, doctests, and rustdoc are checked; the daemon is
+installed from its archive and its packaged configuration is validated. Its
+consumer patches only extracted archive dependencies, never workspace source.
+This establishes package usability without claiming unpublished packages can
+already be resolved from crates.io. The script never uploads.
 
-Review the version, changelog, platform and lifecycle contracts in SUPPORT.md and
-EMBEDDING.md. Library API/behavior changes need a minor bump during 0.x. Ensure
-all three manifests and their versioned path dependencies agree. README links
-should refer to public documentation rather than missing workspace-relative files.
+## First publication
 
-## Registry and upload
+Check live crate-name ownership and registry availability immediately before
+upload. A local package build does not reserve a name. Use the publishing account
+and the same `CARGO_HOME` for login and publication; credentials must stay outside
+version control.
 
-Crates.io names and ownership must be checked live immediately before first
-publication. A nonexistent name is not reserved by a successful local build.
-Use the publishing account to confirm access to any existing names and use
-appropriately scoped credentials or trusted publishing. Do not commit credentials.
+Publish from the reviewed clean release commit after hosted verification passes.
+The initial publication can use a local token with `publish-new` and
+`publish-update` scoped to the three crate names. `yank` and `change-owners` are
+not required. Publish in dependency order:
 
-Once publication is authorized and the reviewed release commit is fixed:
+```sh
+cargo publish -p babel-protocol --dry-run --locked
+cargo publish -p babel-protocol --locked
+# Wait until this exact version resolves from crates.io before continuing.
+cargo publish -p babel-router --dry-run --locked
+cargo publish -p babel-router --locked
+# Wait until this exact version resolves before publishing the daemon.
+cargo publish -p babel-rs --dry-run --locked
+cargo publish -p babel-rs --locked
+```
 
-1. Run `cargo publish -p babel-protocol --dry-run --locked`, then publish it.
-2. Confirm that crates.io resolves the exact version. Dry-run and publish
-   `babel-router`, then confirm its version resolves.
-3. Dry-run and publish `babel-rs`.
-4. Run an unpatched registry consumer and `cargo install babel-rs --locked
-   --version VERSION` from outside the repository. Record the result.
-5. Record the release commit/tag and update the changelog release date.
+Initial manual publication is independent of CI authentication setup. Once the
+crates exist, configure each trusted publisher for future automated updates.
+Use the same clean source commit if the initial publication will later be
+verified or resumed through the release workflow.
 
-Dependency ordering avoids relying on an unpublished package from an ordinary
-single-package upload. A post-upload registry check is intrinsically a release
-step; the local rehearsal cannot replace it. Each uploaded version is immutable.
-No upload is performed by the verification script.
+After upload, run the actual registry consumer outside the workspace:
 
-Cargo references: [Publishing](https://doc.rust-lang.org/cargo/reference/publishing.html),
-[Package archives](https://doc.rust-lang.org/cargo/commands/cargo-package.html).
+```sh
+python3 scripts/publish.py verify
+```
 
-## Local credentials and CI Trusted Publishing
+This resolves exact versions without local patches, compiles against both
+libraries, and installs the daemon from crates.io. A user can then install with:
 
-Local `cargo login` can use a token scoped to the exact three crate names with
-`publish-new` and `publish-update`. `yank` and `change-owners` are not required
-for publishing. Configuring trusted publishers through the crates.io website
-also does not require `trusted-publishing` on that local token. Keep login and
-publish on the same `CARGO_HOME` (this development checkout uses `.local/cargo`).
+```sh
+cargo install babel-rs --version '=0.6.0' --locked
+```
 
-Publish the initial version of each crate manually first. Then, on each crate's
-Settings / Trusted Publishing page, register the following GitHub publisher:
+Record the actual publication date, commit, tag, and registry verification
+result. A source-freeze date is not a registry publication date. Uploaded crate
+versions are immutable; later changes require a new version.
+
+## Trusted Publishing
+
+After initial publication, register this GitHub publisher on each crate's
+Settings / Trusted Publishing page:
 
 | Field | Value |
 | --- | --- |
@@ -89,47 +127,36 @@ Settings / Trusted Publishing page, register the following GitHub publisher:
 | Workflow filename | `release.yml` |
 | Environment | `crates-io` |
 
-Create the GitHub repository environment named `crates-io` and allow the `v*`
-release tags to deploy to it. This environment needs no crates.io secret. Do not
-copy the local token into GitHub Actions: the official `crates-io-auth-action`
+Create the repository environment `crates-io` and allow release tags to deploy
+to it. The official [crates.io authentication Action](https://github.com/rust-lang/crates-io-auth-action)
 exchanges the workflow's OIDC identity for a short-lived token and revokes it
-when the job completes. Only the publish job has `id-token: write`; test jobs
-have read-only repository permissions. Local token publication remains available
+when the job completes. Only the publish job has `id-token: write`; no local
+registry token needs to be copied into GitHub Actions.
+
+Configuring publishers through the crates.io website does not need the local
+token's `trusted-publishing` scope. Local token publication remains available
 unless the crate's separate "Require trusted publishing" setting is enabled.
+See [crates.io's configuration guide](https://crates.io/docs/trusted-publishing).
 
-## Automated releases
+## Automated release and rehearsal
 
-`.github/workflows/release.yml` triggers on `v*` tag pushes. Before tagging, bump
-the workspace version and versioned dependencies, update Cargo.lock, set the
-changelog release date, and commit the release. Push the reviewed commit and a
-tag matching the version (for example `v0.5.1` for version `0.5.1`).
+`.github/workflows/release.yml` runs on `v*` tag pushes. Push a tag matching the
+workspace version only when publication is intended and authentication is ready.
+The workflow validates the tag, runs reusable CI, E2E, and 120-second steady-state
+workflows, then publishes `babel-protocol`, `babel-router`, and `babel-rs` in order.
+It waits for each exact version to resolve and verifies registry consumers last.
 
-The workflow validates the tag/version match, runs the reusable CI, E2E and
-120-second steady-state workflows, and only publishes after all pass. This
-includes the archive consumer, Windows/macOS protocol, Linux MSRV, network and
-recovery checks. Ordinary branch/PR workflows still run independently; tag
-pushes run these checks through the release workflow rather than twice.
+Actions / release / Run workflow defaults to `dry_run: true`. This runs the same
+checks without obtaining an OIDC token or uploading packages. A selected tag
+must match the source version. For real manual dispatch, choose the matching
+release tag and set `dry_run: false`; publication from a branch is rejected.
 
-Actions / release / Run workflow defaults to `dry_run: true`. That runs the same
-checks on the selected branch or tag without requesting OIDC credentials or
-uploading packages. A tag selected for rehearsal must still match the source
-version. For a real manual dispatch, select the matching release tag and set
-`dry_run: false`; real publication from a branch is rejected.
+A partial release can be rerun at the same tag. An existing version is skipped
+only when its packaged Git commit matches the clean source and it is not yanked.
+Different metadata, authentication failures, and registry failures stop the job.
+Never move a published tag to another commit. Publication from the frozen source
+and the subsequent registry verification remain distinct from a local freeze.
 
-Publication runs `babel-protocol`, `babel-router`, then `babel-rs`, waiting for
-each exact version in the registry index. A partial release can be rerun at the
-same tag: an existing version is skipped only if its packaged Git commit matches
-the current clean source and it is not yanked. Different source metadata,
-authentication errors and registry failures fail the job. Never move a published
-release tag to a different commit. Initial manual publication should use the
-same clean release commit if its tag will later be used to exercise this flow.
-
-After upload, a temporary unpatched project compiles against both registry
-libraries, and the daemon is installed from crates.io with the exact version;
-its version and example config are checked. This final registry verification
-cannot run successfully until the versions exist. Local test coverage mocks
-registry/upload operations; it does not claim a real OIDC exchange occurred.
-
-References: [Official authentication Action](https://github.com/rust-lang/crates-io-auth-action),
-[Trusted Publishing](https://crates.io/docs/trusted-publishing),
-[Token scope definitions](https://rust-lang.github.io/rfcs/2947-crates-io-token-scopes.html).
+References: [Cargo publishing](https://doc.rust-lang.org/cargo/reference/publishing.html),
+[package archives](https://doc.rust-lang.org/cargo/commands/cargo-package.html),
+[token scopes](https://rust-lang.github.io/rfcs/2947-crates-io-token-scopes.html).

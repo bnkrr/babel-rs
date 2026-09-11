@@ -1,9 +1,13 @@
 # Interoperability
 
-The executable suite is `tests/e2e/run-on-linux-vm.sh`. It builds locally, copies
-only the binary and scripts to the Debian VM, and creates disposable network
-namespaces. The reference versions currently installed there are babeld
-1.13.1 and BIRD 3.1.7, on Linux 6.12.96+deb13-amd64.
+This document records tested behavior between babel-rs and other Babel
+implementations, together with observations that deployments should account for.
+The 2026-09-10/11 Linux validation used babeld 1.13.1 and BIRD 3.1.7 on kernel
+6.12.96+deb13-amd64. A result applies to the recorded scenario and peer version.
+
+Run the suite with `tests/e2e/run-on-linux-vm.sh`; it builds locally and copies
+binaries and runtime scripts to a disposable Linux test host. See
+[TESTING.md](TESTING.md) for reproduction.
 
 The original scenarios below use IPv6 control transport; columns describe
 payload routes. The added RFC boundary suite also tests pure IPv4 control with
@@ -14,8 +18,8 @@ not proof of route selection or arbitrary-load timing.
 
 | Peer/topology | IPv6 routes | IPv4 routes via IPv6 next hop | SADR | Lifecycle |
 |---|---:|---:|---:|---|
-| babel-rs ↔ babeld 1.13.1 | pass | pass | pass | retract, reannounce, restart |
-| babel-rs ↔ BIRD 3.1.7 | pass | pass | pass | bidirectional exchange |
+| babel-rs ↔ babeld 1.13.1 | pass | pass | IPv6 pass | retract, reannounce, restart |
+| babel-rs ↔ BIRD 3.1.7 | pass | pass | IPv6 pass | bidirectional exchange |
 | shared LAN: two babel-rs + babeld | pass | pass between babel-rs | n/a | numbered IPv4, live policies/addresses, one-way and partial loss |
 | three babel-rs nodes, line | pass | n/a | n/a | two-hop, failure, recovery |
 | two babel-rs nodes, RFC 9616 | pass | n/a | n/a | Timestamp exchange and non-null RTT status |
@@ -26,7 +30,8 @@ not proof of route selection or arbitrary-load timing.
 The babeld test also injects a stale route in the owned table/protocol and
 requires startup reconciliation to remove it. Restart must preserve Router-ID,
 advance sequence state, remove routes on SIGTERM and reconverge. The BIRD test
-uses separate IPv4 and IPv6 SADR channels. The three-node test requires a
+uses an ordinary IPv4 channel and an IPv6 SADR channel; it does not establish
+IPv4 SADR interoperability with BIRD. The three-node test requires a
 triggered withdrawal to cross the remaining adjacency before the advertised
 route hold time expires.
 
@@ -61,6 +66,10 @@ Network namespaces disable automatic IPv6 address generation and assign one
 stable link-local address per interface, avoiding accidental ambiguity in the
 test topology.
 
+## Known observations
+
+### Live IPv4 next-hop-family changes
+
 The shared-LAN regression passed on 2026-09-10 with babeld 1.13.1. In that
 fixture, babeld retained its existing IPv4 gateway after the neighboring
 babel-rs changed its advertisement to an IPv6 next hop; the second babel-rs
@@ -70,9 +79,29 @@ compatible mode before establishing routes; live changes need separate peer
 validation. Initial ordinary IPv4 exchange and subsequent withdrawal/recovery
 are verified against both implementations.
 
-The interrupted mixed soak and fresh-state round replay are described in
-[TESTING.md](TESTING.md). The replay passing does not establish the cause of
-the historical missing BIRD route or reproduce its prior sequence history.
+### Mixed-run kernel route mismatch
+
+In the 2026-09-11 mixed campaign, seed 20260911 failed at round 64 after link 17
+between babeld nodes 4 and 8 was brought down and back up. Node 4 lacked three
+reachable /128 routes in its kernel FIB for the full 600-second convergence
+limit, while its babeld status reported those routes as installed via `e17`.
+The missing destinations were `2001:db8:10::1/128`, `2001:db8:3::1/128`, and
+`2001:db8:9::1/128`. This is an observed babeld internal-state/kernel-state
+mismatch; the root cause has not been established or attributed to babel-rs.
+It remains a known observation for mixed deployments.
+
+The campaign preserved diagnostics, confirmed cleanup, and continued with seed
+20260912. That attempt verified 448 rounds before the scheduled stop interrupted
+round 449. Neither a timed stop nor a retry erases the first attempt's failure.
+The complete [campaign summary](TESTING.md#2026-09-11-mixed-campaign) separates
+verified rounds, the actual failure, and planned termination.
+
+### Historical round 170
+
+An older mixed soak stopped during round 170 with a missing BIRD route; a replay
+from fresh process state passed. The investigation was closed on 2026-09-11
+without attribution. Its closure does not establish a fix, and the new round-64
+observation is separate. See [replay limits](TESTING.md#bounded-mixed-round-replay).
 
 ## 2026-09-10 audit-fix verification
 
@@ -91,7 +120,6 @@ The ICMP test observes both TTL exceeded and fragmentation needed at MTU 1280,
 using the router's loopback IPv4 address or kernel fallback 192.0.0.8.
 The 120-second steady run passed 132 samples with maximum control latency
 1.262 ms; its duration is too short to make long-run leak claims.
-The historical mixed-soak round 170 observation remains unattributed.
 
 ## 0.6.0 MAC/SADR verification
 
@@ -106,5 +134,7 @@ reannouncement, static-source filtering/re-enable and owned-state cleanup.
 The final SADR run waited for all child defaults before testing destination
 precedence; an earlier run failed because that readiness condition was missing.
 The existing BIRD SADR, RFC boundary and dynamic-MTU regressions also passed.
-These are scoped VM checks; hosted tests for the 0.6.0 commit and a long-duration
-mixed run remain outstanding. No Babel-DTLS interoperability is claimed.
+These are scoped VM checks. The completed mixed campaign exercises ordinary
+IPv6 routing and churn; it does not replace these MAC/SADR/IPv4 tests. Hosted
+verification of the frozen 0.6.0 commit is a separate publication gate recorded
+in [RELEASING.md](RELEASING.md). No Babel-DTLS interoperability is claimed.
