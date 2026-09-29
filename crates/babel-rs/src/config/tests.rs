@@ -512,3 +512,18 @@ table = 20000
     .unwrap_err();
     assert!(matches!(error, ConfigError::DuplicateOrigin(_)));
 }
+
+#[test]
+fn recovery_configuration_defaults_and_validation() {
+    let base = "[[interfaces]]\nmatch = [\"wg*\"]\n[export]\n[[export.views]]\ntable = 20000\n";
+    let default = Config::parse(base).unwrap();
+    assert_eq!(default.shutdown_policy, ShutdownPolicy::Clear);
+    assert_eq!(default.restart_recovery_seconds, 240);
+    let retain = Config::parse(&format!("shutdown_policy = \"retain\"\n{base}")).unwrap();
+    assert_eq!(retain.shutdown_policy, ShutdownPolicy::Retain);
+    assert!(default.reload_identity_matches(&retain));
+    let disabled = Config::parse(&format!("restart_recovery_seconds = 0\n{base}")).unwrap();
+    assert!(!default.reload_identity_matches(&disabled));
+    assert!(Config::parse(&format!("restart_recovery_seconds = 86401\n{base}")).is_err());
+    assert!(Config::parse(&format!("shutdown_policy = \"expire\"\n{base}")).is_err());
+}

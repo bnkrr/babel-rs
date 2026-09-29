@@ -194,7 +194,7 @@ fn format_router_id(id: RouterId) -> String {
         .collect()
 }
 
-fn write_atomic(path: &Path, value: &str) -> Result<(), std::io::Error> {
+pub(crate) fn write_atomic(path: &Path, value: &str) -> Result<(), std::io::Error> {
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())

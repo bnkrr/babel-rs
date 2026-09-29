@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [capacity, state-restart, shutdown-recovery, control-clients, combined-failures]
+        scenario: [capacity, state-restart, fib-recovery, shutdown-recovery, control-clients, combined-failures]
     steps:
       - uses: actions/checkout@v7
       - name: Install network test tools

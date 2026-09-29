@@ -9,9 +9,16 @@ impl LinuxExporter {
         snapshot: RouteSnapshot,
         retain_rules: bool,
     ) -> Result<(), LinuxError> {
+        let recovery = self.recovery.lock().await.clone();
+        let now = recovery::boot_ms()?;
+        let held_sources = recovery.sources(now, export);
         let mut resolved = export.clone();
-        resolved.views =
-            projection::source_views(export, &snapshot, &mut *self.source_tables.lock().await)?;
+        resolved.views = projection::source_views_with_recovery(
+            export,
+            &snapshot,
+            &mut *self.source_tables.lock().await,
+            &held_sources,
+        )?;
         let export = &resolved;
         let projected = project_routes(&export.views, &snapshot);
         // A released table may be reused for a different source. Remove obsolete
@@ -26,6 +33,7 @@ impl LinuxExporter {
         );
 
         let mut desired = HashSet::new();
+        let mut confirmed = HashSet::new();
         let mut messages = Vec::with_capacity(projected.len());
         for route in projected {
             let priority = DYNAMIC_PRIORITY_BASE
@@ -71,6 +79,9 @@ impl LinuxExporter {
                 gateway,
                 unreachable: kind == RouteType::Unreachable,
             };
+            if !identity.unreachable {
+                confirmed.insert((identity.table, identity.destination));
+            }
             desired.insert(identity.clone());
             debug!(
                 table = route.table,
@@ -97,13 +108,22 @@ impl LinuxExporter {
             }
         }
         for message in current {
-            if route_identity(&message).is_none_or(|identity| !desired.contains(&identity)) {
+            if route_identity(&message).is_none_or(|identity| {
+                !desired.contains(&identity) && !recovery.keep(&identity, &confirmed, now)
+            }) {
                 debug!(table = route_table(&message), "deleting stale owned route");
                 self.handle.route().del(message).execute().await?;
             }
         }
 
         self.reconcile_rules(export, retain_rules).await?;
+        let write = self
+            .recovery
+            .lock()
+            .await
+            .applied(&current_identities, &confirmed, now)?;
+        self.journal_writer.save(write).await?;
+        self.recovery.lock().await.saved();
         Ok(())
     }
 
@@ -193,7 +213,7 @@ impl LinuxExporter {
         Ok(())
     }
 
-    async fn owned_routes(&self, protocol: u8) -> Result<Vec<RouteMessage>, LinuxError> {
+    pub(super) async fn owned_routes(&self, protocol: u8) -> Result<Vec<RouteMessage>, LinuxError> {
         let mut result = Vec::new();
         for query in [
             RouteMessageBuilder::<Ipv4Addr>::new().build(),
@@ -209,7 +229,7 @@ impl LinuxExporter {
         Ok(result)
     }
 
-    async fn owned_rules(&self, protocol: u8) -> Result<Vec<RuleMessage>, LinuxError> {
+    pub(super) async fn owned_rules(&self, protocol: u8) -> Result<Vec<RuleMessage>, LinuxError> {
         let mut result = Vec::new();
         for version in [IpVersion::V4, IpVersion::V6] {
             let mut stream = self.handle.rule().get(version).execute();
@@ -225,7 +245,7 @@ impl LinuxExporter {
     }
 }
 
-fn interface_index(name: &str) -> Result<u32, LinuxError> {
+pub(super) fn interface_index(name: &str) -> Result<u32, LinuxError> {
     std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex"))
         .ok()
         .and_then(|value| value.trim().parse().ok())

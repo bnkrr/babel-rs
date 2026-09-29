@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -166,6 +166,7 @@ struct Runtime {
     received: mpsc::Receiver<Received>,
     received_tx: mpsc::Sender<Received>,
     shutdown: watch::Receiver<bool>,
+    retaining: Arc<AtomicBool>,
     route_updates: watch::Sender<RouteSnapshot>,
     metric: Arc<dyn MetricProfile>,
     metric_algebra: Arc<dyn MetricAlgebra>,
@@ -210,6 +211,7 @@ fn elapsed_ms(started: &Instant) -> u64 {
 pub struct RouterHandle {
     commands: mpsc::Sender<Command>,
     shutdown: watch::Sender<bool>,
+    retaining: Arc<AtomicBool>,
     routes: RouteStream,
 }
 
@@ -373,6 +375,13 @@ impl RouterHandle {
     /// Compatibility alias for [`Self::request_shutdown`]. Does not wait.
     pub fn shutdown(&self) {
         self.request_shutdown();
+    }
+
+    /// Request a restart: checkpoint the sequence, skip origin retractions and
+    /// call RouteExporter::retain instead of clearing forwarding state.
+    pub fn request_restart(&self) {
+        self.retaining.store(true, Ordering::Release);
+        let _ = self.shutdown.send(true);
     }
 
     /// Request orderly shutdown; await [`BabelRouter::wait`] to observe its result.
@@ -611,6 +620,7 @@ impl BabelRouterBuilder {
         let (commands_tx, commands_rx) = mpsc::channel(64);
         let (received_tx, received_rx) = mpsc::channel(256);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let retaining = Arc::new(AtomicBool::new(false));
         let (route_updates, route_stream) = watch::channel(RouteSnapshot::default());
         let (export_updates, export_stream) = watch::channel(RouteSnapshot::default());
         let export_worker = Some(spawn_exporter(
@@ -659,6 +669,7 @@ impl BabelRouterBuilder {
             received: received_rx,
             received_tx,
             shutdown: shutdown_rx,
+            retaining: Arc::clone(&retaining),
             route_updates,
             metric: self
                 .metric
@@ -681,6 +692,7 @@ impl BabelRouterBuilder {
             handle: RouterHandle {
                 commands: commands_tx,
                 shutdown: shutdown_tx,
+                retaining,
                 routes: route_stream,
             },
             task,

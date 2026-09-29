@@ -55,6 +55,7 @@ inspect cleanup outcomes before reusing the host.
 | `lifecycle`, `mtu-output` | Interface glob/rebind/reload, FIB repair and live-MTU packetization; `netns-lifecycle.sh`, `netns-mtu-output.sh` |
 | `capacity` | Excess announcements remain bounded while an independent healthy path forwards and updates; `netns-capacity.py` |
 | `state-restart` | Orderly checkpoint, SIGKILL, missing/stale state and recovery; `netns-state-restart.py` |
+| `fib-recovery` | Dual-stack forwarding retention, crash-loop deadlines, source rules, retain/clear, critical failure and live route adoption; `netns-fib-recovery.py` |
 | `shutdown-recovery` | Stalled netlink/fsync obey cleanup deadlines, startup removes only owned stale state; `netns-shutdown-recovery.py` |
 | `control-clients` | Idle/slow/blocked client deadlines and connection-slot reuse; `netns-control-clients.py` |
 | `combined-failures` | Partition/merge and origin replacement, simultaneous link/relay failure, third-path recovery and export-table migration; `netns-combined-failures.py` |

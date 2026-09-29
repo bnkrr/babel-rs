@@ -43,6 +43,12 @@ pub trait RouteExporter: Send + Sync + 'static {
         snapshot: RouteSnapshot,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+    /// Finish export work for a restart without releasing forwarding state.
+    /// No more snapshots are submitted; the default leaves external state alone.
+    async fn retain(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
     /// Release externally owned state on shutdown. An empty running RIB may
     /// still need policy rules; this hook distinguishes final cleanup from an
     /// ordinary empty snapshot. The default performs one final reconciliation.

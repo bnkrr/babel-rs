@@ -1,7 +1,7 @@
 use super::*;
 use babel_protocol::{RouteKey, RouterId};
 
-fn selected(destination: &str, source: Option<&str>, metric: u16) -> SelectedRoute {
+pub(super) fn selected(destination: &str, source: Option<&str>, metric: u16) -> SelectedRoute {
     SelectedRoute {
         key: RouteKey::new(
             destination.parse().unwrap(),
@@ -16,7 +16,7 @@ fn selected(destination: &str, source: Option<&str>, metric: u16) -> SelectedRou
     }
 }
 
-fn automatic_export() -> Export {
+pub(super) fn automatic_export() -> Export {
     Export {
         protocol: 203,
         device_only: false,

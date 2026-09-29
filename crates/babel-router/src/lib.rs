@@ -34,6 +34,8 @@
 //! is zero and the default [`SequenceStore`] is a no-op. No runtime sequence change
 //! waits for persistence. Orderly shutdown retracts origins, attempts one bounded
 //! checkpoint, waits for in-flight export, then calls [`RouteExporter::shutdown`].
+//! [`RouterHandle::request_restart`] skips retractions and calls
+//! [`RouteExporter::retain`] instead; the host owns subsequent FIB recovery.
 //! The total cleanup budget defaults to five seconds. Checkpoint, cleanup and
 //! timeout errors are observable. Dropping the owner or its wait future cancels
 //! owned tasks without guaranteeing cleanup of external state or detached I/O.

@@ -343,6 +343,8 @@ async fn status(shared: &Shared) -> Result<Value, (&'static str, String)> {
             "last_success_config_generation": export.last_success_config_generation,
             "last_success_age_seconds": export.last_success_age.map(|value| value.as_secs()),
             "last_error": export.last_error,
+            "recovering_routes": export.recovering_routes,
+            "recovery_remaining_ms": export.recovery_remaining_ms,
         }
     }))
 }

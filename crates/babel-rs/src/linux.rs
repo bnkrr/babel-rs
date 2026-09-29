@@ -20,6 +20,8 @@ use tokio::time::MissedTickBehavior;
 use tracing::{debug, warn};
 
 use crate::config::{Export, ExportView};
+mod recovery;
+use recovery::Recovery;
 
 const DYNAMIC_PRIORITY_BASE: u32 = 65_535;
 
@@ -30,6 +32,8 @@ pub struct LinuxExporter {
     apply_lock: Arc<Mutex<()>>,
     reconcile_notify: Arc<Notify>,
     source_tables: Arc<Mutex<std::collections::BTreeMap<IpNet, u32>>>,
+    recovery: Arc<Mutex<Recovery>>,
+    journal_writer: recovery::JournalWriter,
 }
 
 #[derive(Clone)]
@@ -78,9 +82,11 @@ pub struct ExportHealth {
     pub last_success_config_generation: Option<u64>,
     pub last_success_age: Option<Duration>,
     pub last_error: Option<String>,
+    pub recovering_routes: usize,
+    pub recovery_remaining_ms: u64,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 struct RouteIdentity {
     table: u32,
     destination: IpNet,
@@ -90,7 +96,7 @@ struct RouteIdentity {
     unreachable: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 struct RuleIdentity {
     table: u32,
     priority: u32,
@@ -122,6 +128,7 @@ impl LinuxExporter {
         export: Export,
         ownership: Arc<crate::ownership::ProtocolOwnership>,
     ) -> Result<Self, LinuxError> {
+        let journal_writer = recovery::JournalWriter::new(Arc::clone(&ownership))?;
         let (connection, handle, _) = new_connection()?;
         tokio::spawn(async move {
             // Keep ownership while queued netlink work can still be executed,
@@ -130,6 +137,7 @@ impl LinuxExporter {
             connection.await;
         });
         Ok(Self {
+            journal_writer,
             handle,
             state: Arc::new(RwLock::new(ExportState {
                 export,
@@ -145,10 +153,13 @@ impl LinuxExporter {
             apply_lock: Arc::new(Mutex::new(())),
             reconcile_notify: Arc::new(Notify::new()),
             source_tables: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            recovery: Arc::new(Mutex::new(Recovery::default())),
         })
     }
 
     pub async fn update_export(&self, export: Export) {
+        // Explicit export-policy changes revoke recovery ownership immediately.
+        self.recovery.lock().await.revoke();
         {
             let mut state = self.state.write().await;
             if state.stopping {
@@ -176,7 +187,14 @@ impl LinuxExporter {
 
     pub async fn health(&self) -> ExportHealth {
         let state = self.state.read().await;
+        let (recovering_routes, recovery_remaining_ms) = self
+            .recovery
+            .lock()
+            .await
+            .remaining(recovery::boot_ms().unwrap_or(u64::MAX));
         ExportHealth {
+            recovering_routes,
+            recovery_remaining_ms,
             config_generation: state.config_generation,
             last_success_route_generation: state
                 .last_success_revision
@@ -268,6 +286,12 @@ impl RouteExporter for LinuxExporter {
             .map_err(|error| Box::new(error) as _)
     }
 
+    async fn retain(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.state.write().await.stopping = true;
+        let _guard = self.apply_lock.lock().await;
+        Ok(())
+    }
+
     async fn shutdown(
         &self,
         snapshot: RouteSnapshot,
@@ -281,6 +305,7 @@ impl RouteExporter for LinuxExporter {
             state.retain_rules = false;
         }
         let _apply_guard = self.apply_lock.lock().await;
+        self.recovery.lock().await.revoke();
         self.reconcile_locked()
             .await
             .map_err(|error| Box::new(error) as _)

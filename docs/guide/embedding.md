@@ -195,6 +195,13 @@ hook. These runtime callbacks do not overlap. Any exporter-owned background work
 still needs synchronization and cancellation handling; the daemon's independent
 periodic reconciler uses an apply lock and terminal stopping flag.
 
+`RouterHandle::request_restart()` requests a retaining shutdown. The owner must
+still await `wait()`. The runtime skips origin retractions, checkpoints the sequence,
+drains in-flight export and calls `RouteExporter::retain()` instead of `shutdown()`.
+The default retain hook does nothing; custom exporters must quiesce background
+writers without deleting forwarding state. Startup adoption and expiry are the
+host's responsibility (the Linux daemon supplies them).
+
 The total orderly-cleanup deadline defaults to five seconds and is configured
 with `BabelRouterBuilder::shutdown_timeout(Duration)` or the handle setter. It
 covers retractions, checkpoint, waiting for the exporter, final cleanup and worker

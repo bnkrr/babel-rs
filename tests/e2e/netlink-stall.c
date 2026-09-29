@@ -5,6 +5,7 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -28,7 +29,7 @@ static void record_hit(const char *variable) {
 }
 
 static int drop_dump(int fd, const void *buffer, size_t length) {
-    if (length < sizeof(struct nlmsghdr) || !active()) return 0;
+    if (getenv("BABEL_TEST_FSYNC_ONLY") || length < sizeof(struct nlmsghdr) || !active()) return 0;
     int domain, protocol;
     socklen_t size = sizeof(int);
     if (getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &size) != 0 || domain != AF_NETLINK)
@@ -60,7 +61,15 @@ ssize_t send(int fd, const void *buffer, size_t length, int flags) {
 }
 
 int fsync(int fd) {
-    if (getenv("BABEL_TEST_STALL_FSYNC") && active()) {
+    int matches = 1;
+    if (getenv("BABEL_TEST_FSYNC_ONLY")) {
+        char name[64], path[4096];
+        snprintf(name, sizeof(name), "/proc/self/fd/%d", fd);
+        ssize_t length = readlink(name, path, sizeof(path) - 1);
+        if (length < 0) matches = 0;
+        else { path[length] = 0; matches = strstr(path, ".fib-recovery.") != NULL; }
+    }
+    if (matches && getenv("BABEL_TEST_STALL_FSYNC") && active()) {
         record_hit("BABEL_TEST_FSYNC_HIT");
         for (;;) pause();
     }

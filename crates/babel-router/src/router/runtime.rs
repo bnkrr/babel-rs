@@ -20,6 +20,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
         mut received,
         received_tx,
         mut shutdown,
+        retaining,
         route_updates,
         metric,
         metric_algebra,
@@ -108,6 +109,8 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 // and the process cannot rely on a later periodic update.
                 commands.close();
                 let cleanup = async {
+                let retain = retaining.load(Ordering::Acquire);
+                if !retain {
                 let actions = engine.handle(Event::ReplaceOrigins {
                     origins: BTreeMap::new(),
                     now_ms: now(),
@@ -121,6 +124,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     apply_actions(&outbound, &export_updates, retractions.clone());
                 }
+                }
                 let empty = RouteSnapshot {
                     generation: status.route_generation.wrapping_add(1),
                     routes: vec![],
@@ -130,7 +134,7 @@ pub(super) async fn run_loop(runtime: Runtime) -> Result<(), RouterError> {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let checkpoint = checkpoint_sequence_number(&sequence_store, engine.sequence_number()).await;
                 if let Some(worker) = export_worker.as_mut() { worker.join().await?; }
-                let exported = exporter.shutdown(empty.clone()).await
+                let exported = if retain { exporter.retain().await } else { exporter.shutdown(empty.clone()).await }
                     .map_err(|error| RouterError::Cleanup(error.to_string()));
                 route_updates.send_replace(empty);
                 for stop in interface_stops.values() { let _ = stop.send(true); }

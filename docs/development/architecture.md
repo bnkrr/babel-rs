@@ -84,16 +84,22 @@ fsync. A matching checkpoint starts at its sequence plus one; without it, the
 daemon uses a random sequence. Version 1 and legacy identity files migrate to
 the current format. Running sequence changes stay in memory.
 
-Orderly shutdown retracts origins, attempts a checkpoint, waits for export work,
+Default orderly shutdown retracts origins, attempts a checkpoint, waits for export work,
 and removes owned routes/rules within one deadline. A dedicated daemon checkpoint
 thread prevents stalled filesystem I/O from blocking Tokio runtime destruction;
 it retains protocol ownership until completion or process exit. A stopping latch
-prevents periodic reconciliation from restoring routes during cleanup.
+prevents periodic reconciliation from restoring routes during cleanup. Recovery
+journal writes use a separate serial thread so stalled fsync cannot block status
+queries or extend daemon shutdown beyond its deadline.
 
 An unexpected return or panic in a critical service ends the daemon with an error;
 it does not attempt to reconstruct a subset of live protocol state. Transient
 external I/O errors retry within their worker. Restart begins from an empty RIB
-and removes stale state in the same ownership scope. Timing, drop behavior,
+and adopts eligible owned FIB routes for a bounded recovery window. Retained FIB
+entries never enter the protocol RIB; confirmation replaces them, expiry removes
+them. A boot/namespace-bound journal prevents crash loops from extending deadlines.
+Optional retain shutdown and critical service failures preserve forwarding state.
+Timing, drop behavior,
 callback obligations, and returned errors are specified in
 [Embedding](../guide/embedding.md#export-and-shutdown-responsibilities) and
 [Configuration](../guide/configuration.md#shutdown-and-resource-limits).

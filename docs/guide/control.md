@@ -134,3 +134,7 @@ Interface inspection includes `control_transport` (`ipv4`/`ipv6`), all IPv4/IPv6
 `ipv4_next_hop_address`. The effective value reflects the latest address scan;
 `unavailable` means the configured announcement needs a next-hop address
 that the interface does not have; those announcements are retracted.
+
+`status.export.recovering_routes` counts unconfirmed startup FIB entries;
+`recovery_remaining_ms` is the longest remaining recovery deadline (zero when
+none remain). The count covers per-table IPv4/IPv6 entries, not protocol RIB routes.

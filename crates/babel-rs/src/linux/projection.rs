@@ -74,11 +74,27 @@ fn specificity(key: RouteKey) -> u8 {
 
 /// Complete source views. Explicit views pin table IDs; other active source
 /// prefixes (including unreachable holds) receive stable, process-local IDs.
+#[cfg(test)]
 pub(super) fn source_views(
     export: &Export,
     snapshot: &RouteSnapshot,
     allocated: &mut std::collections::BTreeMap<IpNet, u32>,
 ) -> Result<Vec<ExportView>, LinuxError> {
+    source_views_with_recovery(
+        export,
+        snapshot,
+        allocated,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+pub(super) fn source_views_with_recovery(
+    export: &Export,
+    snapshot: &RouteSnapshot,
+    allocated: &mut std::collections::BTreeMap<IpNet, u32>,
+    held: &std::collections::BTreeMap<IpNet, u32>,
+) -> Result<Vec<ExportView>, LinuxError> {
+    allocated.extend(held.iter().map(|(s, t)| (*s, *t)));
     let mut views = export.views.clone();
     if !export.automatic_sources() {
         allocated.clear();
@@ -91,6 +107,7 @@ pub(super) fn source_views(
         .map(|r| r.key)
         .chain(snapshot.unreachable.iter().copied())
         .filter_map(|key| key.source)
+        .chain(held.keys().copied())
         .filter(|s| !explicit.contains(s))
         .collect();
     let mut used: HashSet<_> = views.iter().map(|v| v.table).collect();

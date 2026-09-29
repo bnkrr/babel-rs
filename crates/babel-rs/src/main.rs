@@ -196,6 +196,15 @@ async fn run_daemon(
         active_config.export.clone(),
         Arc::clone(&protocol_ownership),
     )?;
+    tokio::select! {
+        biased;
+        _ = interrupt.recv() => return Ok(()),
+        _ = terminate.recv() => return Ok(()),
+        result = tokio::time::timeout(
+            Duration::from_millis(u64::from(active_config.shutdown_timeout_ms)),
+            exporter.begin_recovery(&active_config),
+        ) => result.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "startup FIB recovery timed out"))??,
+    }
     let mut builder = BabelRouter::builder()
         .router_id(state.router_id)
         .sequence_number(state.sequence_number)
@@ -323,6 +332,8 @@ async fn run_daemon(
         result = event_loop => result,
     };
 
+    let retain =
+        run_result.is_err() || active_config.shutdown_policy == config::ShutdownPolicy::Retain;
     let deadline = shutdown::Deadline::new(active_config.shutdown_timeout_ms);
     if let Err(error) = &run_result {
         warn!(%error, "daemon stopping after failure");
@@ -337,7 +348,11 @@ async fn run_daemon(
                 .await?;
         }
         let _ = services_shutdown.send(true);
-        handle.shutdown();
+        if retain {
+            handle.request_restart();
+        } else {
+            handle.shutdown();
+        }
         if !router_finished
             && let Err(error) = deadline
                 .wait(
@@ -353,13 +368,16 @@ async fn run_daemon(
             }
         }
         // If the engine failed before its orderly shutdown path, still try to
-        // remove owned Linux state using the remainder of the same deadline.
+        // Apply the chosen FIB policy using the remainder of the same deadline.
         if router_finished
             && let Err(error) = deadline
-                .wait(
-                    "route export cleanup after router exit",
-                    exporter.shutdown(RouteSnapshot::default()),
-                )
+                .wait("route export cleanup after router exit", async {
+                    if retain {
+                        exporter.retain().await
+                    } else {
+                        exporter.shutdown(RouteSnapshot::default()).await
+                    }
+                })
                 .await?
         {
             warn!(%error, "final route export cleanup failed");
@@ -386,7 +404,11 @@ async fn run_daemon(
             "shutdown deadline exceeded; cleanup may be incomplete"
         );
         let _ = services_shutdown.send(true);
-        handle.shutdown();
+        if retain {
+            handle.request_restart();
+        } else {
+            handle.shutdown();
+        }
         router_abort.abort();
         services.abort_all();
         return Err(Box::new(error));
@@ -436,11 +458,12 @@ async fn reload(
     if !active.reload_identity_matches(&candidate) {
         return Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "router_id, state_file, route_selection, limits, and export.protocol cannot change during reload",
+            "router_id, state_file, restart_recovery_seconds, route_selection, limits, and export.protocol cannot change during reload",
         )));
     }
 
     let new_origins = origin_map(&candidate)?;
+    exporter.recovery_interfaces(&candidate).await?;
     router
         .set_shutdown_timeout(std::time::Duration::from_millis(u64::from(
             candidate.shutdown_timeout_ms,

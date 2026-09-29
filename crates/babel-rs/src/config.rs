@@ -19,6 +19,10 @@ pub struct Config {
     pub state_file: String,
     #[serde(default = "default_shutdown_timeout_ms")]
     pub shutdown_timeout_ms: u32,
+    #[serde(default)]
+    pub shutdown_policy: ShutdownPolicy,
+    #[serde(default = "default_restart_recovery_seconds")]
+    pub restart_recovery_seconds: u32,
     pub interfaces: Vec<InterfaceSection>,
     #[serde(default)]
     pub route_selection: RouteSelection,
@@ -27,6 +31,18 @@ pub struct Config {
     #[serde(default)]
     pub origins: Vec<Origin>,
     pub export: Export,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShutdownPolicy {
+    #[default]
+    Clear,
+    Retain,
+}
+
+fn default_restart_recovery_seconds() -> u32 {
+    240
 }
 
 /// Optional overrides keep the protocol crate's defaults authoritative.
@@ -475,6 +491,8 @@ pub enum ConfigError {
     NoInterfaces,
     #[error("shutdown_timeout_ms must be greater than zero")]
     InvalidShutdownTimeout,
+    #[error("restart_recovery_seconds must be between 0 and 86400")]
+    InvalidRecoveryWindow,
     #[error("invalid metric configuration: {0}")]
     InvalidMetric(String),
     #[error("invalid route-selection configuration: {0}")]
@@ -539,6 +557,9 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.restart_recovery_seconds > 86400 {
+            return Err(ConfigError::InvalidRecoveryWindow);
+        }
         if self.shutdown_timeout_ms == 0 {
             return Err(ConfigError::InvalidShutdownTimeout);
         }
@@ -676,7 +697,8 @@ impl Config {
     }
 
     pub fn reload_identity_matches(&self, candidate: &Self) -> bool {
-        self.router_id == candidate.router_id
+        self.restart_recovery_seconds == candidate.restart_recovery_seconds
+            && self.router_id == candidate.router_id
             && self.state_file == candidate.state_file
             && self.route_selection == candidate.route_selection
             && self.limits.effective() == candidate.limits.effective()

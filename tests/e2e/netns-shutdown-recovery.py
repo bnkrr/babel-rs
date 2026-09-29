@@ -44,8 +44,9 @@ def main():
         netlink_hit = root / "netlink.hit"
         fsync_hit = root / "fsync.hit"
 
-        def write_config(timeout_ms=None, manage_rules=True, table=23101):
+        def write_config(timeout_ms=None, manage_rules=True, table=23101, recovery=240):
             text = f'router_id = "1234567812345678"\nstate_file = "{state}"\n'
+            text += f'restart_recovery_seconds = {recovery}\n'
             if timeout_ms is not None:
                 text += f'shutdown_timeout_ms = {timeout_ms}\n'
             text += f'''[[interfaces]]
@@ -89,12 +90,14 @@ source = "2001:db8:11::/48"
                 time.sleep(0.05)
             raise AssertionError(f"timed out: {description}")
 
-        def start(label, stall_fsync=False):
+        def start(label, stall_fsync=False, fsync_only=False):
             environment = os.environ.copy()
             environment.update(LD_PRELOAD=shim, RUST_LOG="info",
                                BABEL_TEST_STALL_MARKER=str(marker),
                                BABEL_TEST_NETLINK_HIT=str(netlink_hit),
                                BABEL_TEST_FSYNC_HIT=str(fsync_hit))
+            if fsync_only:
+                environment["BABEL_TEST_FSYNC_ONLY"] = "1"
             if stall_fsync:
                 environment["BABEL_TEST_STALL_FSYNC"] = "1"
             logfile = root / f"{len(processes)}-{label}.log"
@@ -222,7 +225,31 @@ source = "2001:db8:11::/48"
                 results.append(result)
                 print(json.dumps(result), flush=True)
 
-            # Critical service failure takes the same bounded cleanup path.
+            # Expiry can reach a stalled journal fsync. Status and the overall
+            # stop deadline must remain responsive, including runtime teardown.
+            write_config(timeout_ms=700, recovery=2)
+            run("ip", "-n", namespace, "link", "add", "absent0", "type", "dummy")
+            run("ip", "-n", namespace, "link", "set", "absent0", "up")
+            run("ip", "-n", namespace, "route", "add", "192.0.2.1/32", "dev", "absent0",
+                "table", "23101", "proto", "205", "metric", "65631")
+            fsync_hit.unlink(missing_ok=True)
+            proc, log = start("recovery-journal-stall", stall_fsync=True, fsync_only=True)
+            ready(proc)
+            assert command("status")["export"]["recovering_routes"] == 1
+            marker.touch()
+            wait_for(fsync_hit.exists, "recovery journal fsync stalled", timeout=6)
+            assert command("status")["ready"]
+            started = time.monotonic()
+            command("shutdown")
+            assert proc.wait(timeout=2) != 0
+            elapsed = time.monotonic() - started
+            assert 0.6 <= elapsed < 1.6, elapsed
+            assert "shutdown deadline exceeded" in log.read_text()
+            restart_and_check()
+            run("ip", "-n", namespace, "link", "del", "absent0")
+            results.append({"scenario": "recovery-journal-fsync-stall", "seconds": round(elapsed, 3)})
+
+            # Startup FIB discovery must also be bounded if netlink never replies.
             write_config(timeout_ms=700)
             control.write_text("not a socket")
             netlink_hit.unlink(missing_ok=True)
@@ -234,11 +261,10 @@ source = "2001:db8:11::/48"
             elapsed = time.monotonic() - started
             assert 0.6 <= elapsed < 2, elapsed
             assert netlink_hit.exists()
-            assert "control server failed" in log.read_text()
-            assert "shutdown deadline exceeded" in log.read_text()
+            assert "startup FIB recovery timed out" in log.read_text()
             control.unlink()
             restart_and_check()
-            results.append({"scenario": "critical-service-failure", "seconds": round(elapsed, 3)})
+            results.append({"scenario": "startup-recovery-netlink-stall", "seconds": round(elapsed, 3)})
             print(json.dumps({"test": "shutdown-recovery", "result": "PASS", "scenarios": results}), flush=True)
         except BaseException:
             for logfile in sorted(root.glob("*.log")):

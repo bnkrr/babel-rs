@@ -88,6 +88,31 @@ service completion share that single deadline. Expiry logs the unfinished
 stage, cancels pending router/service tasks and exits nonzero. A supervisor's
 forced-stop timeout should leave room beyond this budget.
 
+`shutdown_policy = "clear"` is the default: SIGINT, SIGTERM and the control
+shutdown command retract local origins and remove owned routes/rules. Set
+`shutdown_policy = "retain"` to checkpoint the sequence and leave forwarding
+state in place without sending deliberate origin retractions. Critical service
+failures also retain forwarding state and exit nonzero. SIGKILL cannot run any
+cleanup. The policy is reloadable.
+
+`restart_recovery_seconds = 240` sets the startup FIB recovery window (0 disables
+it; maximum 86400; changing it requires a restart). Before processing snapshots,
+the daemon adopts eligible finite routes on configured interfaces in its owned
+protocol and export tables, including automatic source tables and their rules.
+The protocol RIB starts empty: retained routes are never advertised as learned
+routes. A newly selected finite route replaces the old entry; unconfirmed entries
+are removed on expiry by the two-second exporter reconciliation loop. Explicit
+export-policy changes revoke recovery; excluded interfaces lose retained routes.
+
+The adjacent `<state_file>.fib-recovery.json` journal records per-route deadlines
+using boot time and namespace identity. Repeated crashes do not extend an
+unconfirmed route's deadline. Keep this journal across daemon restarts together
+with the state file. A corrupt/unwritable journal fails startup instead of silently
+resetting the window. IPv4 and IPv6 use the same policy. Expiry requires the daemon
+to run; if it never restarts, an external supervisor must retire its resources.
+This is local forwarding retention, not a wire-protocol graceful-restart extension;
+remote peers still apply normal Babel timers.
+
 Optional `[limits]` controls global neighbors, global candidates, and candidates
 per neighbor. It uses built-in defaults when omitted and requires a restart to
 change. See [Capacity](capacity.md) for all defaults and overload behavior.

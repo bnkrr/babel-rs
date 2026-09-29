@@ -310,6 +310,7 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
     let handle = RouterHandle {
         commands: commands_tx,
         shutdown: shutdown_tx,
+        retaining: Arc::new(AtomicBool::new(false)),
         routes,
     };
     // No privileged sockets: the real engine and command loop run against
@@ -332,6 +333,7 @@ async fn full_bad_interface_does_not_stall_engine_status_or_healthy_output() {
         received,
         received_tx,
         shutdown,
+        retaining: Arc::new(AtomicBool::new(false)),
         route_updates,
         metric: Arc::new(WiredMetric::default()),
         metric_algebra: Arc::new(AdditiveMetric),
@@ -692,4 +694,26 @@ async fn slow_exporter_coalesces_to_the_latest_complete_snapshot() {
     .unwrap();
     assert!(observed.load(Ordering::SeqCst) == 20);
     let _ = shutdown.send(true);
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_checkpoints_without_clearing_exported_routes() {
+    let store = TestSequenceStore::new(CheckpointOutcome::Success);
+    let exporter = CleanupExporter::default();
+    let router = BabelRouterBuilder::default()
+        .router_id(RouterId::new([1; 8]).unwrap())
+        .sequence_number(37)
+        .sequence_store(store.clone())
+        .exporter(exporter.clone())
+        .originate(
+            RouteKey::new("fd00::1/128".parse().unwrap(), None).unwrap(),
+            0,
+        )
+        .build()
+        .await
+        .unwrap();
+    router.handle().request_restart();
+    router.run().await.unwrap();
+    assert_eq!(*store.saved.lock().unwrap(), vec![37]);
+    assert_eq!(exporter.cleanups.load(Ordering::SeqCst), 0);
 }
