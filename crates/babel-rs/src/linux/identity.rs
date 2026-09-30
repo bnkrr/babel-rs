@@ -72,13 +72,16 @@ pub(super) fn route_identity(route: &RouteMessage) -> Option<RouteIdentity> {
             RouteAttribute::Via(RouteVia::Inet6(value)) => Some(IpAddr::V6(*value)),
             _ => None,
         });
+    let unreachable = route.header.kind == RouteType::Unreachable;
+    // Linux supplies the loopback OIF for IPv6 reject routes. It is not a
+    // forwarding next hop and must compare equal to the requested no-OIF form.
     Some(RouteIdentity {
         table: route_table(route),
         destination,
         priority,
-        output_interface,
-        gateway,
-        unreachable: route.header.kind == RouteType::Unreachable,
+        output_interface: if unreachable { 0 } else { output_interface },
+        gateway: if unreachable { None } else { gateway },
+        unreachable,
     })
 }
 

@@ -92,7 +92,7 @@ impl LinuxExporter {
                 next_hop = ?route.selected.as_ref().map(|value| value.next_hop),
                 unreachable = route.selected.is_none(),
                 priority,
-                "installing Babel route"
+                "projected Babel route"
             );
             messages.push((identity, message));
         }
@@ -104,6 +104,7 @@ impl LinuxExporter {
         let current_identities: HashSet<_> = current.iter().filter_map(route_identity).collect();
         for (identity, message) in messages {
             if !current_identities.contains(&identity) {
+                debug!(?identity, "installing Babel route");
                 self.handle.route().add(message).replace().execute().await?;
             }
         }
@@ -112,7 +113,15 @@ impl LinuxExporter {
                 !desired.contains(&identity) && !recovery.keep(&identity, &confirmed, now)
             }) {
                 debug!(table = route_table(&message), "deleting stale owned route");
-                self.handle.route().del(message).execute().await?;
+                // A same-priority next-hop replacement may already have
+                // removed this identity from the pre-install dump. Continue
+                // cleaning the remaining stale entries if it is absent.
+                if let Err(error) = self.handle.route().del(message).execute().await
+                    && !matches!(&error, rtnetlink::Error::NetlinkError(message)
+                        if message.raw_code() == -libc::ESRCH)
+                {
+                    return Err(error.into());
+                }
             }
         }
 

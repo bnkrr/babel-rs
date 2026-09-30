@@ -313,6 +313,8 @@ impl RouteExporter for LinuxExporter {
 }
 
 #[cfg(test)]
+mod kernel_tests;
+#[cfg(test)]
 mod tests;
 
 mod identity;

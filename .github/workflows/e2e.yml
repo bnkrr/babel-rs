@@ -27,6 +27,11 @@ jobs:
           sudo apt-get install --yes babeld bird2 iproute2 iputils-ping
       - name: Build daemon
         run: cargo build --locked --release --package babel-rs
+      - name: Test route reconciliation against the kernel
+        run: |
+          mkdir -p .local/experiments/ci
+          cargo test --locked --no-run --package babel-rs --message-format=json > .local/experiments/ci/tests.jsonl
+          sudo python3 tests/e2e/netns-route-reconcile.py --cargo-artifacts .local/experiments/ci/tests.jsonl
       - name: Build public route policy example
         run: cargo build --locked --release --package babel-router --example route_policy
       - name: Test runtime import/export policy replacement
