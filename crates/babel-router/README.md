@@ -10,7 +10,7 @@ Linux; Rust 1.90 or newer is required.
 
 ## Status and compatibility
 
-Version 0.6.0 is usable within the documented support scope. Most project code
+Version 0.7.0 is usable within the documented support scope. Most project code
 was written by **OpenAI Codex**. Automated tests and RFC review do not guarantee
 correctness or replace an independent security audit. Pin deployed versions,
 validate upgrades on your topology, and review the

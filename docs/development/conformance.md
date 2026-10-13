@@ -1,6 +1,6 @@
 # Protocol coverage
 
-This is the current implementation scope for babel-rs 0.6.0. It distinguishes
+This is the current implementation scope for babel-rs 0.7.0. It distinguishes
 mandatory behavior, recommendations, selected alternatives, and unsupported
 extensions. It is an implementation map, not a formal conformance certificate.
 

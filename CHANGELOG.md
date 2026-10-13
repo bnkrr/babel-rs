@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.0
+
+- Add `shutdown_policy = "retain"` for planned restarts. Retain checkpoints
+  sequence state and leaves forwarding entries in place without withdrawing
+  local announcements. Normal shutdown still defaults to `clear`; critical
+  daemon failures preserve forwarding state and exit unsuccessfully.
+- Recover eligible owned IPv4/IPv6 kernel routes and associated source rules
+  during startup. Fresh routes replace them; unconfirmed entries expire after
+  `restart_recovery_seconds` (default 240). Persisted deadlines survive repeated
+  crashes. Recovered kernel entries never enter the protocol RIB or get advertised.
+- Expose recovery progress in export status and add `RouterHandle::request_restart`
+  and the optional `RouteExporter::retain` hook for embedded runtimes.
+- Normalize kernel route identities and skip unchanged route writes, including
+  IPv6 unreachable entries. Continue stale-route cleanup when a next-hop
+  replacement has already removed the previous entry.
+- Add kernel reconciliation and failure-recovery regressions covering retained
+  forwarding, source rules, repeated crashes, configuration scope and stalled I/O.
+
+Migration from 0.6: existing configurations remain valid. Startup now temporarily
+retains eligible old FIB entries; set `restart_recovery_seconds = 0` to disable
+that behavior. Changing this value requires a daemon restart. Retain is opt-in
+and does not pause remote Babel timers or guarantee uninterrupted forwarding.
+Keep the state file and its adjacent recovery journal writable and persistent.
+See [configuration](docs/guide/configuration.md) and
+[embedding](docs/guide/embedding.md) for the new controls.
+
 ## 0.6.0
 
 - Separate automated publication: `vX.Y.Z` runs full checks and produces a GitHub
