@@ -166,7 +166,11 @@ redistribute deny
             wait("auto-prefers-ipv4", lambda: gateway(1, 0, "ipv4") and gateway(2, 0, "ipv4"))
             ip(0, "addr", "del", "192.0.2.1/24", "dev", "lan")
             wait("auto-address-removal", lambda: gateway(2, 0, "ipv6"))
-            assert ping(2, 0) and ping(0, 1, 6)
+            # Linux also removes this interface's IPv4 gateway routes. The
+            # remote next-hop update can arrive before the local exporter's
+            # two-second reconciliation restores the return path.
+            wait("auto-address-removal-forwarding",
+                 lambda: route(0, 2) and ping(2, 0) and ping(0, 1, 6), budget=10)
             reload_mode("ipv4")
             wait("forced-ipv4-unavailable", lambda: control(0, "interfaces")[0]["effective_ipv4_next_hop"] == "unavailable" and route(1, 0) is None and route(2, 0) is None)
             assert ping(0, 1, 6) and ping(1, 0, 6)
@@ -186,8 +190,15 @@ redistribute deny
             wait("one-way-loss-recovery", all_routes)
             assert ping(2, 0) and ping(0, 2)
             run("ip", "netns", "exec", spaces[2], "tc", "qdisc", "add", "dev", "lan", "root", "netem", "loss", "10%")
-            time.sleep(12)
-            assert all_routes()
+            # Random loss can legitimately fail wired's two-of-three Hello
+            # threshold. Check isolation continuously and bounded convergence
+            # under loss, rather than requiring every route at one instant.
+            start = time.monotonic()
+            while time.monotonic() - start < 12:
+                assert ping(0, 1) and ping(1, 0) and ping(0, 1, 6)
+                time.sleep(0.25)
+            wait("partial-loss-forwarding",
+                 lambda: all_routes() and ping(2, 0) and ping(0, 2))
             run("ip", "netns", "exec", spaces[2], "tc", "qdisc", "del", "dev", "lan", "root")
             wait("packet-loss-recovery", lambda: all_routes() and ping(2, 0) and ping(0, 2))
             print(json.dumps({"test": "general", "result": "PASS", "phases": phases}), flush=True)
