@@ -100,10 +100,10 @@ start_babeld
 
 attempt=0
 while :; do
-  rs_v6=$(ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null || true)
-  c_v6=$(ip -n "${ns_c}" -6 route show table 201 exact 2001:db8:100::/64 2>/dev/null || true)
-  c_v4=$(ip -n "${ns_c}" route show table 201 exact 198.51.100.0/24 2>/dev/null || true)
-  c_ss=$(ip -n "${ns_c}" -6 route show table 201 from 2001:db8:aaaa::/64 exact 2001:db8:300::/64 2>/dev/null || true)
+  rs_v6=$(ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 type unicast 2>/dev/null || true)
+  c_v6=$(ip -n "${ns_c}" -6 route show table 201 exact 2001:db8:100::/64 type unicast 2>/dev/null || true)
+  c_v4=$(ip -n "${ns_c}" route show table 201 exact 198.51.100.0/24 type unicast 2>/dev/null || true)
+  c_ss=$(ip -n "${ns_c}" -6 route show table 201 from 2001:db8:aaaa::/64 exact 2001:db8:300::/64 type unicast 2>/dev/null || true)
   rs_rule=$(ip -n "${ns_rs}" -6 -details rule show 2>/dev/null | grep 'from 2001:db8:aaaa::/64 lookup 20001 proto 203' || true)
   stale=$(ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:dead::/64 proto 203 2>/dev/null || true)
   if test -n "${rs_v6}" && test -n "${c_v6}" && test -n "${c_v4}" && test -n "${c_ss}" && test -n "${rs_rule}" && test -z "${stale}"; then
@@ -126,10 +126,16 @@ wait "${pid_c}" || true
 pid_c=
 start_babeld
 attempt=0
-while ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null | grep -q .; do
+while ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 type unicast 2>/dev/null | grep -q .; do
   attempt=$((attempt + 1))
   test "${attempt}" -lt 45 || { echo "babeld retraction did not converge" >&2; exit 1; }
   sleep 1
+done
+# Withdrawal holds prevent a less-specific route from attracting traffic.
+# They are not forwarding paths and must not satisfy re-announcement below.
+for table in 20000 20001; do
+  test -z "$(ip -n "${ns_rs}" -6 route show table "${table}" exact 2001:db8:200::/64 proto 203 type unicast)"
+  ip -n "${ns_rs}" -6 route show table "${table}" exact 2001:db8:200::/64 proto 203 type unreachable | grep -q .
 done
 kill -TERM "${pid_c}"
 wait "${pid_c}" || true
@@ -137,7 +143,7 @@ pid_c=
 ip -n "${ns_c}" -6 route add blackhole 2001:db8:200::/64 proto 99
 start_babeld
 attempt=0
-while ! ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null | grep -q .; do
+while ! ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 type unicast 2>/dev/null | grep -q .; do
   attempt=$((attempt + 1))
   test "${attempt}" -lt 45 || { echo "babeld re-announcement did not converge" >&2; exit 1; }
   sleep 1
@@ -163,8 +169,8 @@ ip netns exec "${ns_rs}" env RUST_LOG=debug "${daemon}" --config "${runtime}/rs.
 pid_rs=$!
 attempt=0
 while :; do
-  rs_v6=$(ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 2>/dev/null || true)
-  c_v6=$(ip -n "${ns_c}" -6 route show table 201 exact 2001:db8:100::/64 2>/dev/null || true)
+  rs_v6=$(ip -n "${ns_rs}" -6 route show table 20000 exact 2001:db8:200::/64 proto 203 type unicast 2>/dev/null || true)
+  c_v6=$(ip -n "${ns_c}" -6 route show table 201 exact 2001:db8:100::/64 type unicast 2>/dev/null || true)
   test -z "${rs_v6}" || test -z "${c_v6}" || break
   attempt=$((attempt + 1))
   test "${attempt}" -lt 45 || { echo "restart did not converge" >&2; exit 1; }
