@@ -53,7 +53,8 @@ candidate checkout, verify real crate archives and independent consumers:
 python3 tests/release/check-packages.py --output /tmp/babel-release-check
 ```
 
-Use a fresh output directory per candidate. `--offline` uses cached dependencies.
+Use a fresh output directory per candidate and allow registry index access.
+Cargo's workspace package verification requires this even with cached dependencies.
 The archive check verifies README/license/examples, tests extracted libraries and
 doctests, checks rustdoc, and installs the daemon from its archive. Its consumer
 patches only extracted archive dependencies. The script never uploads.

@@ -2,7 +2,7 @@
 """Verify archives and independent consumers without publishing any package.
 
 Requires Cargo with workspace packaging (tested with 1.96), Python 3.11+,
-and the workspace dependencies in the cache when --offline is selected.
+and registry index access.
 """
 import argparse
 import json
@@ -17,7 +17,6 @@ import tomllib
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--offline", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--output", type=Path, help="retain archives and build artifacts here")
     args = parser.parse_args()
@@ -34,13 +33,12 @@ def main():
         def run(*command, cwd=output):
             subprocess.run(command, cwd=cwd, env=environment, check=True)
 
-        offline = ["--offline"] if args.offline else []
         dirty = ["--allow-dirty"] if args.allow_dirty else []
         # Cargo caches staged registry packages by name/version. Give every
         # rehearsal a fresh staging registry so editing an unpublished version
         # cannot accidentally verify a previous run's dependency contents.
         package_target = Path(temporary) / "packaging"
-        run(cargo, "package", "--workspace", "--locked", "--target-dir", str(package_target), *offline, *dirty, cwd=repo)
+        run(cargo, "package", "--workspace", "--locked", "--target-dir", str(package_target), *dirty, cwd=repo)
         archives = output / "archives"
         archives.mkdir(exist_ok=True)
         extracted = Path(temporary) / "unpacked"
@@ -115,14 +113,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ''')
-        run(cargo, "run", "--manifest-path", str(consumer / "Cargo.toml"), "--config", str(patches), *offline)
+        run(cargo, "run", "--manifest-path", str(consumer / "Cargo.toml"), "--config", str(patches))
         for name in names[:2]:
             crate = extracted / f"{name}-{version}/Cargo.toml"
-            run(cargo, "test", "--manifest-path", str(crate), "--all-targets", "--config", str(patches), *offline)
-            run(cargo, "test", "--manifest-path", str(crate), "--doc", "--config", str(patches), *offline)
-            run(cargo, "doc", "--manifest-path", str(crate), "--no-deps", "--config", str(patches), *offline)
+            run(cargo, "test", "--manifest-path", str(crate), "--all-targets", "--config", str(patches))
+            run(cargo, "test", "--manifest-path", str(crate), "--doc", "--config", str(patches))
+            run(cargo, "doc", "--manifest-path", str(crate), "--no-deps", "--config", str(patches))
         run(cargo, "install", "--path", str(extracted / f"babel-rs-{version}"), "--root", str(output / "install"),
-            "--locked", "--force", "--config", str(patches), *offline)
+            "--locked", "--force", "--config", str(patches))
         binary = output / "install/bin/babel-rs"
         run(str(binary), "check", "--config", str(extracted / f"babel-rs-{version}/examples/babel-rs.toml"))
         run(str(binary), "--version")
