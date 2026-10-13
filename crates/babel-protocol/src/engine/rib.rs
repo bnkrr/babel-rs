@@ -332,7 +332,11 @@ impl Engine {
                     let ready = now_ms.saturating_sub(pending.since_ms)
                         >= self.config.route_selection.better_for_ms;
                     if recovered {
-                        self.pending_switches.remove(&key);
+                        // The alternate still clears both margins. Restart
+                        // the dwell while keeping timer-driven reselection
+                        // alive even if subsequent Updates are unchanged.
+                        pending.since_ms = now_ms;
+                        pending.current_peak_metric = current.metric;
                         current
                     } else if ready {
                         self.pending_switches.remove(&key);

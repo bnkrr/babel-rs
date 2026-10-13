@@ -998,7 +998,7 @@ fn initial_candidate_discovery_is_not_delayed_by_hysteresis() {
 }
 
 #[test]
-fn meaningful_current_route_recovery_cancels_a_stale_switch() {
+fn meaningful_current_route_recovery_restarts_dwell_without_packet_changes() {
     let mut engine = Engine::new(config(id(1)));
     let route_key = key();
     insert_candidate(&mut engine, route_key, id(2), "eth0", "fe80::2", 200);
@@ -1029,10 +1029,12 @@ fn meaningful_current_route_recovery_cancels_a_stale_switch() {
     engine.reselect(7_000);
     assert_eq!(engine.selected_routes()[0].interface, "eth0");
 
-    engine.reselect(8_000);
-    engine.reselect(15_999);
+    // No further route update or metric change is needed to finish the new
+    // dwell window. The host only advances the engine's regular timer.
+    engine.tick(8_000);
+    engine.tick(14_999);
     assert_eq!(engine.selected_routes()[0].interface, "eth0");
-    engine.reselect(16_000);
+    engine.tick(15_000);
     assert_eq!(engine.selected_routes()[0].interface, "eth1");
 }
 

@@ -15,6 +15,9 @@
 - Normalize kernel route identities and skip unchanged route writes, including
   IPv6 unreachable entries. Continue stale-route cleanup when a next-hop
   replacement has already removed the previous entry.
+- Restart route-switch hysteresis when the current path improves but an
+  alternate remains better. Periodic ticks complete the new wait even when
+  subsequent updates are unchanged, avoiding a persistent suboptimal path.
 - Add kernel reconciliation and failure-recovery regressions covering retained
   forwarding, source rules, repeated crashes, configuration scope and stalled I/O.
 
