@@ -58,6 +58,9 @@ pub(super) fn project_routes(
 }
 
 fn route_matches_view(view: &ExportView, key: RouteKey) -> bool {
+    if key.source.is_none() && !view.admits_ordinary(key.destination) {
+        return false;
+    }
     match (view.source, key.source) {
         (None, None) => true,
         (Some(view_source), None) => {
@@ -133,6 +136,7 @@ pub(super) fn source_views_with_recovery(
             table,
             source: Some(source),
             rule_priority: None,
+            ordinary_prefixes: None,
         });
     }
     Ok(views)
@@ -143,10 +147,19 @@ pub(super) fn source_views_with_recovery(
 pub(crate) struct SourcePolicy(pub Export);
 
 impl SourcePolicy {
-    fn supported(&self, key: RouteKey) -> bool {
-        key.source.is_none()
-            || self.0.automatic_sources()
-            || self.0.views.iter().any(|v| v.source == key.source)
+    pub(super) fn supported(&self, key: RouteKey) -> bool {
+        match key.source {
+            None => self.0.views.iter().any(|view| {
+                view.admits_ordinary(key.destination)
+                    && view.source.is_none_or(|source| {
+                        source.addr().is_ipv4() == key.destination.addr().is_ipv4()
+                    })
+            }),
+            Some(source) => {
+                self.0.automatic_sources()
+                    || self.0.views.iter().any(|view| view.source == Some(source))
+            }
+        }
     }
 }
 

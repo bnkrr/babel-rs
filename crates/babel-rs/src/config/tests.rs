@@ -92,7 +92,7 @@ source = "10.0.0.0/8"
     .unwrap();
     config.validate().unwrap();
     assert!(config.origins[0].key().unwrap().source.is_some());
-    assert_eq!(config.export.rule_priority(config.export.views[1]), 10120);
+    assert_eq!(config.export.rule_priority(&config.export.views[1]), 10120);
 }
 
 #[test]
@@ -147,8 +147,8 @@ source = "10.1.0.0/16"
     )
     .unwrap();
     assert!(
-        config.export.rule_priority(config.export.views[1])
-            < config.export.rule_priority(config.export.views[0])
+        config.export.rule_priority(&config.export.views[1])
+            < config.export.rule_priority(&config.export.views[0])
     );
 }
 
@@ -193,8 +193,8 @@ rule_priority = 100
             .replace("rule_priority = 100", ""),
     )
     .unwrap();
-    assert_eq!(auto.export.rule_priority(auto.export.views[0]), 612);
-    assert_eq!(auto.export.rule_priority(auto.export.views[1]), 604);
+    assert_eq!(auto.export.rule_priority(&auto.export.views[0]), 612);
+    assert_eq!(auto.export.rule_priority(&auto.export.views[1]), 604);
 }
 
 #[test]

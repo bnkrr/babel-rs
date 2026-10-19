@@ -1,6 +1,78 @@
 use super::*;
 use babel_protocol::{RouteKey, RouterId};
 
+#[test]
+fn scoped_ordinary_routes_stay_in_their_own_source_view() {
+    let p1: IpNet = "10.100.1.0/24".parse().unwrap();
+    let p2: IpNet = "10.100.2.0/24".parse().unwrap();
+    let mut export = automatic_export();
+    export.manage_rules = false;
+    export.views = vec![
+        ExportView {
+            table: 20000,
+            source: None,
+            rule_priority: None,
+            ordinary_prefixes: Some(vec![p1, p2]),
+        },
+        ExportView {
+            table: 20001,
+            source: Some(p1),
+            rule_priority: None,
+            ordinary_prefixes: Some(vec![p1]),
+        },
+        ExportView {
+            table: 20002,
+            source: Some(p2),
+            rule_priority: None,
+            ordinary_prefixes: Some(vec![p2]),
+        },
+    ];
+    let snapshot = RouteSnapshot {
+        routes: vec![
+            selected("10.100.1.0/24", None, 96),
+            selected("10.100.2.0/24", None, 96),
+            selected("0.0.0.0/0", Some("10.100.1.0/24"), 96),
+        ],
+        ..Default::default()
+    };
+    let projected = project_routes(&export.views, &snapshot);
+    assert!(
+        projected
+            .iter()
+            .any(|r| r.table == 20000 && r.key.destination == p2)
+    );
+    assert!(
+        !projected
+            .iter()
+            .any(|r| r.table == 20001 && r.key.destination == p2)
+    );
+    assert!(
+        !projected
+            .iter()
+            .any(|r| r.table == 20002 && r.key.destination == p1)
+    );
+    assert!(
+        projected
+            .iter()
+            .any(|r| r.table == 20001 && r.key.source == Some(p1))
+    );
+    let policy = projection::SourcePolicy(export.clone());
+    assert!(policy.supported(RouteKey::new(p1, None).unwrap()));
+    assert!(!policy.supported(selected("10.200.0.0/16", None, 96).key));
+    assert!(!policy.supported(selected("0.0.0.0/0", None, 96).key));
+    assert!(!policy.supported(selected("0.0.0.0/0", Some("10.100.3.0/24"), 96).key));
+    // Removing a Domain revokes its ordinary candidates as well as its source
+    // view. A retained tombstone cannot bypass a newly restricted view.
+    export.views.retain(|view| view.table != 20002);
+    export.views[0].ordinary_prefixes = Some(vec![p1]);
+    assert!(!projection::SourcePolicy(export.clone()).supported(RouteKey::new(p2, None).unwrap()));
+    let withdrawn = RouteSnapshot {
+        unreachable: vec![RouteKey::new(p2, None).unwrap()],
+        ..Default::default()
+    };
+    assert!(project_routes(&export.views, &withdrawn).is_empty());
+}
+
 pub(super) fn selected(destination: &str, source: Option<&str>, metric: u16) -> SelectedRoute {
     SelectedRoute {
         key: RouteKey::new(
@@ -28,6 +100,7 @@ pub(super) fn automatic_export() -> Export {
             table: 201,
             source: None,
             rule_priority: None,
+            ordinary_prefixes: None,
         }],
     }
 }
@@ -103,7 +176,7 @@ fn source_views_match_destination_first_oracle_for_ipv4_and_ipv6() {
                     .filter(|v| v.source.is_none_or(|s| s.contains(&src)))
                     .min_by_key(|v| {
                         if v.source.is_some() {
-                            automatic_export().rule_priority(**v)
+                            automatic_export().rule_priority(v)
                         } else {
                             u32::MAX
                         }
@@ -127,6 +200,7 @@ fn inherited_routes_refresh_withdraw_and_keep_tables_until_hold_expires() {
         table: 202,
         source: Some("10.1.2.0/24".parse().unwrap()),
         rule_priority: None,
+        ordinary_prefixes: None,
     });
     let parent = selected("192.0.2.0/24", Some("10.0.0.0/8"), 500);
     let child = selected("0.0.0.0/0", Some("10.1.0.0/16"), 100);
@@ -182,11 +256,13 @@ fn ordinary_routes_are_materialized_into_every_matching_view() {
             table: 20000,
             source: None,
             rule_priority: None,
+            ordinary_prefixes: None,
         },
         ExportView {
             table: 20001,
             source: Some("10.0.0.0/8".parse().unwrap()),
             rule_priority: None,
+            ordinary_prefixes: None,
         },
     ];
     let routes = project_routes(&views, &snapshot);
@@ -208,6 +284,7 @@ fn exact_source_route_overrides_ordinary_route_in_its_view() {
         table: 20001,
         source: Some("10.0.0.0/8".parse().unwrap()),
         rule_priority: None,
+        ordinary_prefixes: None,
     }];
     let routes = project_routes(&views, &snapshot);
     assert_eq!(routes.len(), 1);
@@ -227,11 +304,13 @@ fn explicit_zero_source_is_an_ordinary_route() {
             table: 20000,
             source: None,
             rule_priority: None,
+            ordinary_prefixes: None,
         },
         ExportView {
             table: 20001,
             source: Some("10.0.0.0/8".parse().unwrap()),
             rule_priority: None,
+            ordinary_prefixes: None,
         },
     ];
     let routes = project_routes(&views, &snapshot);
@@ -252,11 +331,13 @@ fn unreachable_tombstone_is_projected_into_matching_views() {
             table: 20000,
             source: None,
             rule_priority: None,
+            ordinary_prefixes: None,
         },
         ExportView {
             table: 20001,
             source: Some("10.0.0.0/8".parse().unwrap()),
             rule_priority: None,
+            ordinary_prefixes: None,
         },
     ];
     let routes = project_routes(&views, &snapshot);
@@ -336,6 +417,7 @@ fn source_specificity_orders_finite_routes_and_tombstones_equally() {
                 table: 100,
                 source: Some(source.parse().unwrap()),
                 rule_priority: None,
+                ordinary_prefixes: None,
             }],
             &snapshot,
         );

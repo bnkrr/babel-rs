@@ -460,7 +460,7 @@ fn default_source_rule_priority() -> u32 {
 }
 
 impl Export {
-    pub fn rule_priority(&self, view: ExportView) -> u32 {
+    pub fn rule_priority(&self, view: &ExportView) -> u32 {
         view.rule_priority.unwrap_or_else(|| {
             self.source_rule_priority
                 .saturating_add(u32::from(128 - view.source.map_or(0, |s| s.prefix_len())))
@@ -471,12 +471,24 @@ impl Export {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExportView {
     pub table: u32,
     pub source: Option<IpNet>,
     pub rule_priority: Option<u32>,
+    /// Ordinary destinations available in this view. Omitted preserves the
+    /// standard complete view; an empty list admits no ordinary destinations.
+    #[serde(default)]
+    pub ordinary_prefixes: Option<Vec<IpNet>>,
+}
+
+impl ExportView {
+    pub fn admits_ordinary(&self, destination: IpNet) -> bool {
+        self.ordinary_prefixes
+            .as_ref()
+            .is_none_or(|prefixes| prefixes.iter().any(|prefix| prefix.contains(&destination)))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -551,6 +563,11 @@ impl Config {
                 .source
                 .filter(|source| source.prefix_len() != 0)
                 .map(|source| source.trunc());
+            if let Some(prefixes) = &mut view.ordinary_prefixes {
+                for prefix in prefixes {
+                    *prefix = prefix.trunc();
+                }
+            }
         }
         value.validate()?;
         Ok(value)
@@ -587,9 +604,10 @@ impl Config {
             && (!(256..=0x7fff_ffff).contains(&self.export.source_table_base)
                 || self.export.views.iter().any(|v| {
                     v.rule_priority.is_some_and(|p| {
-                        p != self.export.rule_priority(ExportView {
+                        p != self.export.rule_priority(&ExportView {
                             rule_priority: None,
-                            ..*v
+                            ordinary_prefixes: None,
+                            ..v.clone()
                         })
                     })
                 }))
@@ -636,11 +654,10 @@ impl Config {
                     }
                     if prefixes_overlap(l, r)
                         && ((l.prefix_len() > r.prefix_len()
-                            && self.export.rule_priority(*left)
-                                >= self.export.rule_priority(*right))
+                            && self.export.rule_priority(left) >= self.export.rule_priority(right))
                             || (r.prefix_len() > l.prefix_len()
-                                && self.export.rule_priority(*right)
-                                    >= self.export.rule_priority(*left)))
+                                && self.export.rule_priority(right)
+                                    >= self.export.rule_priority(left)))
                     {
                         return Err(ConfigError::SourceRuleOrder(l, r));
                     }

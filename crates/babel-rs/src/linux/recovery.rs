@@ -18,6 +18,8 @@ struct Journal {
     boot: String,
     namespace: String,
     protocol: u8,
+    #[serde(default)]
+    export_scope: String,
     pending: Vec<PendingRoute>,
 }
 
@@ -91,8 +93,8 @@ pub(super) fn boot_ms() -> Result<u64, std::io::Error> {
 impl Recovery {
     fn load(
         config: &Config,
-        routes: Vec<RouteIdentity>,
-        rules: Vec<RuleIdentity>,
+        mut routes: Vec<RouteIdentity>,
+        mut rules: Vec<RuleIdentity>,
         now: u64,
     ) -> Result<Self, LinuxError> {
         let path = PathBuf::from(format!("{}.fib-recovery.json", config.state_file));
@@ -105,6 +107,24 @@ impl Recovery {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Journal::default(),
             Err(e) => return Err(e.into()),
         };
+        // Kernel entries no longer carry their Babel source key. Retaining an
+        // old table after its view policy changed could therefore resurrect an
+        // ordinary route that the new Domain scope explicitly rejects.
+        let export_scope = format!("{:?}", config.export);
+        let scoped = config
+            .export
+            .views
+            .iter()
+            .any(|view| view.ordinary_prefixes.is_some());
+        let scope_changed = if previous.export_scope.is_empty() {
+            scoped
+        } else {
+            previous.export_scope != export_scope
+        };
+        if scope_changed {
+            routes.clear();
+            rules.clear();
+        }
         let compatible = previous.version == 1
             && previous.boot == boot
             && previous.namespace == namespace
@@ -133,6 +153,7 @@ impl Recovery {
                 boot,
                 namespace,
                 protocol: config.export.protocol,
+                export_scope,
                 pending,
             },
             rules,
@@ -256,14 +277,15 @@ fn eligible_rule(rule: &RuleIdentity, export: &Export) -> bool {
         && (export.views.iter().any(|v| {
             v.source == Some(rule.source)
                 && v.table == rule.table
-                && export.rule_priority(*v) == rule.priority
+                && export.rule_priority(v) == rule.priority
         }) || (export.automatic_sources()
             && rule.table >= export.source_table_base
             && !export.views.iter().any(|v| v.table == rule.table)
-            && export.rule_priority(ExportView {
+            && export.rule_priority(&ExportView {
                 table: rule.table,
                 source: Some(rule.source),
                 rule_priority: None,
+                ordinary_prefixes: None,
             }) == rule.priority))
 }
 
@@ -343,6 +365,24 @@ mod tests {
     }
 
     #[test]
+    fn changed_view_scope_does_not_retain_old_kernel_routes() {
+        let root = std::env::temp_dir().join(format!("babel-fib-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config=Config::parse(&format!(
+            "state_file = {:?}\nrestart_recovery_seconds = 10\n[[interfaces]]\nmatch = [\"wg*\"]\n[export]\n[[export.views]]\ntable = 201\nordinary_prefixes = [\"192.0.2.0/24\"]\n",
+            root.join("state").to_str().unwrap())).unwrap();
+        let routes = vec![route("192.0.2.1/32")];
+        let first = Recovery::load(&config, routes.clone(), vec![], 1000).unwrap();
+        assert_eq!(first.remaining(1000), (0, 0));
+        let unchanged = Recovery::load(&config, routes.clone(), vec![], 2000).unwrap();
+        assert_eq!(unchanged.remaining(2000), (1, 10_000));
+        config.export.views[0].ordinary_prefixes = Some(vec!["198.51.100.0/24".parse().unwrap()]);
+        let changed = Recovery::load(&config, routes, vec![], 3000).unwrap();
+        assert_eq!(changed.remaining(3000), (0, 0));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn crash_loops_preserve_deadline_and_confirmation_releases_it() {
         let root = std::env::temp_dir().join(format!("babel-fib-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -382,10 +422,11 @@ mod tests {
         let rule = RuleIdentity {
             source,
             table: export.source_table_base,
-            priority: export.rule_priority(ExportView {
+            priority: export.rule_priority(&ExportView {
                 source: Some(source),
                 table: export.source_table_base,
                 rule_priority: None,
+                ordinary_prefixes: None,
             }),
         };
         assert!(eligible_rule(&rule, &export));

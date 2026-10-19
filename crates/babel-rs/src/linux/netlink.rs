@@ -144,7 +144,7 @@ impl LinuxExporter {
                 .filter_map(|view| {
                     Some(RuleIdentity {
                         table: view.table,
-                        priority: export.rule_priority(*view),
+                        priority: export.rule_priority(view),
                         source: view.source?,
                     })
                 })
@@ -173,7 +173,7 @@ impl LinuxExporter {
                     export.views.iter().any(|v| {
                         v.source == Some(rule.source)
                             && v.table == rule.table
-                            && export.rule_priority(*v) == rule.priority
+                            && export.rule_priority(v) == rule.priority
                     })
                 });
             if !keep {

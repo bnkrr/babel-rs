@@ -61,6 +61,28 @@ apply more-specific routes to the wrong sources. Overlapping configured views
 remain supported, and explicit priorities are validated for their ordering.
 Export-policy reload reevaluates the routing policy as well as kernel state.
 
+An external Domain manager can restrict ordinary destination inheritance on
+each explicitly configured view:
+
+```toml
+[[export.views]]
+table = 20001
+source = "10.100.1.0/24"
+ordinary_prefixes = ["10.100.1.0/24", "10.100.3.0/24", "fd78::/48"]
+```
+
+An ordinary route is included only when its entire destination prefix is
+contained in an allowed prefix. Omitting `ordinary_prefixes` preserves normal
+complete-view inheritance; an empty list allows no ordinary destinations in
+that view. This does not filter source-specific exits by their destination.
+The import/announcement policy rejects an ordinary candidate unless at least
+one same-family/ordinary view admits it, so an unwanted prefix cannot remain
+a selected transit path merely because its FIB projection was omitted.
+Withdrawals use the same projection limits. Reload changes reevaluate existing
+candidates; changing export scope also invalidates startup FIB recovery from the
+old scope. These are local policy and Linux projection settings, not Babel wire
+extensions or Domain identifiers.
+
 These views represent the selected Babel RIB and its withdrawal holds. Kernel
 connected/static routes are not automatically redistributed or copied into
 views. Hosts must integrate any additional forwarding policy and explicitly
