@@ -13,12 +13,12 @@ Download the bundle matching `uname -m` and `SHA256SUMS` from the same
 | `x86_64` | `x86_64-unknown-linux-musl` |
 | `aarch64` / ARM64 | `aarch64-unknown-linux-musl` |
 
-For example, with the 0.8.0 x86_64 bundle and its checksum file in one directory:
+For example, with the 0.8.1 x86_64 bundle and its checksum file in one directory:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf babel-rs-0.8.0-x86_64-unknown-linux-musl.tar.gz
-cd babel-rs-0.8.0-x86_64-unknown-linux-musl
+tar -xzf babel-rs-0.8.1-x86_64-unknown-linux-musl.tar.gz
+cd babel-rs-0.8.1-x86_64-unknown-linux-musl
 ./babel-rs --version
 sudo install -m 0755 babel-rs /usr/bin/babel-rs
 ```
@@ -49,7 +49,7 @@ rules before the main table; configure these using the
 before starting the service. The service uses `/usr/bin/babel-rs`, keeps state
 in `/var/lib/babel-rs`, and uses `/run/babel-rs/babel-rs.ctl` for local control.
 
-Version 0.8.0 is usable within the
+Version 0.8.1 is usable within the
 [documented support scope](https://github.com/bnkrr/babel-rs/blob/main/docs/guide/support.md).
 Most project code was written by **OpenAI Codex**; tests and RFC review do not
 replace an independent security audit. Pin deployed versions, validate changes

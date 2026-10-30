@@ -10,7 +10,7 @@ belong to the host. babeld and BIRD are interoperability peers, not dependencies
 
 ## Status
 
-Version **0.8.0 is usable for routing and embedding** within the documented
+Version **0.8.1 is usable for routing and embedding** within the documented
 [platform support and operational limits](docs/guide/support.md).
 
 Most of this project's code was written by **OpenAI Codex**. Tests and RFC review

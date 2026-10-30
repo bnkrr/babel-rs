@@ -9,7 +9,7 @@ It uses Rust's standard library and requires Rust 1.90 or newer.
 
 ## Status and compatibility
 
-Version 0.8.0 is usable within the documented support scope. Most project code
+Version 0.8.1 is usable within the documented support scope. Most project code
 was written by **OpenAI Codex**. Automated tests and RFC review do not guarantee
 correctness or replace an independent security audit. Pin deployed versions,
 validate upgrades on your topology, and review the

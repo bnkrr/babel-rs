@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0
+## 0.8.1
 
 - Add independent daemon `policy.import`, `policy.announce`, and per-view
   `filter` rules using source/destination prefixes with exact or subnet matches.
@@ -12,6 +12,8 @@
   expired recovery identities when import/export policy changes so a second
   crash before kernel cleanup cannot revive rejected routes.
 - Add dual-stack daemon policy reload regressions and scope-change crash tests.
+- Isolate shutdown recovery scenarios so the stalled-journal regression uses
+  the same export scope as the seeded route.
 
 Migration from 0.7: released configurations remain valid. Omitting the new rules
 keeps protocol routes allowed and export views complete. Filtering an export

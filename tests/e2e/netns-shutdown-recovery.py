@@ -228,6 +228,12 @@ source = "2001:db8:11::/48"
             # Expiry can reach a stalled journal fsync. Status and the overall
             # stop deadline must remain responsive, including runtime teardown.
             write_config(timeout_ms=700, recovery=2)
+            # The preceding cleanup uses different export tables. Establish
+            # this scenario's scope before seeding a recoverable route; a scope
+            # change deliberately revokes recovery from the previous journal.
+            proc, _ = start("recovery-journal-baseline")
+            ready(proc)
+            normal_stop(proc)
             run("ip", "-n", namespace, "link", "add", "absent0", "type", "dummy")
             run("ip", "-n", namespace, "link", "set", "absent0", "up")
             run("ip", "-n", namespace, "route", "add", "192.0.2.1/32", "dev", "absent0",
