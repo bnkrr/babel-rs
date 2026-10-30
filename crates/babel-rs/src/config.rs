@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use babel_protocol::{
@@ -30,6 +30,8 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub origins: Vec<Origin>,
+    #[serde(default)]
+    pub policy: crate::policy::Policies,
     pub export: Export,
 }
 
@@ -432,7 +434,7 @@ impl Origin {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Export {
     #[serde(default = "default_protocol")]
@@ -471,28 +473,22 @@ impl Export {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExportView {
     pub table: u32,
     pub source: Option<IpNet>,
     pub rule_priority: Option<u32>,
-    /// Ordinary destinations available in this view. Omitted preserves the
-    /// standard complete view; an empty list admits no ordinary destinations.
+    /// Select logical routes before source precedence and table projection.
+    /// Omission preserves the complete selected routing view.
     #[serde(default)]
-    pub ordinary_prefixes: Option<Vec<IpNet>>,
-}
-
-impl ExportView {
-    pub fn admits_ordinary(&self, destination: IpNet) -> bool {
-        self.ordinary_prefixes
-            .as_ref()
-            .is_none_or(|prefixes| prefixes.iter().any(|prefix| prefix.contains(&destination)))
-    }
+    pub filter: crate::policy::Filter,
 }
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("route policy: {0}")]
+    Policy(String),
     #[error("MAC configuration: {0}")]
     Mac(String),
     #[error("read configuration: {0}")]
@@ -563,17 +559,29 @@ impl Config {
                 .source
                 .filter(|source| source.prefix_len() != 0)
                 .map(|source| source.trunc());
-            if let Some(prefixes) = &mut view.ordinary_prefixes {
-                for prefix in prefixes {
-                    *prefix = prefix.trunc();
-                }
-            }
+            view.filter.normalize();
         }
+        value.policy.import.normalize();
+        value.policy.announce.normalize();
         value.validate()?;
         Ok(value)
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        use crate::policy::Stage;
+        self.policy
+            .import
+            .validate(Stage::Import)
+            .map_err(|e| ConfigError::Policy(format!("policy.import: {e}")))?;
+        self.policy
+            .announce
+            .validate(Stage::Announce)
+            .map_err(|e| ConfigError::Policy(format!("policy.announce: {e}")))?;
+        for view in &self.export.views {
+            view.filter
+                .validate(Stage::Install)
+                .map_err(|e| ConfigError::Policy(format!("export view {}: {e}", view.table)))?;
+        }
         if self.restart_recovery_seconds > 86400 {
             return Err(ConfigError::InvalidRecoveryWindow);
         }
@@ -606,7 +614,7 @@ impl Config {
                     v.rule_priority.is_some_and(|p| {
                         p != self.export.rule_priority(&ExportView {
                             rule_priority: None,
-                            ordinary_prefixes: None,
+                            filter: Default::default(),
                             ..v.clone()
                         })
                     })
@@ -764,7 +772,7 @@ fn prefixes_overlap(left: IpNet, right: IpNet) -> bool {
         && (left.contains(&right.network()) || right.contains(&left.network()))
 }
 
-fn wildcard_match(pattern: &str, value: &str) -> bool {
+pub(crate) fn wildcard_match(pattern: &str, value: &str) -> bool {
     let pattern = pattern.as_bytes();
     let value = value.as_bytes();
     let mut previous = vec![false; value.len() + 1];

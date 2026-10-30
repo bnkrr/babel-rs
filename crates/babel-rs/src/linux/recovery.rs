@@ -93,7 +93,7 @@ pub(super) fn boot_ms() -> Result<u64, std::io::Error> {
 impl Recovery {
     fn load(
         config: &Config,
-        mut routes: Vec<RouteIdentity>,
+        routes: Vec<RouteIdentity>,
         mut rules: Vec<RuleIdentity>,
         now: u64,
     ) -> Result<Self, LinuxError> {
@@ -107,22 +107,21 @@ impl Recovery {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Journal::default(),
             Err(e) => return Err(e.into()),
         };
-        // Kernel entries no longer carry their Babel source key. Retaining an
-        // old table after its view policy changed could therefore resurrect an
-        // ordinary route that the new Domain scope explicitly rejects.
-        let export_scope = format!("{:?}", config.export);
-        let scoped = config
-            .export
-            .views
-            .iter()
-            .any(|view| view.ordinary_prefixes.is_some());
+        // Kernel entries no longer carry their original Babel source key or
+        // admission context. A changed policy conservatively revokes recovery.
+        let export_scope = recovery_scope(config)?;
+        let scoped = config.policy.import != Default::default()
+            || config
+                .export
+                .views
+                .iter()
+                .any(|view| view.filter != Default::default());
         let scope_changed = if previous.export_scope.is_empty() {
             scoped
         } else {
             previous.export_scope != export_scope
         };
         if scope_changed {
-            routes.clear();
             rules.clear();
         }
         let compatible = previous.version == 1
@@ -138,7 +137,13 @@ impl Recovery {
         } else {
             HashMap::new()
         };
-        let deadline = now.saturating_add(u64::from(config.restart_recovery_seconds) * 1000);
+        // Persist rejected identities with expired deadlines, rather than
+        // forgetting them. A crash before kernel deletion must not renew them.
+        let deadline = if scope_changed {
+            0
+        } else {
+            now.saturating_add(u64::from(config.restart_recovery_seconds) * 1000)
+        };
         let pending = routes
             .into_iter()
             .map(|route| PendingRoute {
@@ -285,7 +290,7 @@ fn eligible_rule(rule: &RuleIdentity, export: &Export) -> bool {
                 table: rule.table,
                 source: Some(rule.source),
                 rule_priority: None,
-                ordinary_prefixes: None,
+                filter: Default::default(),
             }) == rule.priority))
 }
 
@@ -334,12 +339,16 @@ impl LinuxExporter {
         let _guard = self.apply_lock.lock().await;
         let indices = allowed_indices(config)?;
         let mut recovery = self.recovery.lock().await;
+        let scope_changed = recovery.journal.export_scope != recovery_scope(config)?;
         // Keep the old deadline as a tombstone until deletion succeeds.
         for p in &mut recovery.journal.pending {
-            if !indices.contains(&p.route.output_interface) {
+            if scope_changed || !indices.contains(&p.route.output_interface) {
                 p.deadline_ms = 0;
             }
         }
+        // Keep the startup scope in the journal through live reload. Newly
+        // installed routes also lack their admission context; the next restart
+        // must detect the change even if this process dies before reconciliation.
         recovery.dirty = true;
         let write = recovery.write_request()?;
         drop(recovery);
@@ -347,6 +356,11 @@ impl LinuxExporter {
         self.recovery.lock().await.saved();
         Ok(())
     }
+}
+
+fn recovery_scope(config: &Config) -> Result<String, LinuxError> {
+    serde_json::to_string(&(&config.export, &config.policy.import))
+        .map_err(|error| std::io::Error::other(error).into())
 }
 
 #[cfg(test)]
@@ -365,21 +379,35 @@ mod tests {
     }
 
     #[test]
-    fn changed_view_scope_does_not_retain_old_kernel_routes() {
-        let root = std::env::temp_dir().join(format!("babel-fib-scope-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let mut config=Config::parse(&format!(
-            "state_file = {:?}\nrestart_recovery_seconds = 10\n[[interfaces]]\nmatch = [\"wg*\"]\n[export]\n[[export.views]]\ntable = 201\nordinary_prefixes = [\"192.0.2.0/24\"]\n",
-            root.join("state").to_str().unwrap())).unwrap();
-        let routes = vec![route("192.0.2.1/32")];
-        let first = Recovery::load(&config, routes.clone(), vec![], 1000).unwrap();
-        assert_eq!(first.remaining(1000), (0, 0));
-        let unchanged = Recovery::load(&config, routes.clone(), vec![], 2000).unwrap();
-        assert_eq!(unchanged.remaining(2000), (1, 10_000));
-        config.export.views[0].ordinary_prefixes = Some(vec!["198.51.100.0/24".parse().unwrap()]);
-        let changed = Recovery::load(&config, routes, vec![], 3000).unwrap();
-        assert_eq!(changed.remaining(3000), (0, 0));
-        std::fs::remove_dir_all(root).unwrap();
+    fn changed_scope_rejection_survives_crash_before_kernel_cleanup() {
+        for import in [false, true] {
+            let root = std::env::temp_dir()
+                .join(format!("babel-fib-scope-{}-{import}", std::process::id()));
+            std::fs::create_dir_all(&root).unwrap();
+            let mut config = Config::parse(&format!(
+                "state_file = {:?}\nrestart_recovery_seconds = 10\n[[interfaces]]\nmatch = [\"wg*\"]\n[export]\n[[export.views]]\ntable = 201\n",
+                root.join("state").to_str().unwrap())).unwrap();
+            let routes = vec![route("192.0.2.1/32")];
+            let first = Recovery::load(&config, routes.clone(), vec![], 1000).unwrap();
+            assert_eq!(first.remaining(1000), (1, 10_000));
+            if import {
+                config.policy.import.default = crate::policy::Action::Deny;
+            } else {
+                config.export.views[0].filter.default = crate::policy::Action::Deny;
+            }
+            let changed = Recovery::load(&config, routes.clone(), vec![], 2000).unwrap();
+            assert_eq!(changed.remaining(2000), (0, 0));
+            // Kernel still has the old route: simulate death before apply.
+            let restarted = Recovery::load(&config, routes.clone(), vec![], 3000).unwrap();
+            assert!(!restarted.keep(&routes[0], &HashSet::new(), 3000));
+            assert_eq!(restarted.remaining(3000), (0, 0));
+            // Once kernel deletion completes, a genuinely fresh installation
+            // can be recovered on a later restart.
+            Recovery::load(&config, vec![], vec![], 4000).unwrap();
+            let fresh = Recovery::load(&config, routes, vec![], 5000).unwrap();
+            assert_eq!(fresh.remaining(5000), (1, 10_000));
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -426,7 +454,7 @@ mod tests {
                 source: Some(source),
                 table: export.source_table_base,
                 rule_priority: None,
-                ordinary_prefixes: None,
+                filter: Default::default(),
             }),
         };
         assert!(eligible_rule(&rule, &export));

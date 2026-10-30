@@ -49,6 +49,7 @@ inspect cleanup outcomes before reusing the host.
 | `rfc-boundaries` | IPv4 control with IPv6 disabled and MTU 576; control-family reload, independent RTT and unnumbered ICMPv4; `netns-rfc-boundaries.py` |
 | `general` | Shared LAN, live IPv4 next-hop/address changes, asymmetric and partial loss; `netns-general.py` |
 | `route-policy` | Live runtime import/export replacement, retained adjacency, withdrawal and recovery; `netns-route-policy.py` |
+| `daemon-policy` | Dual-stack TOML import, announcement and independent table filters, source-zero matching, reload validation and withdrawal holds; `netns-daemon-policy.py` |
 | `mac-sadr` | Both MAC algorithms, wrong-key isolation, rotation/restart, MTU splitting, IPv4/IPv6 overlapping-source transit and cleanup; `netns-mac-sadr.py` |
 | `three-node` | Multi-hop convergence, link failure, withdrawal and recovery; `netns-three-node.sh` |
 | `rtt`, `rtt-multipath` | Timestamp exchange and actual delayed-path selection/hysteresis; `netns-rtt.sh`, `netns-rtt-multipath.sh` |

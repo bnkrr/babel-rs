@@ -13,7 +13,7 @@ published without uploading crates, and crate publication can happen later.
 | Local `freeze/...` tag | Neither | Local candidate bookkeeping |
 
 `X.Y.Z` must be a numeric MAJOR.MINOR.PATCH matching the workspace and dependency
-versions; `v0.7.0` is valid. Suffixes such as `-release` and prerelease/build
+versions; `v0.8.0` is valid. Suffixes such as `-release` and prerelease/build
 suffixes are not accepted by this automation. The project retains the ordinary
 [0.x compatibility policy](../guide/support.md#api-compatibility).
 
@@ -32,7 +32,7 @@ pushes do not publish. Do not move version tags after sharing them.
    to keep unrelated work separate.
 3. Run the applicable source, archive and binary checks below. Record the commit,
    toolchains, results, Cargo.lock checksum and artifact checksums locally.
-4. Create an annotated local freeze tag, for example `freeze/0.7.0-candidate.1`.
+4. Create an annotated local freeze tag, for example `freeze/0.8.0-candidate.1`.
    Keep its source and artifacts available for review. A content change requires
    a new candidate/tag and the affected checks; preserve existing freeze tags.
 
@@ -88,8 +88,8 @@ Choose the reviewed commit with the version and changelog already updated. For
 example, if that commit is HEAD:
 
 ```sh
-git tag -a v0.7.0 HEAD -m 'babel-rs 0.7.0'
-git push origin v0.7.0
+git tag -a v0.8.0 HEAD -m 'babel-rs 0.8.0'
+git push origin v0.8.0
 ```
 
 The workflow extracts the matching changelog section as release notes and adds
@@ -114,11 +114,11 @@ for the independent crate workflow.
 After the ordinary version tag exists, select versions for crates.io explicitly:
 
 ```sh
-git tag -a publish/v0.7.0 'v0.7.0^{commit}' -m 'Publish crates 0.7.0'
-git push origin publish/v0.7.0
+git tag -a publish/v0.8.0 'v0.8.0^{commit}' -m 'Publish crates 0.8.0'
+git push origin publish/v0.8.0
 ```
 
-`publish/v0.7.0` must resolve to the same commit as `v0.7.0`; mismatches stop before
+`publish/v0.8.0` must resolve to the same commit as `v0.8.0`; mismatches stop before
 publication. You can skip crate uploads for some GitHub versions and publish a
 later version. There is no separate crate version sequence and no implicit
 upload when a GitHub Release is created or edited.

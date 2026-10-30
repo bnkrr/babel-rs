@@ -140,8 +140,8 @@ For live changes, create a new immutable policy and send
 must return promptly without blocking I/O, and must stay deterministic for each
 context throughout that version's lifetime. Do not silently change a shared map
 or atomic flag read by the callbacks. Parse and validate host configuration before
-replacement. This version exposes the library API; the daemon has no TOML route
-filter language yet.
+replacement. The daemon exposes the same independent stages through
+[`policy.import` and `policy.announce`](configuration.md#route-policies).
 
 Replacement removes newly rejected candidates, reselects allowed alternatives,
 refreshes announcements and repeats important updates. It preserves feasibility

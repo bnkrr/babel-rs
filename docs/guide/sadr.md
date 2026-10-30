@@ -61,27 +61,38 @@ apply more-specific routes to the wrong sources. Overlapping configured views
 remain supported, and explicit priorities are validated for their ordering.
 Export-policy reload reevaluates the routing policy as well as kernel state.
 
-An external Domain manager can restrict ordinary destination inheritance on
-each explicitly configured view:
+Explicit views can optionally filter finite logical routes before resolving
+source precedence. For example, this additional ordinary table receives only
+selected destinations within a chosen prefix:
 
 ```toml
 [[export.views]]
-table = 20001
-source = "10.100.1.0/24"
-ordinary_prefixes = ["10.100.1.0/24", "10.100.3.0/24", "fd78::/48"]
+table = 20002
+
+[export.views.filter]
+default = "deny"
+
+[[export.views.filter.rules]]
+action = "allow"
+destination = { prefix = "192.0.2.0/24", match = "within" }
 ```
 
-An ordinary route is included only when its entire destination prefix is
-contained in an allowed prefix. Omitting `ordinary_prefixes` preserves normal
-complete-view inheritance; an empty list allows no ordinary destinations in
-that view. This does not filter source-specific exits by their destination.
-The import/announcement policy rejects an ordinary candidate unless at least
-one same-family/ordinary view admits it, so an unwanted prefix cannot remain
-a selected transit path merely because its FIB projection was omitted.
-Withdrawals use the same projection limits. Reload changes reevaluate existing
-candidates; changing export scope also invalidates startup FIB recovery from the
-old scope. These are local policy and Linux projection settings, not Babel wire
-extensions or Domain identifiers.
+The same source/destination matching syntax is used by
+[protocol policies](configuration.md#route-policies). A source-view filter sees
+the **original** Babel source prefix, before it is projected into a
+destination-only table. Omitting the filter preserves complete inheritance.
+Automatic source views remain complete and do not inherit an explicit view's
+filter. Unreachable withdrawal holds are never removed by these filters.
+
+Selective export is an explicit host forwarding policy: omitting a route from
+one table does not reject it from the protocol RIB or stop its announcement.
+The host must ensure that the tables/rules actually used for transit realize
+advertised reachability. A filtered source view can choose a different path from
+the full RIB, for example a source-specific default after excluding a more
+specific ordinary destination. Such a configuration does not provide the default
+complete-RIB SADR forwarding guarantee. Use complete views for normal Babel
+transit; coordinate selective tables with the host's forwarding and protocol
+policies. Kernel table layout alone does not identify independent Babel instances.
 
 These views represent the selected Babel RIB and its withdrawal holds. Kernel
 connected/static routes are not automatically redistributed or copied into

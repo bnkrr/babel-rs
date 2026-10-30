@@ -51,6 +51,70 @@ sudo ip -6 rule del priority 20000 table 20000
 
 Source views and their ordering are described in [SADR](sadr.md).
 
+## Route policies
+
+Policies are optional. By default the daemon accepts protocol-valid routes,
+announces according to the protocol, and installs the complete selected routing
+view. Accepted backup candidates are not all installed. Fixed protocol and
+forwarding-capability checks apply regardless of user rules.
+
+`policy.import` controls received finite candidates. `policy.announce` controls
+finite announcements on outgoing interfaces, including local origins. A filter
+on `export.views` selects finite learned routes for that table before source
+precedence is resolved. These policies are independent: omitting an install
+filter needs no duplicate of the import rules, and filtering a table never
+implicitly changes admission or announcement.
+
+```toml
+[policy.import]
+default = "allow"
+
+# Reject ordinary IPv4 default routes, while accepting source-specific defaults.
+[[policy.import.rules]]
+action = "deny"
+source = { prefix = "0.0.0.0/0", match = "exact" }
+destination = { prefix = "0.0.0.0/0", match = "exact" }
+
+[policy.announce]
+default = "allow"
+
+# Only local origins may be announced on these interfaces.
+[[policy.announce.rules]]
+action = "deny"
+interfaces = ["uplink*"]
+locally_originated = false
+```
+
+Rules run in order; the first matching rule decides `allow` or `deny`. If none
+matches, `default` applies (omitted means `allow`). Conditions in one rule are
+ANDed; patterns inside `interfaces` are ORed and use the interface glob syntax.
+An empty rule condition matches every route. An omitted condition is unrestricted.
+
+| Condition | Meaning / supported stages |
+| --- | --- |
+| `source`, `destination` | Route-prefix match; all three stages |
+| `interfaces` | Receiving interface for import, outgoing interface for announce |
+| `neighbor` | Exact address of the sending Babel speaker; import only |
+| `locally_originated` | Whether this node originated the announcement; announce only |
+
+Prefix conditions require `prefix` and `match`: `exact` compares canonical
+prefixes, while `within` includes that prefix and its more-specific subnets.
+They match route attributes, not packet addresses, and never rewrite a route.
+Ordinary routes have an effective source of `0.0.0.0/0` or `::/0`; use an exact
+zero-source match to select them. Leaving `source` out matches both ordinary
+and source-specific routes. IPv4 and IPv6 conditions never match each other.
+Unknown fields, contradictory address families and unsupported stage conditions
+fail configuration validation.
+
+Reload reevaluates candidates and announcements using the new policy. Import
+denial does not remove local origins; announcement denial does not remove local
+selected routes. Relaxing import rules requests fresh updates. Retractions and
+unreachable withdrawal holds bypass filters so filtering cannot suppress cleanup
+or prematurely permit fallback through a shorter route. Kernel changes converge
+asynchronously; reload acknowledgement is not a kernel transaction or forwarding
+barrier. See [embedding](embedding.md#route-admission-and-announcement-policy) for
+the corresponding library API and [SADR](sadr.md) for per-table filters.
+
 ## Systemd installation
 
 The supplied [unit](../../packaging/systemd/babel-rs.service) expects the binary at
@@ -102,7 +166,7 @@ protocol and export tables, including automatic source tables and their rules.
 The protocol RIB starts empty: retained routes are never advertised as learned
 routes. A newly selected finite route replaces the old entry; unconfirmed entries
 are removed on expiry by the two-second exporter reconciliation loop. Explicit
-export-policy changes revoke recovery; excluded interfaces lose retained routes.
+export or import-policy changes revoke recovery; excluded interfaces lose retained routes.
 
 The adjacent `<state_file>.fib-recovery.json` journal records per-route deadlines
 using boot time and namespace identity. Repeated crashes do not extend an
@@ -112,6 +176,13 @@ resetting the window. IPv4 and IPv6 use the same policy. Expiry requires the dae
 to run; if it never restarts, an external supervisor must retire its resources.
 This is local forwarding retention, not a wire-protocol graceful-restart extension;
 remote peers still apply normal Babel timers.
+
+Recovery also records the startup export/import scope. A changed scope rejects
+old entries conservatively because kernel routes do not retain their full Babel
+admission context. Rejected identities keep expired deadlines until cleanup, so
+a second crash cannot restore their eligibility. After a live scope change, the
+next restart conservatively skips retention once, even for freshly learned routes.
+An announcement-only policy change does not invalidate forwarding recovery.
 
 Optional `[limits]` controls global neighbors, global candidates, and candidates
 per neighbor. It uses built-in defaults when omitted and requires a restart to

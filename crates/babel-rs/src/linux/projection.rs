@@ -9,7 +9,7 @@ pub(super) fn project_routes(
     let mut projected: HashMap<(u32, IpNet), ProjectedRoute> = HashMap::new();
     for view in views {
         for route in &snapshot.routes {
-            if !route_matches_view(view, route.key) {
+            if !route_matches_view(view, route.key) || !view.filter.allows_key(route.key) {
                 continue;
             }
             let source_specific = route.key.source.is_some();
@@ -30,6 +30,8 @@ pub(super) fn project_routes(
             }
         }
         for key in &snapshot.unreachable {
+            // A filter cannot remove the protocol's withdrawal hold and let
+            // packets fall through to a less-specific finite route.
             if !route_matches_view(view, *key) {
                 continue;
             }
@@ -58,9 +60,6 @@ pub(super) fn project_routes(
 }
 
 fn route_matches_view(view: &ExportView, key: RouteKey) -> bool {
-    if key.source.is_none() && !view.admits_ordinary(key.destination) {
-        return false;
-    }
     match (view.source, key.source) {
         (None, None) => true,
         (Some(view_source), None) => {
@@ -136,7 +135,7 @@ pub(super) fn source_views_with_recovery(
             table,
             source: Some(source),
             rule_priority: None,
-            ordinary_prefixes: None,
+            filter: Default::default(),
         });
     }
     Ok(views)
@@ -149,12 +148,7 @@ pub(crate) struct SourcePolicy(pub Export);
 impl SourcePolicy {
     pub(super) fn supported(&self, key: RouteKey) -> bool {
         match key.source {
-            None => self.0.views.iter().any(|view| {
-                view.admits_ordinary(key.destination)
-                    && view.source.is_none_or(|source| {
-                        source.addr().is_ipv4() == key.destination.addr().is_ipv4()
-                    })
-            }),
+            None => true,
             Some(source) => {
                 self.0.automatic_sources()
                     || self.0.views.iter().any(|view| view.source == Some(source))

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.0
+
+- Add independent daemon `policy.import`, `policy.announce`, and per-view
+  `filter` rules using source/destination prefixes with exact or subnet matches.
+  Defaults preserve complete selected-route export; optional interface,
+  sending-neighbor and local-origin conditions apply at the relevant protocol
+  stages. Protocol admission and announcement remain independent of which
+  selected routes each Linux table installs.
+- Preserve protocol withdrawal holds across install filtering, and persist
+  expired recovery identities when import/export policy changes so a second
+  crash before kernel cleanup cannot revive rejected routes.
+- Add dual-stack daemon policy reload regressions and scope-change crash tests.
+
+Migration from 0.7: released configurations remain valid. Omitting the new rules
+keeps protocol routes allowed and export views complete. Filtering an export
+table alone does not stop accepting or advertising a route; configure protocol
+policy separately when restricting participation. Source-view filters match
+the original Babel source prefix before Linux projection. Review the
+[policy configuration](docs/guide/configuration.md#route-policies) and
+[selective-export limits](docs/guide/sadr.md) before deploying filtered views.
+
 ## 0.7.0
 
 - Add `shutdown_policy = "retain"` for planned restarts. Retain checkpoints

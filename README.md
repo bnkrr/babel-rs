@@ -10,7 +10,7 @@ belong to the host. babeld and BIRD are interoperability peers, not dependencies
 
 ## Status
 
-Version **0.7.0 is usable for routing and embedding** within the documented
+Version **0.8.0 is usable for routing and embedding** within the documented
 [platform support and operational limits](docs/guide/support.md).
 
 Most of this project's code was written by **OpenAI Codex**. Tests and RFC review
@@ -40,6 +40,8 @@ daemon. See [platform support](docs/guide/support.md) for the tested scope.
 - Optional HMAC-SHA256 or BLAKE2s-128 authentication, replay protection, and key rotation.
 - Dynamic interface attachment, configuration reload, route-table reconciliation,
   bounded resource queues, and status inspection.
+- Independent daemon rules for route import, announcement, and installation
+  in each export table, with source and destination prefix matching.
 - Library hooks for route admission, announcements, metrics, persistence, and export.
 
 See [protocol coverage](docs/development/conformance.md) for supported RFCs and

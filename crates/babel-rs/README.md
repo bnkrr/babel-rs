@@ -12,7 +12,7 @@ a synchronous engine. See the [project overview](https://github.com/bnkrr/babel-
 
 ## Status and compatibility
 
-Version 0.7.0 is usable within the documented support scope. Most project code
+Version 0.8.0 is usable within the documented support scope. Most project code
 was written by **OpenAI Codex**. Automated tests and RFC review do not guarantee
 correctness or replace an independent security audit. Pin deployed versions,
 validate upgrades on your topology, and review the
@@ -24,7 +24,7 @@ breaking API or behavior changes use a new 0.x minor version.
 Linux is required. For a published crate, install with Rust 1.90 or newer:
 
 ```sh
-cargo install babel-rs --version '=0.7.0' --locked
+cargo install babel-rs --version '=0.8.0' --locked
 ```
 
 Alternatively, published [GitHub Releases](https://github.com/bnkrr/babel-rs/releases)
